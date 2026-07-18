@@ -1,0 +1,1680 @@
+# QuietCool Fan Controller - firmware-verified CMT2300A protocol
+#
+# The SX127x packet engine emits the eight-byte 0xAA preamble, 0x2D 0xD4
+# sync word, and variable payload-length byte. Scripts send the recovered
+# six-byte payload only: the NVS-persisted four-byte sender ID followed by a
+# repeated command. The checked-in seed CB 00 47 39 preserves this unit.
+# CRC, whitening, Manchester encoding, and FEC are disabled.
+#
+# RF transmission only ever happens from ONE place: the queued core script
+# tx_burst, which contains the only send_packet call in this firmware. It
+# is invoked by five thin, delay-free wrapper scripts, all user-initiated:
+#   1. The four fixed state scripts (send_off/send_low/send_medium/send_high),
+#      invoked by the fan entity's on_state automation whenever the entity's
+#      control path (buttons, physical button, or a Home Assistant fan
+#      command) changes it.
+#   2. The speed-aware send_timer script, invoked directly by the Timer
+#      buttons.
+# tx_burst's mode: queued preserves press order, so a rapid Off->High press,
+# a same-script re-press, or a timer correction can never interleave their
+# frames on air or be silently dropped.
+# Received RF frames and Home Assistant temperature sensors are display-only
+# and never reach a script that transmits. See rf_echo_guard below.
+
+substitutions:
+  # Device identity. Substitution-based so a second physical controller can
+  # reuse this whole file unchanged via a tiny wrapper YAML that overrides
+  # these (see quietcool-lora32-upstairs.yaml): ESPHome gives the including
+  # file's substitutions precedence over a package's.
+  device_name: quietcool-lora32
+  device_friendly_name: "QuietCool RF Controller"
+  fallback_ap_ssid: "QuietCool-LoRa32"
+
+  # Compile-time onboarding seed, deliberately substitution-based and
+  # !secret-free so third parties can set it to 0x00000000 and learn their
+  # own OEM remote without packet captures or firmware extraction. This
+  # default preserves this installation's verified on-air sender bytes.
+  quietcool_sender_id: "0xCB004739"
+
+  # Stable Home Assistant display-source aliases. This installation points
+  # them at UI-editable template helpers; third-party builds can re-point any
+  # source here at compile time without changing the sensor/display blocks.
+  display_indoor_entity: "sensor.quietcool_display_indoor"
+  display_outdoor_entity: "sensor.quietcool_display_outdoor"
+  display_attic_entity: "sensor.quietcool_display_attic"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      - logger.log:
+          level: WARN
+          format: "=== QuietCool CMT2300A - 433.920 MHz, 2.4 kbps 2-FSK ==="
+      - lambda: |-
+          // Seed the NVS-persisted sender only when it is unprovisioned AND
+          // a prior Forget hasn't suppressed the compiled default (FIX 2:
+          // NVS restore at priority 800 always runs before this on_boot
+          // trigger at priority -100, so without the suppression flag a
+          // Forget would silently revert on the very next reboot on a
+          // seeded build). A learned/nonzero value always wins across
+          // reboot and OTA.
+          const uint32_t sender_seed = ${quietcool_sender_id};
+          if (id(learned_sender_id) == 0 && id(seed_suppressed)) {
+            ESP_LOGW("LEARN", "Compiled default sender ID suppressed by a prior Forget; staying unprovisioned");
+          } else if (id(learned_sender_id) == 0 && sender_seed != 0) {
+            id(learned_sender_id) = sender_seed;
+            learned_sender_id->update();
+            global_preferences->sync();
+            // Logged distinctly from an accepted learn (see the RX learn
+            // branch below) so this compiled value can never be mistaken
+            // for a value actually learned from an OEM remote.
+            ESP_LOGW("LEARN", "Seeding compiled default sender ID from quietcool_sender_id substitution");
+          }
+
+          uint32_t sender_id = id(learned_sender_id);
+          if (sender_id == 0) {
+            id(remote_sender_id_sensor).publish_state("unset");
+            id(learn_active) = true;
+            id(learn_auto_mode) = true;
+            id(learn_window_started) = millis();
+            id(learn_auto_armed_at) = millis();
+            id(learn_candidate_id) = 0;
+            id(learn_candidate_first_time) = 0;
+            ESP_LOGW("LEARN", "No sender ID provisioned; auto-learn armed for up to 15 minutes to learn an OEM remote");
+          } else {
+            char sender_text[12];
+            snprintf(sender_text, sizeof(sender_text), "%02X %02X %02X %02X",
+                     (unsigned int) ((sender_id >> 24) & 0xFF),
+                     (unsigned int) ((sender_id >> 16) & 0xFF),
+                     (unsigned int) ((sender_id >> 8) & 0xFF),
+                     (unsigned int) (sender_id & 0xFF));
+            id(remote_sender_id_sensor).publish_state(sender_text);
+            ESP_LOGW("BOOT", "Device ID: %s", sender_text);
+          }
+
+          // Diagnostics-only initialization; none of this can cause a
+          // boot-time TX. Text-sensor publication above is telemetry only.
+          id(tx_count_sensor).publish_state(0);
+          id(rx_valid_count_sensor).publish_state(0);
+          id(rx_rejected_count_sensor).publish_state(0);
+          id(last_tx_command_sensor).publish_state("none");
+          id(last_rx_frame_sensor).publish_state("none");
+
+          // Raw member write ONLY - no publish_state(), so on_state (and
+          // therefore TX) never fires here. With restore_mode: NO_RESTORE,
+          // Fan::speed starts at its class default of 0 (esphome/components/
+          // fan/fan.h). ESPHome's FanCall::validate_() maps "turn on with no
+          // explicit speed while speed == 0" to full speed (High, since
+          // speed_count: 3 below), so a bare turn-on call from Home
+          // Assistant after boot/OTA would otherwise unexpectedly run the
+          // fan at High.
+          // Pre-seeding speed to 1 (Low) - a plain int field write with no
+          // side effects - gives a sane default with no transmission.
+          id(quietcool_fan).speed = 1;
+
+esp32:
+  board: ttgo-lora32-v21
+  framework:
+    type: arduino
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret quietcool_lora32_api_key
+
+ota:
+  platform: esphome
+  password: !secret quietcool_lora32_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${fallback_ap_ssid}
+    password: !secret quietcool_lora32_fallback_ap_password
+
+captive_portal:
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  # 400 kHz (SSD1306-supported fast mode). At the previous 50 kHz default a
+  # full 128x64 frame push took ~190 ms, capping the fan-icon animation at
+  # ~2 fps and risking loop stalls; at 400 kHz a full frame push is ~20-25 ms,
+  # comfortably inside the display's 250 ms update_interval (see display:
+  # below) with plenty of loop budget left for RF/API/sensors.
+  frequency: 400kHz
+
+spi:
+  clk_pin: GPIO5
+  miso_pin: GPIO19
+  mosi_pin: GPIO27
+
+# =============================================================================
+# Global state
+# =============================================================================
+globals:
+  - id: learned_sender_id
+    type: uint32_t
+    restore_value: true
+    initial_value: "0x00000000"
+    # Big-endian four-byte QuietCool sender ID. Zero is the safe
+    # unprovisioned sentinel because every real OEM sender starts 0xCB.
+    # ESPHome persists this global in NVS, so it survives reboot and OTA.
+
+  - id: seed_suppressed
+    type: bool
+    restore_value: true
+    initial_value: "false"
+    # FIX 2: on a seeded build (quietcool_sender_id nonzero), on_boot would
+    # otherwise reseed the compiled default every time learned_sender_id
+    # reads 0 - silently reverting a Forget on the very next reboot, since
+    # NVS restore (priority 800) always runs before on_boot (priority
+    # -100). Forget sets this true so the reseed is skipped; a successful
+    # learn clears it. Persisted in NVS exactly like learned_sender_id, so
+    # a Forget durably stays forgotten across reboot/OTA.
+
+  - id: learn_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: learn_auto_mode
+    type: bool
+    restore_value: false
+    initial_value: "false"
+    # Auto mode stays armed while the sender remains unset. Manual mode is
+    # bounded by the 120-second timeout in the learn interval below.
+
+  - id: learn_window_started
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: learn_auto_armed_at
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # FIX 1a: millis() timestamp of the moment unprovisioned auto-learn was
+    # (re-)armed - at boot, or by a Forget. The installer is only known to
+    # be physically present at that moment, so auto-learn's 120-second
+    # windows may only keep re-arming for 15 minutes after this timestamp
+    # (see the learn-window interval below); after that ceiling it disarms
+    # fully, same as an expired manual window. Re-arming past the ceiling
+    # requires a deliberate local/HA action (Learn Remote ID button or the
+    # PRG 5-10s hold), each of which grants its own bounded 120s window.
+
+  - id: learn_candidate_id
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: learn_candidate_first_time
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # The first valid frame's millis() timestamp. A matching sender is
+    # accepted only >600 ms and <60 s later, across a different RF burst.
+
+  - id: learn_confirm_until
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # Rollover-safe deadline for the brief OLED "LEARNED / ID SAVED"
+    # confirmation. Cosmetic only; never read by an RF/TX path.
+
+  - id: tx_burst_sender_id
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # Snapshot of learned_sender_id taken only after tx_burst's zero guard.
+    # mode: queued guarantees one snapshot owns all three frames, so a
+    # concurrent Forget/re-learn cannot mix sender bytes inside a burst.
+
+  - id: rf_echo_guard
+    type: bool
+    restore_value: false
+    initial_value: "false"
+    # While true, the fan entity's on_state automation (which transmits)
+    # must not act. Set around every publish_state() that reports state
+    # observed over RF or set by a timer, so RX/timer bookkeeping can never
+    # be echoed back out over RF.
+
+  - id: last_valid_rx_command
+    type: uint8_t
+    restore_value: false
+    initial_value: "0x00"
+
+  - id: last_valid_rx_time
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # millis() timestamp of the last accepted state-command frame, used to
+    # deduplicate the OEM's three-frame bursts.
+
+  - id: timer_tx_command
+    type: uint8_t
+    restore_value: false
+    initial_value: "0x00"
+
+  - id: timer_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+    # True while a device-local timer countdown is running - set by our own
+    # send_timer TX, by a validated RX-observed timer frame, or cleared by
+    # any non-timer state TX (Off/Low/Medium/High, i.e. any x0/xF command)
+    # or by countdown reaching zero. Always starts false after a reboot;
+    # see README "Timer countdown" for why that's unavoidable.
+
+  - id: timer_expiry_millis
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # millis() timestamp the active timer expires at. Only meaningful while
+    # timer_active is true. Every comparison against it uses rollover-safe
+    # signed-difference arithmetic - (int32_t)(timer_expiry_millis -
+    # millis()) - so a millis() wraparound (~49.7 days of uptime) can never
+    # produce a false "expired" or false "still running" result.
+
+  - id: fan_anim_frame
+    type: int
+    restore_value: false
+    initial_value: "0"
+    # Index [0, 12) into the twelve pre-rendered fan-rotation frame images
+    # (fan_frame_0..11 - see tools/generate_fan_frames.py), advanced once
+    # per display refresh - ONLY while the fan is running - by the display
+    # lambda below (KEEP IN SYNC: FAN_ANIM; mirrored in
+    # tools/render_display.py). Purely cosmetic animation state: read only
+    # inside the display lambda, never written anywhere else, and never
+    # read by any TX/RX/actuation path.
+
+  - id: battery_icon_state
+    type: int
+    restore_value: false
+    initial_value: "-1"
+    # Persists the currently-displayed battery icon tier (0=hidden,
+    # 1=alert, 2=outline, 3=full, 4=charging, 5=plugged) across display
+    # frames so a VBAT reading sitting right at a threshold can't flap the
+    # icon between adjacent tiers every ~30s ADC sample (KEEP IN SYNC:
+    # BATTERY_ICON below; mirrored in tools/render_display.py). -1 means
+    # "no reading yet". Purely cosmetic rendering state, exactly like
+    # fan_anim_frame above: read and written only inside the display
+    # lambda, never by any TX/RX/timer/battery-sensor path.
+
+# =============================================================================
+# SX127x radio - firmware-derived CMT2300A-compatible profile
+# =============================================================================
+sx127x:
+  id: lora_radio
+  cs_pin: GPIO18
+  rst_pin: GPIO23
+  dio0_pin: GPIO26
+  frequency: 433920000
+  modulation: FSK
+  packet_mode: true
+  bitsync: true
+  bitrate: 2400
+  deviation: 10000
+  sync_value: [0x2D, 0xD4]
+  # Variable length makes the SX127x insert 0x06 before each six-byte payload.
+  payload_length: 0
+  crc_enable: false
+  preamble_size: 8
+  preamble_polarity: 0xAA
+  preamble_errors: 0
+  pa_pin: BOOST
+  pa_power: 17
+  on_packet:
+    # Strict RX validation. Extended listening showed noise callbacks from
+    # 0 to 42 bytes with no CRC to reject them automatically, so every
+    # field below is checked before any state is published. A frame that
+    # passes validation updates the fan entity's OBSERVED state directly
+    # (see the rf_echo_guard block) - it never calls turn_on()/turn_off()/
+    # make_call(), so a received frame can never trigger a transmit.
+    - lambda: |-
+        std::string hex;
+        for (uint8_t b : x) {
+          char buf[4];
+          sprintf(buf, "%02X ", b);
+          hex += buf;
+        }
+        ESP_LOGV("RX", "Raw callback: %d bytes: %s", x.size(), hex.c_str());
+
+        if (x.size() != 6) {
+          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+          ESP_LOGD("RX", "Rejected: length %d (expected 6)", x.size());
+          return;
+        }
+
+        if (x[4] != x[5]) {
+          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+          ESP_LOGD("RX", "Rejected: command byte mismatch %02X != %02X", x[4], x[5]);
+          return;
+        }
+
+        uint8_t cmd = x[4];
+
+        uint8_t speed_nibble = cmd & 0xF0;
+        uint8_t duration_nibble = cmd & 0x0F;
+        bool speed_ok = (speed_nibble == 0x90 || speed_nibble == 0xA0 || speed_nibble == 0xB0);
+        bool duration_ok = (duration_nibble == 0x0 || duration_nibble == 0x1 || duration_nibble == 0x2 ||
+                             duration_nibble == 0x4 || duration_nibble == 0x8 || duration_nibble == 0xC ||
+                             duration_nibble == 0xF);
+        // Neutral OFF, observed live from the upstairs installation's OEM
+        // remote on 2026-07-18: its Off button transmits 80 80 (speed
+        // nibble 8 = no remembered speed, duration 0 = off), unlike the
+        // downstairs remote's speed-remembered x0 form. Accepted for
+        // observed-state decoding only - never transmitted by this
+        // firmware, and 8 with any nonzero duration stays rejected until
+        // physically observed.
+        bool off_neutral = (cmd == 0x80);
+        // FIX 1b: only a real state-command frame (a speed nibble of
+        // 9/A/B with a valid duration nibble) can ever become or confirm a
+        // learn candidate. The 66 66 wake/status query is passive traffic
+        // - including a neighboring unit's own query/command exchange
+        // overheard mid-air - and deliberately does NOT qualify, so it can
+        // never be combined with a genuine button press to complete a
+        // learn from cross-talk alone.
+        bool learn_command_ok = speed_ok && duration_ok;
+        uint32_t sender_id = ((uint32_t) x[0] << 24) | ((uint32_t) x[1] << 16) |
+                             ((uint32_t) x[2] << 8) | (uint32_t) x[3];
+
+        // Learn mode is RX + storage only. It consumes every candidate
+        // frame here and ALWAYS returns before the normal observed-state
+        // path below, so learning can never publish fan state or transmit.
+        // Two matching STATE-COMMAND frames from the same 0xCB-prefixed
+        // sender are required across different bursts: >600 ms but <60 s
+        // apart. The OEM's three 45 ms repeats therefore cannot
+        // self-confirm; two distinct button presses on the OEM remote are
+        // the documented UX. A different valid sender restarts the pair.
+        if (id(learn_active)) {
+          uint32_t now = millis();
+          if (!id(learn_auto_mode) &&
+              (now - id(learn_window_started)) >= 120000UL) {
+            id(learn_active) = false;
+            id(learn_candidate_id) = 0;
+            id(learn_candidate_first_time) = 0;
+            ESP_LOGW("LEARN", "Manual learn window expired before this frame");
+            return;
+          }
+          if (x[0] != 0xCB || !learn_command_ok) {
+            id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+            ESP_LOGD("LEARN", "Ignored invalid candidate %02X %02X %02X %02X cmd %02X",
+                     x[0], x[1], x[2], x[3], cmd);
+            return;
+          }
+
+          uint32_t candidate_sender_id = sender_id;
+          if (id(learn_candidate_id) == 0 ||
+              candidate_sender_id != id(learn_candidate_id)) {
+            id(learn_candidate_id) = candidate_sender_id;
+            id(learn_candidate_first_time) = now;
+            ESP_LOGW("LEARN", "Candidate sender %02X %02X %02X %02X captured; press OEM remote again",
+                     x[0], x[1], x[2], x[3]);
+            return;
+          }
+
+          uint32_t candidate_age = now - id(learn_candidate_first_time);
+          if ((candidate_age > 600) && (candidate_age < 60000)) {
+            id(learned_sender_id) = candidate_sender_id;
+            // FIX 2: a successful learn always clears any prior Forget
+            // suppression, so a later reboot on a seeded build seeds the
+            // newly learned ID's slot correctly (it's already nonzero) and
+            // never falls back to treating this unit as still-suppressed.
+            id(seed_suppressed) = false;
+            // Restored globals normally poll for changes once per second.
+            // Push this value into its preference object now, then force
+            // the backend commit so an immediate power loss cannot lose it.
+            learned_sender_id->update();
+            seed_suppressed->update();
+            global_preferences->sync();
+            id(learn_active) = false;
+            id(learn_auto_mode) = false;
+            id(learn_candidate_id) = 0;
+            id(learn_candidate_first_time) = 0;
+            id(learn_confirm_until) = now + 5000UL;
+
+            char sender_text[12];
+            snprintf(sender_text, sizeof(sender_text), "%02X %02X %02X %02X",
+                     (unsigned int) ((candidate_sender_id >> 24) & 0xFF),
+                     (unsigned int) ((candidate_sender_id >> 16) & 0xFF),
+                     (unsigned int) ((candidate_sender_id >> 8) & 0xFF),
+                     (unsigned int) (candidate_sender_id & 0xFF));
+            id(remote_sender_id_sensor).publish_state(sender_text);
+            // Seed the duplicate-burst suppressor with the accepting
+            // frame: the 1-2 remaining 45 ms repeats of this same OEM
+            // burst now match the freshly learned sender and would
+            // otherwise fall through to the normal observed-state path
+            // and publish the LEARNING press as live fan state (seen on
+            // the upstairs onboarding 2026-07-18: entity stuck "Low"
+            // right after LEARNED). With the tracker seeded they hit the
+            // sliding dedup window and are suppressed like any other
+            // intra-burst repeat.
+            id(last_valid_rx_command) = cmd;
+            id(last_valid_rx_time) = now;
+            ESP_LOGW("LEARN", "Accepted and persisted sender ID %s from two distinct bursts", sender_text);
+            return;
+          }
+
+          if (candidate_age >= 60000) {
+            id(learn_candidate_id) = candidate_sender_id;
+            id(learn_candidate_first_time) = now;
+            ESP_LOGW("LEARN", "Candidate confirmation expired; restarted two-burst count");
+          } else {
+            ESP_LOGD("LEARN", "Same-burst candidate repeat suppressed at %lu ms",
+                     (unsigned long) candidate_age);
+          }
+          return;
+        }
+
+        // OEM firmware recognizes the CE variant of the learned sender but
+        // its branch bypasses status decoding. Meaning unestablished: log
+        // and ignore, using the learned suffix instead of a hardcoded ID.
+        if (x[0] == 0xCE && (sender_id & 0x00FFFFFFUL) ==
+            (id(learned_sender_id) & 0x00FFFFFFUL)) {
+          ESP_LOGI("RX", "CE special frame observed and ignored: %02X %02X", x[4], x[5]);
+          return;
+        }
+
+        if (sender_id != id(learned_sender_id)) {
+          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+          ESP_LOGD("RX", "Rejected: sender mismatch %02X %02X %02X %02X", x[0], x[1], x[2], x[3]);
+          return;
+        }
+
+        // Wake/status-query frame, not a fan state. Log only.
+        if (cmd == 0x66) {
+          ESP_LOGI("RX", "Wake/status query observed (66 66)");
+          return;
+        }
+
+        if (!(speed_ok && duration_ok) && !off_neutral) {
+          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+          ESP_LOGD("RX", "Rejected: invalid command byte %02X", cmd);
+          return;
+        }
+
+        // The OEM controller and this firmware both send every command as
+        // a three-frame burst with 45 ms spacing. Suppress repeats of the
+        // same command inside that window so counters/state don't triple-
+        // count. The timestamp is refreshed on suppressed duplicates too
+        // (sliding window), not only on acceptance: with a fixed reference
+        // point, a genuine second press of the same command landing after
+        // the first burst ended but still inside the old fixed window would
+        // have been swallowed as if it were still part of the first burst.
+        // Sliding the window on every duplicate keeps the 45 ms intra-burst
+        // frames suppressed while still accepting a distinct later press.
+        uint32_t now = millis();
+        bool is_duplicate =
+            (cmd == id(last_valid_rx_command)) && ((now - id(last_valid_rx_time)) < 450);
+        id(last_valid_rx_command) = cmd;
+        id(last_valid_rx_time) = now;
+        if (is_duplicate) {
+          ESP_LOGD("RX", "Duplicate burst frame %02X suppressed", cmd);
+          return;
+        }
+
+        id(rx_valid_count_sensor).publish_state(id(rx_valid_count_sensor).state + 1);
+        char rxbuf[8];
+        sprintf(rxbuf, "%02X %02X", cmd, cmd);
+        id(last_rx_frame_sensor).publish_state(rxbuf);
+        ESP_LOGI("RX", "Valid state frame accepted: %02X %02X", cmd, cmd);
+
+        // Our own TX cannot self-receive (the SX1278 is half-duplex), so
+        // this only ever triggers on genuine concurrent OEM traffic. If our
+        // queued burst is still on the way out, skip publishing this
+        // observed state (it's already counted in diagnostics above) rather
+        // than show a stale mid-command snapshot - our own burst's last
+        // frame wins on air and reflects the true, current, user-requested
+        // state, and mode: queued guarantees it goes out after this frame.
+        if (id(tx_burst).is_running()) {
+          ESP_LOGD("RX", "TX burst in flight, skipping observed-state publish for %02X", cmd);
+          return;
+        }
+
+        id(rf_echo_guard) = true;
+        if (off_neutral) {
+          // 80 80: off with no remembered speed - turn the entity off but
+          // leave its last speed untouched (there is nothing to remember
+          // from the frame itself).
+          id(quietcool_fan).state = false;
+        } else {
+          int observed_speed = 1;
+          if (speed_nibble == 0xA0) observed_speed = 2;
+          else if (speed_nibble == 0xB0) observed_speed = 3;
+          id(quietcool_fan).speed = observed_speed;
+          id(quietcool_fan).state = (duration_nibble != 0x00);
+        }
+        id(quietcool_fan).publish_state();
+        id(rf_echo_guard) = false;
+
+        // Mirror the OEM timer from this validated frame. Duration nibble
+        // 1/2/4/8/C (1/2/4/8/12 h) starts (or replaces) the device-local
+        // countdown; 0 (Off) or F (continuous) clears it - the same rule
+        // send_timer/send_off/send_low/send_medium/send_high apply on our
+        // own TX side, so an OEM remote's timer press is tracked exactly
+        // like one issued from this device. No RF is transmitted here;
+        // this only updates local bookkeeping globals and a sensor.
+        uint32_t observed_timer_hours = 0;
+        switch (duration_nibble) {
+          case 0x1: observed_timer_hours = 1; break;
+          case 0x2: observed_timer_hours = 2; break;
+          case 0x4: observed_timer_hours = 4; break;
+          case 0x8: observed_timer_hours = 8; break;
+          case 0xC: observed_timer_hours = 12; break;
+          default: observed_timer_hours = 0; break;
+        }
+        if (observed_timer_hours > 0) {
+          id(timer_active) = true;
+          id(timer_expiry_millis) = millis() + observed_timer_hours * 3600000UL;
+          id(timer_remaining_sensor).publish_state(observed_timer_hours * 60);
+        } else {
+          id(timer_active) = false;
+          id(timer_remaining_sensor).publish_state(0);
+        }
+
+# =============================================================================
+# Firmware-derived six-byte application payloads. Hardware supplies preamble,
+# sync, and the variable-length 0x06 byte. Low and High are physically verified;
+# the remaining actions still require individual physical checks.
+#
+#   OFF:  (LOW | OFF)  = 0x90 | 0x00 = 0x90
+#   LOW:  (LOW | ON)   = 0x90 | 0x0F = 0x9F
+#   MED:  (MED | ON)   = 0xA0 | 0x0F = 0xAF
+#   HIGH: (HIGH | ON)  = 0xB0 | 0x0F = 0xBF
+#
+# These four payloads are byte-identical to the previously verified firmware
+# and must not change. send_timer below computes the speed-aware
+# timer/duration byte at runtime instead of hardcoding a Low-only command.
+#
+# All RF transmission is serialized through tx_burst, the single queued
+# core script and the ONLY place send_packet is called. The four
+# fixed state scripts and send_timer are thin, delay-free wrappers: they
+# log, update timer bookkeeping, and script.execute tx_burst with their
+# command byte, then return immediately (script.execute does not block).
+# tx_burst increments diagnostics only after its unset-ID refusal guard. Because
+# tx_burst is mode: queued, a rapid Off->High press (or a same-script
+# re-press, or a timer correction) can never interleave its 3-frame bursts
+# on air or be silently dropped - queued mode preserves press order, so the
+# physically-last burst on air is always the user's actual last command.
+# =============================================================================
+script:
+  - id: tx_burst
+    mode: queued
+    max_runs: 5
+    parameters:
+      cmd: uint8_t
+    then:
+      - if:
+          condition:
+            lambda: 'return id(learned_sender_id) == 0;'
+          then:
+            - lambda: |-
+                // Hard safety stop: an unset sender must never put a
+                // sentinel/guess on air or increment TX diagnostics.
+                ESP_LOGE("TX", "Refused command %02X: Remote Sender ID is unset", cmd);
+          else:
+            - lambda: |-
+                id(tx_burst_sender_id) = id(learned_sender_id);
+                id(tx_count_sensor).publish_state(id(tx_count_sensor).state + 1);
+                const char *label = "timer";
+                if (cmd == 0x90) label = "OFF";
+                else if (cmd == 0x9F) label = "LOW";
+                else if (cmd == 0xAF) label = "MED";
+                else if (cmd == 0xBF) label = "HIGH";
+                char txbuf[24];
+                snprintf(txbuf, sizeof(txbuf), "%02X (%s)", cmd, label);
+                id(last_tx_command_sensor).publish_state(txbuf);
+            - repeat:
+                count: 3
+                then:
+                  - sx127x.send_packet:
+                      data: !lambda |-
+                        uint32_t sender_id = id(tx_burst_sender_id);
+                        return {
+                          (uint8_t) ((sender_id >> 24) & 0xFF),
+                          (uint8_t) ((sender_id >> 16) & 0xFF),
+                          (uint8_t) ((sender_id >> 8) & 0xFF),
+                          (uint8_t) ((sender_id >> 0) & 0xFF),
+                          cmd, cmd
+                        };
+                  - delay: 45ms
+
+  - id: send_off
+    then:
+      - logger.log:
+          level: WARN
+          format: "=== TX request: OFF (0x90) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          // Off is a non-timer command (duration nibble 0x0): matches the
+          // physical fan, which drops any running timer the moment a new
+          // state command is sent.
+          id(timer_active) = false;
+          id(timer_remaining_sensor).publish_state(0);
+      - script.execute:
+          id: tx_burst
+          cmd: 0x90
+
+  - id: send_low
+    then:
+      - logger.log:
+          level: WARN
+          format: "=== TX request: LOW (0x9F) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          // Continuous-on is a non-timer command (duration nibble 0xF):
+          // clears any running timer, matching the physical fan.
+          id(timer_active) = false;
+          id(timer_remaining_sensor).publish_state(0);
+      - script.execute:
+          id: tx_burst
+          cmd: 0x9F
+
+  - id: send_medium
+    then:
+      - logger.log:
+          level: WARN
+          format: "=== TX request: MEDIUM (0xAF) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          id(timer_active) = false;
+          id(timer_remaining_sensor).publish_state(0);
+      - script.execute:
+          id: tx_burst
+          cmd: 0xAF
+
+  - id: send_high
+    then:
+      - logger.log:
+          level: WARN
+          format: "=== TX request: HIGH (0xBF) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          id(timer_active) = false;
+          id(timer_remaining_sensor).publish_state(0);
+      - script.execute:
+          id: tx_burst
+          cmd: 0xBF
+
+  - id: send_timer
+    parameters:
+      duration_nibble: uint8_t
+    then:
+      - lambda: |-
+          // Speed-aware timer: combine the CURRENTLY SELECTED speed nibble
+          // (from the fan entity; Low if the fan is off/unset) with the
+          // requested duration nibble, e.g. High + 1H = 0xB1.
+          uint8_t speed_nibble = 0x90;
+          if (id(quietcool_fan).speed == 2) {
+            speed_nibble = 0xA0;
+          } else if (id(quietcool_fan).speed >= 3) {
+            speed_nibble = 0xB0;
+          }
+          id(timer_tx_command) = speed_nibble | duration_nibble;
+
+          if (id(learned_sender_id) == 0) {
+            return;
+          }
+
+          // Start (or replace) the device-local countdown mirror. The
+          // buttons wired up today only ever pass 0x1/0x2/0x4 (1/2/4 h),
+          // but the full duration-nibble map matches the RX-side decode
+          // (see on_packet below) so an 8h/12h button could be added later
+          // without touching this mapping.
+          uint32_t timer_hours = 0;
+          switch (duration_nibble) {
+            case 0x1: timer_hours = 1; break;
+            case 0x2: timer_hours = 2; break;
+            case 0x4: timer_hours = 4; break;
+            case 0x8: timer_hours = 8; break;
+            case 0xC: timer_hours = 12; break;
+            default: timer_hours = 0; break;
+          }
+          if (timer_hours > 0) {
+            id(timer_active) = true;
+            id(timer_expiry_millis) = millis() + timer_hours * 3600000UL;
+            id(timer_remaining_sensor).publish_state(timer_hours * 60);
+          }
+      - logger.log:
+          level: WARN
+          format: "=== TX: Timer command 0x%02X (speed-aware) ==="
+          args: [ "id(timer_tx_command)" ]
+      - script.execute:
+          id: tx_burst
+          cmd: !lambda 'return id(timer_tx_command);'
+      - lambda: |-
+          if (id(learned_sender_id) == 0) {
+            return;
+          }
+          // Publish the resulting on-at-speed state IMMEDIATELY (at queue
+          // time, not after the burst - tx_burst's delays run
+          // asynchronously and must never gate this), so the entity always
+          // reflects the latest user action and a later OFF press can never
+          // be visually clobbered by this timer's own bookkeeping. This
+          // goes through publish_state() directly rather than the control
+          // path, so the fan entity's on_state automation (already
+          // satisfied by the script.execute above) doesn't fire a second,
+          // redundant continuous-on command.
+          int observed_speed = 1;
+          uint8_t speed_nibble = id(timer_tx_command) & 0xF0;
+          if (speed_nibble == 0xA0) observed_speed = 2;
+          else if (speed_nibble == 0xB0) observed_speed = 3;
+
+          id(rf_echo_guard) = true;
+          id(quietcool_fan).state = true;
+          id(quietcool_fan).speed = observed_speed;
+          id(quietcool_fan).publish_state();
+          id(rf_echo_guard) = false;
+
+# =============================================================================
+# Timer expiry (device-local mirror, never transmits)
+#
+# When the physical fan's own timer reaches zero, it shuts itself off with
+# NO RF signal - there is nothing to receive. This interval mirrors that:
+# it is the only actuator for timer_active/timer_expiry_millis reaching
+# zero, and it is a periodic poll (never the display lambda, and never
+# triggered by RX), so it can never be confused with an RF event. It uses
+# the exact same rf_echo_guard + raw-field-mutation + publish_state()
+# pattern as the RX path above - never script.execute/turn_off()/
+# make_call() - so this can NEVER transmit; it only ever publishes the
+# entity's OFF state locally, same as an observed RX frame would.
+# =============================================================================
+interval:
+  - interval: 20s
+    then:
+      - lambda: |-
+          if (!id(timer_active)) {
+            return;
+          }
+          int32_t remaining_ms = (int32_t) (id(timer_expiry_millis) - millis());
+          if (remaining_ms > 0) {
+            return;
+          }
+          ESP_LOGI("TIMER", "Device-local timer expired; mirroring fan OFF (no TX)");
+          id(rf_echo_guard) = true;
+          id(quietcool_fan).state = false;
+          id(quietcool_fan).publish_state();
+          id(rf_echo_guard) = false;
+          id(timer_active) = false;
+          id(timer_remaining_sensor).publish_state(0);
+
+  # Learn-window housekeeping is deliberately separate from the verified
+  # timer mirror above. It only mutates learn globals and never reaches a
+  # fan, script, or radio action. Manual windows expire at 120 seconds;
+  # unprovisioned auto-learn re-arms its window, but FIX 1a bounds that
+  # re-arming to 15 minutes after auto-learn was (re-)armed (at boot or by
+  # a Forget - see learn_auto_armed_at above) so a parked unprovisioned
+  # unit cannot keep listening for a neighbor's ID forever. Past that
+  # ceiling it disarms fully, exactly like an expired manual window;
+  # re-arming again requires a deliberate local/HA action.
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (!id(learn_active)) {
+            return;
+          }
+          uint32_t learn_elapsed = millis() - id(learn_window_started);
+          if (learn_elapsed < 120000UL) {
+            return;
+          }
+          id(learn_candidate_id) = 0;
+          id(learn_candidate_first_time) = 0;
+          bool auto_still_unprovisioned = id(learn_auto_mode) && id(learned_sender_id) == 0;
+          bool within_auto_ceiling = (millis() - id(learn_auto_armed_at)) < 900000UL;
+          if (auto_still_unprovisioned && within_auto_ceiling) {
+            id(learn_window_started) = millis();
+            ESP_LOGW("LEARN", "Auto-learn still unprovisioned; re-armed for another 120 seconds");
+          } else {
+            id(learn_active) = false;
+            id(learn_auto_mode) = false;
+            if (auto_still_unprovisioned) {
+              ESP_LOGW("LEARN", "Auto-learn exceeded its 15-minute ceiling; disarming until a deliberate re-arm");
+            } else {
+              ESP_LOGW("LEARN", "Manual learn window expired without confirmation");
+            }
+          }
+
+# =============================================================================
+# Fan Entity
+#
+# restore_mode is explicitly NO_RESTORE: ESPHome's Fan::restore_state_()
+# calls FanRestoreState::apply(), which unconditionally calls
+# publish_state() during setup() for every other restore mode (including
+# the platform default ALWAYS_OFF). Since on_state below transmits, that
+# would fire a boot-time TX. NO_RESTORE is the only restore mode that skips
+# publish_state() entirely during setup(), so it's the only one that
+# guarantees no transmission at boot, after OTA, or after a reset.
+#
+# A single on_state automation (unconditional on every publish_state(),
+# unlike on_turn_on/on_turn_off/on_speed_set which only fire on a state or
+# speed edge) replaces the previous on_turn_on/on_turn_off/on_speed_set
+# triggers. That fixes two things at once: the "Fan OFF" button now always
+# transmits 0x90 even when the entity already believed it was off (because
+# control() always calls publish_state(), and on_state is not edge-
+# filtered), and a single state+speed change (e.g. Off -> High) can no
+# longer double-transmit from two edge-triggers firing on the same publish.
+# The rf_echo_guard check keeps RX- and timer-originated publishes silent.
+# =============================================================================
+fan:
+  - platform: template
+    name: "QuietCool Fan"
+    id: quietcool_fan
+    has_oscillating: false
+    has_direction: false
+    speed_count: 3
+    restore_mode: NO_RESTORE
+    on_state:
+      - if:
+          condition:
+            lambda: 'return !id(rf_echo_guard);'
+          then:
+            - if:
+                condition:
+                  lambda: 'return !id(quietcool_fan).state;'
+                then:
+                  - script.execute: send_off
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(quietcool_fan).speed <= 1;'
+                      then:
+                        - script.execute: send_low
+                  - if:
+                      condition:
+                        lambda: 'return id(quietcool_fan).speed == 2;'
+                      then:
+                        - script.execute: send_medium
+                  - if:
+                      condition:
+                        lambda: 'return id(quietcool_fan).speed >= 3;'
+                      then:
+                        - script.execute: send_high
+
+# =============================================================================
+# Control Buttons
+# =============================================================================
+button:
+  - platform: template
+    name: "Fan OFF"
+    icon: "mdi:fan-off"
+    on_press:
+      # fan.turn_off always calls control() -> publish_state(), and
+      # on_state (unlike the old on_turn_off) is not edge-filtered, so this
+      # transmits 0x90 every time, even if the entity already read as off.
+      - fan.turn_off: quietcool_fan
+
+  - platform: template
+    name: "Fan Low"
+    icon: "mdi:fan-speed-1"
+    on_press:
+      - fan.turn_on:
+          id: quietcool_fan
+          speed: 1
+
+  - platform: template
+    name: "Fan Medium"
+    icon: "mdi:fan-speed-2"
+    on_press:
+      - fan.turn_on:
+          id: quietcool_fan
+          speed: 2
+
+  - platform: template
+    name: "Fan High"
+    icon: "mdi:fan-speed-3"
+    on_press:
+      - fan.turn_on:
+          id: quietcool_fan
+          speed: 3
+
+  # Timer buttons: speed-aware duration commands, sent via send_timer.
+  - platform: template
+    name: "Timer 1H"
+    icon: "mdi:timer-outline"
+    on_press:
+      - script.execute:
+          id: send_timer
+          duration_nibble: 0x01
+
+  - platform: template
+    name: "Timer 2H"
+    icon: "mdi:timer-outline"
+    on_press:
+      - script.execute:
+          id: send_timer
+          duration_nibble: 0x02
+
+  - platform: template
+    name: "Timer 4H"
+    icon: "mdi:timer-outline"
+    on_press:
+      - script.execute:
+          id: send_timer
+          duration_nibble: 0x04
+
+  - platform: template
+    name: "Learn Remote ID"
+    icon: "mdi:remote"
+    on_press:
+      - lambda: |-
+          id(learn_active) = true;
+          id(learn_auto_mode) = false;
+          id(learn_window_started) = millis();
+          id(learn_candidate_id) = 0;
+          id(learn_candidate_first_time) = 0;
+          id(learn_confirm_until) = 0;
+          ESP_LOGW("LEARN", "Manual learn armed for 120 seconds; press the OEM remote twice");
+
+  - platform: template
+    name: "Forget Remote ID"
+    icon: "mdi:remote-off"
+    on_press:
+      - lambda: |-
+          id(learned_sender_id) = 0;
+          learned_sender_id->update();
+          // FIX 2: suppress on_boot's compiled-default reseed so this
+          // Forget survives the next reboot on a seeded build instead of
+          // silently reverting.
+          id(seed_suppressed) = true;
+          seed_suppressed->update();
+          global_preferences->sync();
+          id(remote_sender_id_sensor).publish_state("unset");
+          id(learn_active) = true;
+          id(learn_auto_mode) = true;
+          id(learn_window_started) = millis();
+          // FIX 1a: Forget is itself a deliberate local/HA action, so it
+          // re-establishes a fresh 15-minute auto-learn ceiling rather
+          // than inheriting whatever remained from the original boot.
+          id(learn_auto_armed_at) = millis();
+          id(learn_candidate_id) = 0;
+          id(learn_candidate_first_time) = 0;
+          id(learn_confirm_until) = 0;
+          ESP_LOGW("LEARN", "Sender ID forgotten and persisted; auto-learn armed for up to 15 minutes");
+
+  - platform: restart
+    name: "Restart"
+
+# Physical button on board (GPIO0 = PRG button)
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "PRG Button"
+    on_click:
+      - min_length: 50ms
+        max_length: 500ms
+        then:
+          # Short press: cycle speed
+          - lambda: |-
+              if (!id(quietcool_fan).state) {
+                auto call = id(quietcool_fan).turn_on();
+                call.set_speed(1);
+                call.perform();
+              } else {
+                int new_speed = id(quietcool_fan).speed + 1;
+                if (new_speed > 3) new_speed = 1;
+                auto call = id(quietcool_fan).turn_on();
+                call.set_speed(new_speed);
+                call.perform();
+              }
+      - min_length: 1000ms
+        max_length: 4999ms
+        then:
+          # Long press: turn off (unconditional - see button "Fan OFF" above)
+          - fan.turn_off: quietcool_fan
+      - min_length: 5000ms
+        max_length: 10000ms
+        then:
+          # Very long press: enter the same 120-second manual learn window
+          # as the Home Assistant button. The 5000ms boundary does not
+          # overlap the 1-4999ms unconditional-Off gesture above.
+          - lambda: |-
+              id(learn_active) = true;
+              id(learn_auto_mode) = false;
+              id(learn_window_started) = millis();
+              id(learn_candidate_id) = 0;
+              id(learn_candidate_first_time) = 0;
+              id(learn_confirm_until) = 0;
+              ESP_LOGW("LEARN", "PRG very-long-press: manual learn armed for 120 seconds");
+
+# =============================================================================
+# OLED Display - v3.3 (temperature icons + Home Assistant logo glyph)
+#
+# 128x64, two zones, left-to-right (see tools/render_display.py for a
+# pixel-accurate Python mirror of this whole block, used to generate the
+# preview PNGs in docs/display-previews/ - every section below is tagged
+# `KEEP IN SYNC: <NAME>` and the renderer carries the matching tag):
+#   LEFT  zone (x   0-54): the real `mdi:fan` glyph (see tools/
+#                          generate_fan_frames.py - NOT a hand-drawn
+#                          triangle-blade icon; v3.1's version of that read
+#                          as illegible "blades" per operator review),
+#                          pre-rendered into six rotation frames and
+#                          flipped between them (rotation speed proportional
+#                          to fan speed; a distinct static `fan-off` glyph
+#                          when off), with the state word (OFF/LOW/MED/HIGH)
+#                          centered under it, the HH:MM:SS countdown (or
+#                          nothing while continuous-on or off) centered
+#                          under that, and a compact status icon row -
+#                          WiFi signal strength, API connectivity (the
+#                          `home-assistant` logo glyph as of v3.3 - see
+#                          below), battery - pinned bottom-left,
+#                          left-to-right, evenly spaced.
+#   RIGHT zone (x 66-127): temperatures, right-aligned, each paired with a
+#                          small icon in a shared left-edge column (v3.3:
+#                          replaces the old "Out"/"At" text labels -
+#                          operator feedback: "Out/At doesn't meaningfully
+#                          tell me what's going on - icons for that would
+#                          be nice too"). Indoor (the AIOsense mean) is
+#                          dominant - largest font, topmost, paired with a
+#                          small `home-thermometer-outline` glyph. Outdoor
+#                          (`weather-sunny`) and Attic (`home-roof`) are
+#                          smaller, below it. "--" for any missing or
+#                          non-finite reading.
+# The x55-65 gap between the zones is intentionally empty breathing room -
+# v3.1's vertical status-icon column used to live there; freeing it let the
+# fan glyph sit larger and better-centered in the LEFT zone (see "v3.2
+# revisions" in README). No decorative borders, no filled chips - the
+# animated fan icon itself is the "running" indicator.
+# Learn mode/confirmation UI replaces the state-word + countdown text rows
+# in the LEFT zone without moving the fan icon (see LEARN UI below).
+# =============================================================================
+font:
+  - file: "gfonts://Roboto"
+    id: font_state
+    size: 11
+    glyphs: "OFLWMEDHIG"
+  - file: "gfonts://Roboto"
+    id: font_timer
+    size: 11
+    glyphs: "0123456789:"
+  - file: "gfonts://Roboto"
+    id: font_learn
+    size: 9
+    glyphs: "LEARNP SX2DIVOTM"
+  - file: "gfonts://Roboto"
+    id: font_learn_prompt
+    size: 8
+    # Glyph SET for the "REMOTE X2" and "ID SAVED" prompts: each unique
+    # character exactly once (ESPHome rejects duplicate glyphs).
+    glyphs: "REMOTX2 IDSAV"
+  - file: "gfonts://Roboto"
+    id: font_temp_large
+    size: 22
+    glyphs: "0123456789°F-"
+  - file: "gfonts://Roboto"
+    id: font_temp_small
+    size: 11
+    glyphs: "0123456789°F-"
+  # Material Design Icons webfont - only the glyphs actually drawn below
+  # are included (verified codepoints; see fonts/materialdesignicons.css
+  # reference used to look them up, not shipped in this repo). All icons -
+  # WiFi/API/battery status row AND the v3.3 indoor/outdoor/attic
+  # temperature-column icons - share this single 13px font so every glyph
+  # on the panel reads at one visually consistent size.
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: font_icons
+    size: 13
+    glyphs: [
+      "\U000F091F",  # wifi-strength-1 (weak)
+      "\U000F0922",  # wifi-strength-2
+      "\U000F0925",  # wifi-strength-3
+      "\U000F0928",  # wifi-strength-4 (excellent)
+      "\U000F092D",  # wifi-strength-off (disconnected)
+      "\U000F07D0",  # home-assistant, the HA logo glyph (API connected) -
+                      # v3.3: replaces the old filled `home` glyph, which
+                      # now collides semantically with the new indoor
+                      # home-thermometer-outline glyph below (see "v3.3
+                      # revisions" in README)
+      "\U000F0C9C",  # network-off-outline (API disconnected) - v3.3:
+                      # replaces `home-off`, for the same reason as above.
+                      # No slashed/hollow `home-assistant` variant exists
+                      # in this font, and a hand-drawn slash overlaid on
+                      # home-assistant's already-dense 13px silhouette
+                      # rendered as illegible noise (tried and rejected -
+                      # see README); this purpose-built MDI "off" glyph is
+                      # the most legible disconnected treatment available,
+                      # and its box-with-slash shape can't be confused
+                      # with any house-shaped icon on the panel.
+      "\U000F0083",  # battery-alert (critical, <15%) - solid body, "!" cutout
+      "\U000F008E",  # battery-outline (15-59%, non-critical/non-full) -
+                      # hollow silhouette. Deliberately NOT one of the
+                      # numbered battery-20/40/70 glyphs: at 13px 1-bit
+                      # those only differ by a faint fill band near the
+                      # icon's TOP that's imperceptible at this size (the
+                      # same illegibility failure as the old API glyph -
+                      # verified by rendering all of them side by side
+                      # before picking this set), so capacity is
+                      # collapsed to three maximally-distinct silhouettes
+                      # (alert/outline/full) instead of graduated steps.
+      "\U000F0079",  # battery, filled (60-100%) - solid body
+      "\U000F0084",  # battery-charging (topping-off voltage band) - bolt cutout
+      "\U000F06A5",  # power-plug (USB-powered; battery full or absent)
+      "\U000F0F55",  # home-thermometer-outline (indoor temperature icon) -
+                      # v3.3. Tried the filled home-thermometer (U+F0F54)
+                      # first per the operator brief; its roof+bulb fill
+                      # collapsed into a blob at 13px 1-bit, while this
+                      # hollow variant's house silhouette + thermometer
+                      # stem stays crisp (same outline-over-filled
+                      # tradeoff as battery-outline above).
+      "\U000F0599",  # weather-sunny (outdoor temperature icon) - v3.3.
+                      # Tried sun-thermometer (U+F18D6) and its outline
+                      # variant (U+F18D7) first per the brief; both
+                      # cram a dashed sun-ray glyph AND a thermometer stem
+                      # into one 13px glyph and render as noise. This
+                      # plain sun burst is crisp and unambiguous for
+                      # "outdoor" - the adjoining "<value>°F" text already
+                      # carries the temperature meaning.
+      "\U000F112B",  # home-roof (attic temperature icon) - v3.3. A clean
+                      # roof-triangle silhouette, the semantic and visual
+                      # winner for "attic" on first try - no rejected
+                      # alternates for this one.
+    ]
+
+# Pre-rendered fan-icon rotation frames. The MDI `mdi:fan` glyph (U+F0210,
+# verified against fonts/materialdesignicons-webfont.ttf's own cmap - see
+# tools/generate_fan_frames.py) is a flat 2D icon that ESPHome's display API
+# cannot rotate at runtime, so tools/generate_fan_frames.py rotates it ahead
+# of time into twelve 32x32 1-bit frames spanning the glyph's real
+# 90-degree rotational symmetry period (7.5 degrees apart - see that
+# tool's docstring for why 90 deg / 12 frames, not the 120 deg / 6 frames
+# a naive 3-blade-glyph assumption would suggest: 6 frames makes the HIGH
+# speed's +3-steps-per-refresh degenerate to alternating between just 2
+# frames instead of spinning), plus a static un-rotated `mdi:fan-off`
+# (U+F081D) frame for the off state. The display lambda below (KEEP IN
+# SYNC: FAN_ANIM) just flips between these instead of drawing a hand-drawn
+# triangle-blade icon.
+image:
+  - platform: file
+    id: fan_frame_0
+    file: "images/fan_frame_0.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_1
+    file: "images/fan_frame_1.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_2
+    file: "images/fan_frame_2.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_3
+    file: "images/fan_frame_3.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_4
+    file: "images/fan_frame_4.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_5
+    file: "images/fan_frame_5.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_6
+    file: "images/fan_frame_6.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_7
+    file: "images/fan_frame_7.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_8
+    file: "images/fan_frame_8.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_9
+    file: "images/fan_frame_9.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_10
+    file: "images/fan_frame_10.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_11
+    file: "images/fan_frame_11.png"
+    type: BINARY
+  - platform: file
+    id: fan_off_frame
+    file: "images/fan_off.png"
+    type: BINARY
+
+display:
+  - platform: ssd1306_i2c
+    id: oled
+    model: "SSD1306 128x64"
+    address: 0x3C
+    # 250ms at 400kHz i2c (see the i2c: block above) gives a smooth-enough
+    # fan-icon animation cadence without saturating the I2C bus or the main
+    # loop - a full frame push is ~20-25ms at 400kHz, versus ~190ms at the
+    # previous 50kHz default.
+    update_interval: 250ms
+    lambda: |-
+      const char *speed_names[] = {"OFF", "LOW", "MED", "HIGH"};
+      bool running = id(quietcool_fan).state;
+      int speed = id(quietcool_fan).speed;
+      int idx = (speed >= 1 && speed <= 3) ? speed : 0;
+      const char *state_str = running ? speed_names[idx] : "OFF";
+
+      // ---- KEEP IN SYNC: FAN_ANIM (tools/render_display.py: FAN_ANIM) ----
+      // Real `mdi:fan` glyph (U+F0210), pre-rendered at build time into
+      // twelve rotation frames (tools/generate_fan_frames.py) instead of a
+      // hand-drawn triangle-blade icon (v3.1's version of that read as
+      // illegible "blades" per operator review). fan_anim_frame only
+      // advances while the fan is running - it freezes in place (never
+      // resets) the instant the fan stops, at which point the display
+      // switches to the static `fan-off` frame instead - giving a static,
+      // visually distinct "off" look for free, with no extra state.
+      // Purely cosmetic: read/written only here, never by any TX/RX path.
+      //
+      // Twelve frames, not six: with only 6 frames, HIGH's +3-per-refresh
+      // step degenerates to alternating between exactly 2 frames forever
+      // (gcd(3, 6) = 3) - a flicker, not a spin. Twelve frames (still the
+      // same measured 90-degree symmetry period, just twice the angular
+      // resolution) gives +1/+2/+3 real forward cycles of 12/6/4 frames
+      // respectively - see tools/generate_fan_frames.py's docstring.
+      int frame_step = 0;
+      if (idx == 1) frame_step = 1;       // LOW
+      else if (idx == 2) frame_step = 2;  // MED
+      else if (idx == 3) frame_step = 3;  // HIGH
+      if (running) {
+        id(fan_anim_frame) = (id(fan_anim_frame) + frame_step) % 12;
+      }
+      image::Image *fan_frames[12] = {
+          id(fan_frame_0), id(fan_frame_1), id(fan_frame_2), id(fan_frame_3),
+          id(fan_frame_4), id(fan_frame_5), id(fan_frame_6), id(fan_frame_7),
+          id(fan_frame_8), id(fan_frame_9), id(fan_frame_10), id(fan_frame_11),
+      };
+      image::Image *current_fan_frame = running ? fan_frames[id(fan_anim_frame)] : id(fan_off_frame);
+      const int fan_icon_x = 11, fan_icon_y = 1;  // 32x32, LEFT zone x0-54
+      it.image(fan_icon_x, fan_icon_y, current_fan_frame);
+
+      // ---- KEEP IN SYNC: LEARN_STATE / STATE_WORD / COUNTDOWN ----
+      // Learning owns the two text rows of the LEFT zone (the state-word
+      // and countdown slots at v3.3 geometry): it replaces their normal
+      // content but leaves the fan icon and the bottom status row in
+      // place. The confirmation is a rollover-safe five-second cosmetic
+      // state set only after the sender has been committed.
+      const int left_zone_center_x = 27;
+      bool learn_confirm = id(learn_confirm_until) != 0 &&
+                           (int32_t) (id(learn_confirm_until) - millis()) > 0;
+      if (id(learn_active)) {
+        it.print(left_zone_center_x, 33, id(font_learn), TextAlign::TOP_CENTER, "LEARN");
+        it.print(left_zone_center_x, 43, id(font_learn_prompt), TextAlign::TOP_CENTER, "REMOTE X2");
+      } else if (learn_confirm) {
+        it.print(left_zone_center_x, 33, id(font_learn), TextAlign::TOP_CENTER, "LEARNED");
+        it.print(left_zone_center_x, 43, id(font_learn_prompt), TextAlign::TOP_CENTER, "ID SAVED");
+      } else {
+        // ---- KEEP IN SYNC: STATE_WORD ----
+        it.print(left_zone_center_x, 34, id(font_state), TextAlign::TOP_CENTER, state_str);
+
+        // ---- KEEP IN SYNC: COUNTDOWN (HH:MM:SS while a timer is active, blank otherwise) ----
+        // HH:MM:SS (zero-padded, ticking every second) while a device-local
+        // timer is active. Continuous-on and off render nothing here.
+        if (running && id(timer_active)) {
+          int32_t remaining_ms = (int32_t) (id(timer_expiry_millis) - millis());
+          if (remaining_ms < 0) {
+            remaining_ms = 0;
+          }
+          int hh = remaining_ms / 3600000;
+          int mm = (remaining_ms % 3600000) / 60000;
+          int ss = (remaining_ms % 60000) / 1000;
+          it.printf(left_zone_center_x, 43, id(font_timer), TextAlign::TOP_CENTER, "%02d:%02d:%02d", hh, mm, ss);
+        }
+      }
+
+      // ---- KEEP IN SYNC: STATUS_ICONS (wifi + api + battery, bottom-left horizontal row) ----
+      // Compact icon row pinned to the bottom-left corner - operator
+      // review of v3.1 required moving this off the old center vertical
+      // stack, which is now gone entirely (its freed width became
+      // breathing room before the RIGHT/temps zone; see the display: block
+      // header comment above). Left-to-right, evenly spaced, icons only.
+      const int status_row_y = 52;
+      const int status_wifi_x = 4, status_api_x = 21, status_battery_x = 38;
+      bool wifi_up = wifi::global_wifi_component->is_connected();
+      bool api_up = api::global_api_server->is_connected();
+      const char *wifi_glyph;
+      if (!wifi_up) {
+        wifi_glyph = "\U000F092D";  // wifi-strength-off (disconnected)
+      } else {
+        float rssi = id(wifi_signal_sensor).state;
+        if (rssi >= -55) wifi_glyph = "\U000F0928";       // excellent
+        else if (rssi >= -65) wifi_glyph = "\U000F0925";  // good
+        else if (rssi >= -75) wifi_glyph = "\U000F0922";  // fair
+        else wifi_glyph = "\U000F091F";                   // weak
+      }
+      it.print(status_wifi_x, status_row_y, id(font_icons), TextAlign::TOP_LEFT, wifi_glyph);
+      // home-assistant (the HA logo glyph) / network-off-outline - v3.3:
+      // replaces the v3.1/v3.2 filled home/home-off pair, which now
+      // collides semantically with the new indoor home-thermometer-
+      // outline glyph in the RIGHT zone (KEEP IN SYNC: TEMP_ICONS below).
+      // No slashed/hollow home-assistant variant exists in this font, and
+      // a hand-drawn slash overlaid on the logo's already-dense 13px
+      // silhouette rendered as illegible noise (tried and rejected - see
+      // "v3.3 revisions" in README); network-off-outline is a purpose-
+      // built MDI "off" glyph instead - its box-with-slash shape reads
+      // unmistakably distinct from every house-shaped icon on the panel.
+      const char *api_glyph = api_up ? "\U000F07D0" : "\U000F0C9C";  // home-assistant / network-off-outline
+      it.print(status_api_x, status_row_y, id(font_icons), TextAlign::TOP_LEFT, api_glyph);
+
+      // ---- KEEP IN SYNC: BATTERY_ICON (voltage-only heuristic; see README "Battery") ----
+      // HONEST LIMITATION: the TP4054 charger's CHRG status pin is NOT
+      // wired to the ESP32 on this board, so true charge state can never
+      // be read - everything below infers battery/charging/plugged-in
+      // purely from VBAT voltage (Battery Voltage sensor below), which is
+      // a heuristic, not a fact. A battery resting near 4.2V shortly after
+      // a charge finishes can look identical to one still under active CV
+      // charge control; see README "Battery" for the full caveat and the
+      // voltage->percent curve used for the separate Battery Level sensor.
+      //
+      // Tiers, ascending by voltage: 0=hidden(no battery attached, <2.5V)
+      // 1=alert(<15%) 2=outline(15-59%, non-critical/non-full)
+      // 3=full(60-100%, not charging/plugged) 4=charging(~4.20-4.30V
+      // topping-off band) 5=plugged(>=4.30V, USB rail - full or absent).
+      // Capacity is intentionally only THREE buckets (alert/outline/full),
+      // not five - the numbered battery-20/40/70 glyphs were tried first
+      // and rejected: at 13px 1-bit they only differ by a faint fill band
+      // near the icon's top that's imperceptible at this size, so they
+      // collapsed to three maximally-distinct silhouettes instead (see
+      // the font: glyphs list comment above for the verification note).
+      //
+      // RISE[i]/FALL[i] give each tier boundary its own hysteresis gap so
+      // a VBAT reading sitting right at a threshold can't flap the icon
+      // every ~30s ADC sample; battery_icon_state (see globals: above)
+      // persists the previous tier across display frames so the gap has
+      // something to compare against.
+      static const float BATT_RISE[5] = {2.55f, 3.74f, 3.90f, 4.23f, 4.33f};
+      static const float BATT_FALL[5] = {2.45f, 3.68f, 3.84f, 4.17f, 4.27f};
+      float vbatt = id(battery_voltage_sensor).has_state() ? id(battery_voltage_sensor).state : -1.0f;
+      int prev_batt_tier = id(battery_icon_state);
+      int batt_tier;
+      if (prev_batt_tier < 0) {
+        // Bootstrap (no reading yet this boot): pick a tier outright, with
+        // no history to apply hysteresis against.
+        batt_tier = 0;
+        for (int i = 0; i < 5; i++) {
+          if (vbatt >= BATT_RISE[i]) batt_tier = i + 1;
+        }
+      } else {
+        batt_tier = prev_batt_tier;
+        while (batt_tier < 5 && vbatt >= BATT_RISE[batt_tier]) batt_tier++;
+        while (batt_tier > 0 && vbatt < BATT_FALL[batt_tier - 1]) batt_tier--;
+      }
+      id(battery_icon_state) = batt_tier;
+      if (batt_tier > 0) {
+        const char *batt_glyph;
+        switch (batt_tier) {
+          case 1: batt_glyph = "\U000F0083"; break;  // battery-alert
+          case 2: batt_glyph = "\U000F008E"; break;  // battery-outline
+          case 3: batt_glyph = "\U000F0079"; break;  // battery (full)
+          case 4: batt_glyph = "\U000F0084"; break;  // battery-charging
+          default: batt_glyph = "\U000F06A5"; break; // power-plug
+        }
+        // Tier 0 (hidden) intentionally draws nothing at all - a plausible
+        // "no battery attached" reading means there's nothing honest to
+        // show, so the status row just omits that slot rather than
+        // guessing.
+        it.print(status_battery_x, status_row_y, id(font_icons), TextAlign::TOP_LEFT, batt_glyph);
+      }
+
+      // ---- KEEP IN SYNC: TEMPERATURES ----
+      // Right-aligned. "--" whenever a value is missing or non-finite (an
+      // `unavailable` HA sensor publishes NAN, not just "no state yet" -
+      // has_state() alone isn't enough).
+      char in_buf[8];
+      if (id(temp_indoor).has_state() && std::isfinite(id(temp_indoor).state)) {
+        snprintf(in_buf, sizeof(in_buf), "%.0f", id(temp_indoor).state);
+      } else {
+        strcpy(in_buf, "--");
+      }
+      // Indoor (AIOsense mean): most prominent reading on the panel -
+      // largest font, topmost, unlabeled since its size/position already
+      // set it apart from the outdoor/attic readings below.
+      it.printf(127, 0, id(font_temp_large), TextAlign::TOP_RIGHT, "%s°F", in_buf);
+
+      char out_buf[8];
+      if (id(temp_outdoor).has_state() && std::isfinite(id(temp_outdoor).state)) {
+        snprintf(out_buf, sizeof(out_buf), "%.0f", id(temp_outdoor).state);
+      } else {
+        strcpy(out_buf, "--");
+      }
+      it.printf(127, 27, id(font_temp_small), TextAlign::TOP_RIGHT, "%s°F", out_buf);
+
+      char attic_buf[8];
+      if (id(temp_attic).has_state() && std::isfinite(id(temp_attic).state)) {
+        snprintf(attic_buf, sizeof(attic_buf), "%.0f", id(temp_attic).state);
+      } else {
+        strcpy(attic_buf, "--");
+      }
+      it.printf(127, 43, id(font_temp_small), TextAlign::TOP_RIGHT, "%s°F", attic_buf);
+
+      // ---- KEEP IN SYNC: TEMP_ICONS (tools/render_display.py: TEMP_ICONS) ----
+      // v3.3: icons replace the "Out"/"At" text labels above (operator
+      // feedback: "Out/At doesn't meaningfully tell me what's going on -
+      // icons for that would be nice too, for primary interior temp,
+      // outside, and attic"). One shared left-edge x for all three -
+      // temp_icon_x=67 is the tightest legal value (RIGHT zone's left
+      // seam sits at x=66, tools/render_display.py's MIN_MARGIN forbids
+      // anything closer) - so the eye reads down one straight icon
+      // column while the right-aligned numbers stay dominant and
+      // unmoved from v3.1/v3.2. All three glyphs measure 13px wide, so
+      // the column's right edge is a consistent x=80 too.
+      //
+      // KNOWN LIMITATION (pre-existing, not new to v3.3): indoor is 22pt
+      // and right-aligned at x=127; a 2-digit reading ("78°F", 45px
+      // wide) leaves the icon a 2px clearance, but a 3-digit reading
+      // ("100°F", 57px wide) would overlap it. v3.1/v3.2 already left
+      // indoor only ~4px of total zone margin at 3 digits with NO icon
+      // at all, so this isn't a regression - flagged honestly rather
+      // than silently hoping it doesn't happen (indoor stays 1-2 digits
+      // in every state this controller has actually been run against).
+      const int temp_icon_x = 67;
+      // home-thermometer-outline (indoor) - vertically centers its 11px
+      // ink against the 22pt indoor row's 16px ink height: (16-11)/2 =
+      // 2.5, rounded up.
+      it.print(temp_icon_x, 3, id(font_icons), TextAlign::TOP_LEFT, "\U000F0F55");
+      // weather-sunny (outdoor) - its 12px ink is TALLER than the 11pt
+      // outdoor row's 8px digit ink, so it centers slightly ABOVE the
+      // row's own y: 27 + (8-12)/2 = 25.
+      it.print(temp_icon_x, 25, id(font_icons), TextAlign::TOP_LEFT, "\U000F0599");
+      // home-roof (attic) - its 8px ink height matches the 11pt attic
+      // row's 8px digit ink height exactly, no offset needed.
+      it.print(temp_icon_x, 43, id(font_icons), TextAlign::TOP_LEFT, "\U000F112B");
+
+# Status LED (GPIO25 on V1.6.1)
+light:
+  - platform: status_led
+    name: "Status LED"
+    pin: GPIO25
+
+# =============================================================================
+# Sensors
+#
+# The homeassistant sensors and on-device mean below are TELEMETRY/DISPLAY
+# ONLY. Nothing in this file attaches an on_value (or any other) automation
+# to them, so a changing temperature can never reach a script that transmits.
+# =============================================================================
+sensor:
+  - platform: wifi_signal
+    id: wifi_signal_sensor
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+
+  # Battery telemetry (TTGO LoRa32 V2.1 onboard LiPo circuit: JST
+  # connector, TP4054 linear charger, VBAT sensed through the board's
+  # onboard 2:1 resistor divider onto GPIO35, otherwise unused in this
+  # config). Pure telemetry, like the temperature sensors above: nothing
+  # here is read by any TX/RX/fan/script/automation path - only Home
+  # Assistant and the display lambda's battery-icon logic (see "KEEP IN
+  # SYNC: BATTERY_ICON" in the display: block below) read these sensors.
+  #
+  # HONEST LIMITATION: the TP4054's CHRG status pin is NOT wired to the
+  # ESP32 on this board, so actual charge state (charging / done / fault)
+  # can never be read. Every battery/charging/plugged-in indication this
+  # firmware shows - the icon tier below and the Battery Level curve - is
+  # inferred from VBAT voltage alone, which is a heuristic, not a fact.
+  # See README "Battery" for the full caveat.
+  - platform: adc
+    pin: GPIO35
+    id: battery_voltage_sensor
+    name: "Battery Voltage"
+    entity_category: diagnostic
+    update_interval: 30s
+    attenuation: 12db  # full 0-3.3V range at the pin (divided VBAT tops out well under that)
+    filters:
+      - multiply: 2.0  # undo the onboard 2:1 VBAT divider to report real cell voltage
+      - sliding_window_moving_average:
+          window_size: 4
+          send_every: 1
+
+  # Approximate LiPo state of charge, derived from Battery Voltage via a
+  # piecewise-linear open-circuit-voltage curve (see README "Battery" for
+  # the full table). This is a commonly used single-cell Li-ion/LiPo
+  # approximation, not a datasheet curve for this exact cell, and is
+  # sensitive to load current, temperature, and cell age - treat it as
+  # indicative, not precise.
+  - platform: template
+    name: "Battery Level"
+    id: battery_level_sensor
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    internal: false
+    update_interval: 30s
+    lambda: |-
+      if (!id(battery_voltage_sensor).has_state() || !std::isfinite(id(battery_voltage_sensor).state)) {
+        return NAN;
+      }
+      float v = id(battery_voltage_sensor).state;
+      // Below the plausible Li-ion floor: almost certainly no battery is
+      // attached (mirrors the display lambda's no-battery threshold), not
+      // a real 0% reading.
+      if (v < 2.5f) {
+        return NAN;
+      }
+      static const float CURVE_V[] = {
+          4.20f, 4.15f, 4.11f, 4.08f, 4.02f, 3.98f, 3.95f, 3.91f, 3.87f, 3.85f,
+          3.84f, 3.82f, 3.80f, 3.79f, 3.77f, 3.75f, 3.73f, 3.71f, 3.69f, 3.61f, 3.27f};
+      static const float CURVE_PCT[] = {
+          100, 95, 90, 85, 80, 75, 70, 65, 60, 55,
+          50,  45, 40, 35, 30, 25, 20, 15, 10, 5, 0};
+      const int n = sizeof(CURVE_V) / sizeof(CURVE_V[0]);
+      if (v >= CURVE_V[0]) return 100.0f;
+      if (v <= CURVE_V[n - 1]) return 0.0f;
+      for (int i = 0; i < n - 1; i++) {
+        if (v <= CURVE_V[i] && v >= CURVE_V[i + 1]) {
+          float frac = (v - CURVE_V[i + 1]) / (CURVE_V[i] - CURVE_V[i + 1]);
+          return CURVE_PCT[i + 1] + frac * (CURVE_PCT[i] - CURVE_PCT[i + 1]);
+        }
+      }
+      return 0.0f;
+
+  # Display-only values imported from stable, UI-editable Home Assistant
+  # helpers. All three are internal so values originating in Home Assistant
+  # are not re-exported back as duplicate device entities. No automation is
+  # attached; these IDs are read only by the OLED lambda above.
+  - platform: homeassistant
+    id: temp_indoor
+    entity_id: ${display_indoor_entity}
+    internal: true
+
+  - platform: homeassistant
+    id: temp_outdoor
+    entity_id: ${display_outdoor_entity}
+    internal: true
+
+  - platform: homeassistant
+    id: temp_attic
+    entity_id: ${display_attic_entity}
+    internal: true
+
+  # Timer telemetry only - no automation is attached, so this can never
+  # reach a script that transmits. It is a read-only mirror of the
+  # timer_active/timer_expiry_millis globals maintained by send_timer,
+  # send_off/send_low/send_medium/send_high, the RX-observed-timer branch
+  # in on_packet, and the expiry interval: above.
+  - platform: template
+    name: "Timer Remaining"
+    id: timer_remaining_sensor
+    icon: "mdi:timer-outline"
+    unit_of_measurement: "min"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 30s
+    lambda: |-
+      if (!id(timer_active)) {
+        return 0;
+      }
+      int32_t remaining_ms = (int32_t) (id(timer_expiry_millis) - millis());
+      if (remaining_ms <= 0) {
+        return 0;
+      }
+      return remaining_ms / 60000;
+
+  # Diagnostics
+  - platform: template
+    name: "TX Count"
+    id: tx_count_sensor
+    icon: "mdi:radio-tower"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "RX Valid Count"
+    id: rx_valid_count_sensor
+    icon: "mdi:radio-tower"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "RX Rejected Count"
+    id: rx_rejected_count_sensor
+    icon: "mdi:radio-tower"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: never
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+
+  - platform: template
+    name: "Remote Sender ID"
+    id: remote_sender_id_sensor
+    icon: "mdi:remote"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Last TX Command"
+    id: last_tx_command_sensor
+    icon: "mdi:radio-tower"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Last Valid RX Frame"
+    id: last_rx_frame_sensor
+    icon: "mdi:radio-tower"
+    entity_category: diagnostic
+    update_interval: never

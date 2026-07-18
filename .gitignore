@@ -1,0 +1,22 @@
+# Secrets — never commit
+secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+*.pio/
+build/
+
+# Raw OEM firmware dumps are NOT redistributed (QuietCool's copyrighted image).
+# The extracted constants, memory map, and analysis live in docs/firmware-analysis.md.
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+.venv*/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store

@@ -1,0 +1,24 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ESPHome
+        run: pip install esphome
+      - name: Provide example secrets
+        run: cp secrets.yaml.example secrets.yaml
+      - name: Config regression tests
+        run: python -m unittest tests.test_quietcool_esphome_config -v
+      - name: esphome config (LoRa32 V2.1 / SX1278)
+        run: esphome config quietcool-lora32.yaml
+      - name: esphome config (upstairs wrapper)
+        run: esphome config quietcool-lora32-upstairs.yaml
