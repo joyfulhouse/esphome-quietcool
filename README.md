@@ -36,7 +36,14 @@ clean-room implementation of what that analysis found.
 | Board | Radio | MCU | Config | Status |
 | --- | --- | --- | --- | --- |
 | LilyGO TTGO LoRa32 **V2.1** (433 MHz) | SX1278 (SX127x) | ESP32 | `quietcool-lora32.yaml` | Verified on real fans |
-| Heltec / HiLetgo ESP32 LoRa **V3** (433–510 MHz) | SX1262 (SX126x) | ESP32-S3 | `quietcool-lora-v3.yaml` | Port (see docs) |
+| Heltec / HiLetgo ESP32 LoRa **V3** (433–510 MHz) | SX1262 (SX126x) | ESP32-S3 | `quietcool-lora-v3.yaml` | Builds; awaiting hardware bring-up |
+
+The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
+`sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
+knobs). It compiles clean but hasn't been run on real hardware yet — a few pins
+(status-LED polarity, the VBAT ADC divider, and the RX filter bandwidth) are
+noted inline as `PIN CONFIDENCE` items to confirm on first bring-up. See
+[docs/hardware.md](docs/hardware.md).
 
 Both need a **433 MHz antenna** connected before transmitting.
 
