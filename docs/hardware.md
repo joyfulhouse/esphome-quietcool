@@ -26,7 +26,7 @@ flagged inline in the YAML as `PIN CONFIDENCE`):
 | OLED (SDA 17, SCL 18, RST 21) + Vext GPIO36 (active-low) | catalog | High |
 | Status-LED polarity (GPIO35) | pin known, polarity unconfirmed | Medium |
 | VBAT ADC (GPIO1, enable GPIO37, ÷ 4.9) | community, untested | Medium |
-| RX filter bandwidth (117.3 kHz) | current public V3 setting; not equivalent to the live-validated SX1278 setting | Tune on bench |
+| RX filter bandwidth (58.6 kHz) | nearest FSK-legal SX1262 value to the live-validated SX1278 50 kHz setting | Tune on bench |
 
 Some later "V3.2" units add a front-end module needing extra GPIO drive for good
 RSSI; the base V3 design does not. If receive is weak, that's the first thing to

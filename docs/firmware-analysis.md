@@ -185,6 +185,17 @@ incorrectly rejected. The exact length, sender suffix, and duplicate match the
 OEM rules. The `90 90` and `B0 B0` reports establish that set bit 7 is also
 valid in fan responses.
 
+### Off-variant evidence boundary
+
+The OEM constructor preserves remembered speed in Off commands (`90`/`A0`/`B0`),
+so following that pattern is a conservative compatibility policy. It is not
+proven necessary for command acceptance. One test saw six `90` bursts ignored
+while the fan reported a High timer, but the 2026-07-19 production incident
+later ended when `90` succeeded from an apparent High state. RF delivery,
+receiver timing, and the speed nibble were not independently isolated. All
+duration-zero variants must therefore compare as one semantic Off transaction,
+even if the transmitted byte retains the OEM-style speed nibble.
+
 ### Why the long callbacks are malformed
 
 One captured callback contained 14 application bytes:
@@ -216,7 +227,11 @@ downstream SX1278 implementation therefore validated a 300–1,100 ms
 confirmation window. It also found a second exact response train extending to
 about 1.65 seconds, so it retains a separate 2.5-second classification-only
 tail. The tail does not extend the confirmation deadline; it merely prevents
-late fan repeats from being misclassified as a new OEM command.
+late fan repeats from being misclassified as a new OEM command. Because the tail
+endpoint is inclusive, a following query's 300 ms acceptance floor is placed one
+millisecond after it expires. Command re-fires remain eligible on their original
+one-second spacing while that query is pending, so observed late repeats cannot
+be counted as fresh post-retry evidence.
 
 The former SX1278 setting admitted 125 kHz. At this protocol's 2.4 kbps and
 ±10 kHz deviation, Carson's estimate is about 22.4 kHz. An explicit 50 kHz
@@ -224,40 +239,116 @@ receiver bandwidth contains the signal while reducing integrated noise by
 about 4 dB. That is a conservative SX127x setting, not proof that its filter is
 identical to the CMT2300A's automatic filter.
 
-## Validated closed-loop design
+## Corrected closed-loop design
 
-The downstream implementation layers query confirmation on top of the existing
+The corrected design layers query confirmation on top of the existing
 one-second spaced re-fire safety mechanism:
 
-1. A command wrapper records the desired state and retains the original retry
-   budget: four total command bursts normally and six total for Off.
-2. The sole serialized sender transmits three copies. Two hundred milliseconds
+1. Before any mutation or TX, compare the requested semantic state with the
+   active transaction. Every equivalent request (including any duration-zero
+   variant for Off) joins its active
+   transaction; it does not transmit or reset attempts, queries, consensus,
+   timer state, or status.
+2. A genuinely new request records the desired state and fixed budget before
+   enqueue: four total command bursts normally and six total for Off. It marks
+   both fan and timer physical state unknown before any possible transmission.
+3. The sole serialized sender transmits three copies. Two hundred milliseconds
    after actual burst completion, it sends a `66 66` query through that same
-   send point.
-3. The actual query start anchors the 300–1,100 ms consensus window and 2.5 s
+   send point. The queue is bounded at five runs; an over-capacity execution can
+   be rejected, so the armed, idle-gated re-fire remains the convergence path
+   for the latest desired transaction. Actual execution rejects a queued state
+   command that no longer equals the latest desired command.
+4. The actual query start anchors the 300–1,100 ms consensus window and 2.5 s
    passive classification tail.
-4. Exact OEM frames and the bounded recovery tier feed consensus. State is
+5. Exact OEM frames and the bounded recovery tier feed consensus. State is
    compared as lower six bits, with the OEM duration-zero Off wildcard. `CE`
    never confirms state.
-5. Confirmation publishes `Last Confirmed Fan State`, `Command Confirmation
-   Status`, and `Fan Speed Capability`, then cancels remaining spaced re-fires.
-   A mismatch or no consensus leaves the existing retry eligible; exhausting
-   the fixed budget publishes failure and stops.
-6. An exact external OEM query/command supersedes queued local work. Late
-   response repeats cannot masquerade as that external traffic.
+6. Authoritative RF consensus publishes the fan entity, `Last Confirmed Fan
+   State`, `Command Confirmation Status`, and `Fan Speed Capability`; a
+   requested state is never published optimistically. It sets `Fan State
+   Known` and the atomic `Fan Confirmed Off` diagnostic, cancels remaining
+   spaced re-fires, and makes a timer countdown authoritative only when it
+   confirms this controller's locally initiated timer command. A mismatch or no
+   consensus leaves the existing retry eligible and both known flags false;
+   exhausting the fixed budget publishes failure and stops.
+7. An exact external OEM query/command supersedes queued local work. A heard
+   OEM query reserves a two-second no-local-TX holdoff for the physical
+   query/response/command exchange. Passive
+   OEM traffic remains diagnostics-only and never mutates the safety fan
+   entity. Late response repeats cannot masquerade as that external traffic.
 
 Safety invariants remain essential: volatile transaction globals,
 `restore_mode: NO_RESTORE`, no transmission at boot/OTA/API reconnect/from RX,
 no sending before provisioning, and exactly one serialized radio-send site.
-Learning changes receive/storage state only. Rapid same-command presses consume
-the same fixed attempt budget instead of creating unbounded retries.
+Learning changes receive/storage state only. Boot does not send even a status
+query. Rapid equivalent calls of every command type join the same fixed attempt
+budget instead of starting or replenishing transactions.
+
+The explicit known flags are required even with the custom confirmation-driven
+fan platform. ESPHome's native Fan API has no representation for missing state,
+so its first HA subscription exposes raw object defaults (Off with Low as the
+pre-seeded speed) even though `control()` never published them. Safety logic must
+therefore not treat the fan entity alone as physical evidence. `Fan State
+Known` records entity authority, while the single `Fan Confirmed Off` diagnostic
+is the safe HA interlock input because it avoids cross-entity API ordering.
+`Timer State Known` similarly gates timer select/countdown use; the select is
+not initialized to a guessed `None` at boot.
+
+Every genuinely new state/timer request and every actually executed non-query
+burst—including an automatic re-fire—invalidates both known flags. Outgoing
+commands do not optimistically arm or clear confirmed timer metadata. Failure
+or no response leaves timer state unknown, so its expiry path cannot publish a
+guessed Off. The fan reports programmed timer hours rather than remaining time,
+so only confirmation of a locally initiated timer command anchors the local
+countdown. A manual query that finds an active timer has unknown age and cannot
+authorize state/timer publication. Estimated expiry invalidates authority and
+does not publish Off.
+
+Because OEM commands and fan reports share a wire shape, a command-shaped
+mismatching consensus inside a local query window is ambiguous and never gains
+state authority. An On transaction may yield to a possible running physical
+override; an Off transaction never yields and continues its fixed safety
+budget. Manual Refresh/probe uses the same response consensus as the command
+loop, with timing anchored to actual query transmission. Completed reports are
+consumed once, and contradictory tail traffic poisons an unconsumed mailbox as
+well as invalidating authority. A new command poisons any older manual epoch.
+An otherwise valid Off report also remains unknown while an energizing retry is
+still pending, so `Fan Confirmed Off` cannot turn true immediately before TX.
+
+Normal same-command burst deduplication is a fixed 300 ms epoch from the first
+accepted frame. Suppressed ~102 ms repeats do not slide it, so a distinct later
+physical press cannot be hidden by the predecessor's 450 ms sliding window.
+The Timer select's `None` choice is a safe no-op: the protocol has no proven
+non-actuating clear command, so continuous mode requires an explicit speed
+selection.
+
+### 2026-07-19 production correction
+
+The previous implementation satisfied its attempt ceiling only within one
+command-wrapper invocation. In production, the ESPHome `TemplateFan` published
+Off as soon as Home Assistant requested it. When a query reported `B1` (High,
+one-hour timer), the entity returned to On and a window interlock requested Off
+again, replacing the active transaction and restoring its full budget.
+
+Recorder and device diagnostics observed 107 entity transitions in 73.34
+seconds, 54 interlock runs, 53 mismatches that all still said five attempts
+remained, and 118 three-frame bursts (354 application frames). There was no
+ESP-originated On command. This directly supports re-entrant transaction reset
+as the cause of the RF storm. It does not establish 53 physical motor cycles;
+the receiver kept reporting High until the final Off confirmation.
+
+The corrective invariants are transaction-scoped: local requests are never
+published as observed state, passive OEM traffic is diagnostics-only, and
+all `x0` Off variants coalesce when an Off transaction is active. Coalescing is
+observation-only and preserves the existing spaced re-fire schedule and
+terminal budget.
 
 ### Live validation and repository status
 
-The design above passed 96 structural/unit tests, ESPHome configuration
-validation, compilation, and two non-energizing live Off transactions. The
-final transaction confirmed `90 90` after one command and one query. The three
-diagnostics reported `OFF (raw 90)`,
+The predecessor design passed its then-current structural/unit tests, ESPHome
+configuration validation, compilation, and two non-energizing live Off
+transactions. The final transaction confirmed `90 90` after one command and
+one query. The three diagnostics reported `OFF (raw 90)`,
 `confirmed OFF (raw 90) after 1 command(s), 1 query(s)`, and `2-speed`. Late
 exact repeats at query ages +1,391, +1,497, and +1,590 ms remained passive, did
 not change confirmation, and did not transmit. The device remained Off and the
@@ -267,12 +358,49 @@ window interlock stayed enabled. The final flashed artifact had SHA-256:
 674ea45beb02e14d27eebd7bdfcfdddd1c7c74acf050238fa192f0e744237689
 ```
 
-This validation occurred in the downstream working configuration used for the
-2026-07-18 research. Both public YAML templates now contain this closed-loop
-controller: `quietcool-lora32.yaml` is the same source with an anonymized,
-unprovisioned sender seed, and `quietcool-lora-v3.yaml` carries the identical
-logic on the SX1262 (58.6 kHz RX bandwidth, nearest FSK-legal value to the
-validated 50 kHz; awaiting hardware bring-up).
+That artifact validated decoding and one transaction at a time; it did not
+exercise re-entrant equivalent Off calls and is not evidence for the corrective
+coalescing behavior.
+
+Fresh post-correction validation ran on 2026-07-19. Final ESPHome 2026.7.0 config
+validation and compilation succeeded for both public targets and both downstream
+SX1278 wrappers. Public compile hashes were `0x80f65068` for SX1278 and
+`0x0be208d7` for SX1262. The live downstairs wrapper built as `0xef85b7d8` at
+14:25:44 PDT. Its binary SHA-256 was:
+
+```text
+714c455a1673c3c3255132df84f68d020afbbcfd989594c34c997a940cafc59d
+```
+
+That downstream artifact was OTA-flashed exactly once to `10.100.8.46` at about
+14:26 PDT. During 62 idle seconds after boot, `TX Count` remained zero,
+`Fan State Known`, `Timer State Known`, and `Fan Confirmed Off` remained false,
+the last confirmed state remained unknown, and confirmation status remained
+idle. A manual Refresh then consumed one TX burst and accepted two exact `90
+90` replies at about +396 and +520 ms, establishing Off and two-speed
+capability.
+
+Three rapid HA Off calls then exercised the production failure mode directly.
+They created one transaction; both later calls were logged as duplicate joins
+at 0 of 6 completed commands with five re-fires left. They did not reset or
+replenish the budget.
+Only one Off burst and one automatic query followed, and the transaction
+confirmed `90` after one command and one query. `TX Count` ended at three for
+the complete manual-Refresh-plus-Off test. Exact late reports at about +1,422
+and +1,520 ms remained passive. Home Assistant history showed no fan or
+interlock state transitions during the test; the fan entity ended Off and the
+window interlock remained enabled. These results validate RF consensus,
+publication, and duplicate coalescing, but without an independent motor or
+airflow sensor they do not prove physical motor state.
+
+That validation occurred in the downstream working configuration used for the
+2026-07-18 research. Both public YAML templates now share the corrected
+transaction logic: `quietcool-lora32.yaml` on SX1278 and
+`quietcool-lora-v3.yaml` on SX1262. The latter uses a 58.6 kHz RX bandwidth,
+the nearest FSK-legal value to the validated SX1278 50 kHz setting, and still
+awaits hardware bring-up. The rollout used a downstream wrapper, not either
+public named artifact. The upstairs controller was offline and was not flashed;
+the V3 build was compiled but has not been tested on hardware.
 
 ## Analysis tooling
 

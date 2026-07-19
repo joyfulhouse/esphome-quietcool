@@ -27,28 +27,35 @@ extra.</sub>
 
 ## Features
 
-- **Closed-loop confirmation** — after every command the controller sends the
-  OEM's own `66 66` status query, decodes the fan's reply, and **verifies the
-  fan actually did it**. Confirmed state, confirmation status, and the fan's
-  reported speed capability (2-speed vs 3-speed) are all published to Home
-  Assistant. A lost command is retried on a bounded, spaced schedule until the
-  fan confirms — or the failure is reported explicitly instead of guessed at.
+- **Closed-loop confirmation** — after a new command the controller sends the
+  OEM's own `66 66` status query, decodes the fan's reply, and confirms that
+  the query-correlated reported state matches the request. The custom fan
+  control path does not publish a request
+  as observed state. Because ESPHome's native Fan API cannot represent
+  “unknown” and exposes its raw Off/Low defaults when HA first subscribes,
+  `Fan State Known` records whether that entity state is physical evidence;
+  the atomic `Fan Confirmed Off` diagnostic is the recommended HA interlock
+  input. Every equivalent request joins its active transaction without
+  transmitting again or resetting its fixed, spaced attempt budget.
 - **Direct RF fan control** — Off / Low / Medium / High (where supported by
   the fan model) on the fan entity, plus a speed-aware timer select covering
   the fan's full 1 / 2 / 4 / 8 / 12-hour range — more than the OEM remote's
-  three timer buttons expose — transmitted as the exact OEM frames. The
-  select syncs both ways: start a timer from the physical remote and it
-  shows up selected in Home Assistant.
+  three timer buttons expose — transmitted as the exact OEM frames. `Timer
+  State Known` gates the select and countdown: they are not initialized to a
+  guessed `None`, and an unresolved command cannot present stale timer metadata
+  as confirmed.
 - **Learn mode** — capture your fan's 4-byte sender ID by pressing its OEM remote
   twice. No packet sniffing or firmware extraction needed to onboard; the ID is
   persisted in NVS and survives reboots and OTA. See
   [Learn mode](#learn-mode--porting-to-your-own-fan).
 - **Home Assistant native API** — a proper `fan` entity plus diagnostics
   (TX/RX counters, last command, learned sender ID, battery voltage/level).
-- **Bi-directional** — the controller also *listens*: press the OEM remote and
-  the Home Assistant entity updates to match within a second. Received frames
-  are strictly validated and mirrored into the entity **without ever
-  re-transmitting** (no RF echo, no feedback loop).
+- **Bi-directional diagnostics, query-confirmed state** — the controller also
+  *listens* and records strictly validated OEM traffic without echoing it over
+  RF. A passively heard OEM command cancels conflicting local work and is
+  visible in RF diagnostics, but it never mutates the safety-facing fan entity:
+  hearing a command is not proof that the receiver acted. Only consensus from
+  this controller's locally anchored query can publish physical state.
 - **On-device OLED** — animated fan icon, HH:MM:SS timer countdown, three
   HA-relayed temperatures (indoor / outdoor / attic) with semantic icons, and a
   WiFi / API / battery status row. Temperature sources are configurable from the
@@ -71,10 +78,86 @@ no CRC), and then either confirms and stops, or lets the pre-existing spaced
 re-fire backstop continue up to its fixed attempt budget. Every outcome —
 `confirmed`, `mismatch`, `no consensus`, `FAILED`, or `superseded by OEM
 remote` — is published to Home Assistant, and a physical OEM remote press
-always takes priority over pending automatic work. Validated live on an
-SX1278 installation, where the capability diagnostics also identified the test
-fan as a two-speed model. Full detail in [docs/protocol.md](docs/protocol.md)
-and [docs/firmware-analysis.md](docs/firmware-analysis.md).
+always takes priority over pending automatic work. Hearing its `66 66` query
+reserves a two-second exchange holdoff in which no local query or state frame
+can take airtime. The response decoder and single-transaction flow, including
+the 2026-07-19 state-knowledge/coalescing correction, were validated live on a
+downstream SX1278 installation. The capability diagnostics identified the test
+fan as a two-speed model, and three rapid equivalent Off calls joined one
+transaction that confirmed after one command and one query. Full detail is in
+[docs/protocol.md](docs/protocol.md) and
+[docs/firmware-analysis.md](docs/firmware-analysis.md).
+
+All duration-zero commands (`80`, `90`, `A0`, and `B0`) are semantically Off.
+The transmitter may preserve the fan's remembered-speed nibble as an
+OEM-faithful compatibility policy, but a duplicate active Off request joins the
+same transaction regardless of that nibble. Command requests never publish the
+fan entity optimistically. Correlated local-query consensus may set `Fan State
+Known`; passive OEM traffic is diagnostics-only and clears/leaves state
+authority false. `Fan Confirmed Off` is the atomic safety signal: it is true
+only when authoritative consensus says Off, and false for running or unknown
+state. This avoids an HA batching race that can occur when a safety automation
+separately joins the fan entity and a Known flag.
+
+The same rule applies to timers. Boot leaves the timer select without a guessed
+selection. Every new command, and every actual non-query command burst including
+an automatic re-fire, invalidates both `Fan State Known` and `Timer State Known`.
+Outgoing commands do not optimistically arm or clear confirmed timer metadata.
+The fan reports the programmed duration, not when the timer began, so a trusted
+countdown is created only when a locally initiated timer command is confirmed;
+an active-timer report from a manual Refresh has unknown age and remains
+diagnostic-only. When an estimated local countdown reaches zero, the firmware
+invalidates state and timer authority instead of publishing a guessed Off.
+
+The serialized TX queue is deliberately finite (`max_runs: 5`). ESPHome may
+reject an execution beyond that capacity, so this project does not promise one
+on-air burst for every rapid press. A new transaction and its re-fire command
+are armed before enqueue, and the spaced driver waits for TX to become idle;
+that gives the latest desired command a bounded retry path even when its initial
+enqueue was rejected. At actual execution, obsolete queued state commands are
+discarded before airtime. A following query is scheduled so its 300 ms
+acceptance floor begins one millisecond after the preceding inclusive 2.5 s
+response tail; the original one-second spaced command re-fire remains eligible
+while that query is pending.
+
+### 2026-07-19 production Off-flapping RCA
+
+Production recorder and controller diagnostics captured 107 Home Assistant fan
+state transitions in 73.34 seconds after a window interlock requested Off: 54
+interlock runs, 53 RF-confirmation mismatches that all still showed five attempts
+remaining, and 118 RF bursts (354 application frames). The fan repeatedly
+reported `B1` (High, one-hour timer); no ESP-originated On command was present.
+
+The observed feedback path was the former ESPHome `TemplateFan` publishing optimistic
+Off, followed by Home Assistant re-entering the interlock when confirmation
+restored On. Each re-entry started a fresh Off transaction and reset the
+nominally bounded attempt counter. The correction has independent guards:
+
+1. never publish locally requested or passive OEM state into the safety fan
+   entity; and
+2. coalesce every semantically equivalent request into its active transaction
+   without TX, counter reset, or loss of query/consensus evidence;
+3. discard stale different-command queue entries before airtime; and
+4. poison superseded query epochs and conflicting response mailboxes so stale
+   consensus cannot restore authority.
+
+The one-second spaced re-fire mechanism and its terminal attempt limit remain
+unchanged. These records demonstrate reported-state flapping and excessive RF
+traffic; without an independent motor sensor they do not prove that the
+physical fan cycled 53 times. They also do not prove that speed-matched Off is
+required: `90` later succeeded while the last apparent state was High.
+
+On 2026-07-19 the corrected logic was OTA-flashed exactly once to the downstream
+SX1278 controller and exercised without energizing the already-Off fan. A
+62-second post-boot observation produced zero transmissions and left all state
+authority unknown. Manual Refresh then received two exact `90 90` reports, and
+three rapid HA Off calls produced only one Off burst plus one query; the two
+duplicate calls joined the active budget, and the transaction confirmed `90`
+after one command and one query. Home Assistant recorded no fan or interlock
+state transitions during the test. This is RF confirmation, not independent
+airflow or motor proof. The public SX1278 source was compiled but its named
+artifact was not the file flashed; the SX1262/V3 image was compiled and remains
+unverified on hardware.
 
 ## Supported hardware
 
@@ -85,7 +168,8 @@ and [docs/firmware-analysis.md](docs/firmware-analysis.md).
 
 The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
 `sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
-knobs). It compiles clean but hasn't been run on real hardware yet — a few pins
+knobs). CI validates and compiles both checked-in targets. The V3 has not been
+run on real hardware yet — a few pins
 (status-LED polarity, the VBAT ADC divider, and the RX filter bandwidth) are
 noted inline as `PIN CONFIDENCE` items to confirm on first bring-up. See
 [docs/hardware.md](docs/hardware.md).
@@ -130,6 +214,7 @@ troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
 INSTALL.md                       # step-by-step setup guide
 quietcool-lora32.yaml            # TTGO LoRa32 V2.1 / SX1278 — shared base config
 quietcool-lora-v3.yaml           # Heltec/HiLetgo ESP32-S3 / SX1262 port
+components/quietcool_confirmed_fan/ # confirmation-driven fan entity platform
 secrets.yaml.example             # copy to secrets.yaml (gitignored)
 tests/                           # config regression tests (pytest/unittest)
 tools/                           # display renderer + fan-frame generator
@@ -146,8 +231,21 @@ invariant: RF only ever originates from an explicit button press or Home
 Assistant command, plus the bounded follow-ups those arm — the confirmation
 query and the spaced re-fire attempts, both volatile and hard-limited. Nothing
 transmits at boot, after OTA, on reconnect, from restored state, or from a
-received frame, and a heard OEM-remote press cancels all pending automatic
-work.
+received frame. Repeated equivalent Off requests are transaction-idempotent:
+they cannot transmit, replenish attempts, clear confirmation evidence, or
+extend the terminal deadline. A heard OEM-remote press cancels all pending
+automatic work.
+
+Home Assistant safety automations should use the single `Fan Confirmed Off`
+binary sensor when they need an Off assertion. On initial API subscription the
+native fan entity necessarily exposes the Fan API's raw Off/Low defaults even
+though no RF observation exists; joining that entity with `Fan State Known` in
+HA is not atomic. `Fan State Known` remains useful as a diagnostic authority
+flag for the fan entity, and timer consumers must require `Timer State Known`.
+None of these RF-derived values is an eternal physical sensor: if every frame
+from a later OEM press is missed, the last confirmation can become stale. Use
+an explicit Refresh or a separate motor/airflow sensor where freshness is
+safety-critical.
 
 
 ## Learn mode / porting to your own fan
