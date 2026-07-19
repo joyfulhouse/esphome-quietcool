@@ -11,6 +11,20 @@ clean-room implementation of what that analysis found.
 > This project drives the fan directly with a Semtech LoRa transceiver in raw FSK
 > packet mode.
 
+## Where to buy
+
+All you need is one of these two off-the-shelf ESP32 LoRa boards (each is a
+complete kit: ESP32 + 433 MHz radio + OLED + antenna):
+
+| [LilyGO TTGO LoRa32 V2.1 (433 MHz)](https://amzn.to/4vBvqOU) | [HiLetgo ESP32 LoRa V3 (SX1262)](https://amzn.to/4wagWqi) |
+| :---: | :---: |
+| [![LilyGO TTGO LoRa32 V2.1 433 MHz board](docs/images/lilygo-ttgo-lora32-v21.jpg)](https://amzn.to/4vBvqOU) | [![HiLetgo ESP32 LoRa V3 SX1262 board with OLED and 433–510 MHz antenna](docs/images/hiletgo-esp32-lora-v3.jpg)](https://amzn.to/4wagWqi) |
+| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and verified on (SX1278, `quietcool-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — newer SX1262/ESP32-S3 port (`quietcool-lora-v3.yaml`); builds, awaiting hardware bring-up |
+
+<sub>Disclosure: as an Amazon Associate (store `joyfulhousegi-20`) the maintainers
+may earn from qualifying purchases through the links above. They cost you nothing
+extra.</sub>
+
 ## Features
 
 - **Closed-loop confirmation** — after every command the controller sends the
@@ -78,16 +92,8 @@ noted inline as `PIN CONFIDENCE` items to confirm on first bring-up. See
 
 Both need a **433 MHz antenna** connected before transmitting.
 
-### Where to buy
-
-- **LilyGO TTGO LoRa32 V2.1 (433 MHz)** — the reference board this was built and
-  verified on: <https://amzn.to/4vBvqOU>
-- **HiLetgo ESP32 LoRa V3 (SX1262, 0.96" OLED, 433–510 MHz antenna)**:
-  <https://amzn.to/4wagWqi>
-
-<sub>Disclosure: as an Amazon Associate (store `joyfulhousegi-20`) the maintainers
-may earn from qualifying purchases through the links above. They cost you nothing
-extra.</sub>
+Buying links (with product photos) are at the top of this README under
+[Where to buy](#where-to-buy).
 
 ## Quick start
 
