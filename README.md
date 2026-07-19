@@ -20,8 +20,11 @@ clean-room implementation of what that analysis found.
   Assistant. A lost command is retried on a bounded, spaced schedule until the
   fan confirms — or the failure is reported explicitly instead of guessed at.
 - **Direct RF fan control** — Off / Low / Medium / High (where supported by
-  the fan model) and speed-aware 1 / 2 / 4-hour timers, transmitted as the
-  exact OEM frames.
+  the fan model) on the fan entity, plus a speed-aware timer select covering
+  the fan's full 1 / 2 / 4 / 8 / 12-hour range — more than the OEM remote's
+  three timer buttons expose — transmitted as the exact OEM frames. The
+  select syncs both ways: start a timer from the physical remote and it
+  shows up selected in Home Assistant.
 - **Learn mode** — capture your fan's 4-byte sender ID by pressing its OEM remote
   twice. No packet sniffing or firmware extraction needed to onboard; the ID is
   persisted in NVS and survives reboots and OTA. See
@@ -194,7 +197,9 @@ TX action.
 
 ### Manual re-learn and forget
 
-- Press the Home Assistant `Learn Remote ID` button, or hold the board's PRG
+- Press the Home Assistant `Learn Remote ID` button (in the device's
+  Configuration section, disabled by default — enable the entity first), or
+  hold the board's PRG
   button for 5-10 seconds. This opens a 120-second manual window and leaves the
   currently stored ID intact unless a new candidate is confirmed. The existing
   1-5 second PRG Off gesture ends at 4999 ms, so the gestures do not overlap.

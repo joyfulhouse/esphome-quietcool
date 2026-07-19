@@ -174,6 +174,10 @@ esphome:
           id(confirmed_fan_state_sensor).publish_state("unknown");
           id(command_confirmation_status_sensor).publish_state("idle");
           id(fan_capability_sensor).publish_state("unknown");
+          // UI-only initial publish; publish_state never fires the
+          // select's set_action, so this cannot transmit.
+          id(timer_select_synced_hours) = 0;
+          id(fan_timer_select).publish_state("None");
 
           // Raw member write ONLY - no publish_state(), so on_state (and
           // therefore TX) never fires here. With restore_mode: NO_RESTORE,
@@ -417,6 +421,27 @@ globals:
     # signed-difference arithmetic - (int32_t)(timer_expiry_millis -
     # millis()) - so a millis() wraparound (~49.7 days of uptime) can never
     # produce a false "expired" or false "still running" result.
+
+  - id: timer_armed_hours
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+    # The whole-hour duration the CURRENT timer was armed with (1/2/4/8/12);
+    # only meaningful while timer_active is true. Written at all three
+    # arming sites - our own send_timer TX, a validated RX-observed OEM
+    # timer frame (so a timer started from the physical remote syncs too),
+    # and the closed-loop mismatch mirror - and read only by the Fan Timer
+    # select's 1 s UI sync below. Never gates or triggers any TX.
+
+  - id: timer_select_synced_hours
+    type: uint8_t
+    restore_value: false
+    initial_value: "0xFF"
+    # The hours value (0 = None) the Fan Timer select last had published to
+    # it by the 1 s sync mirror. 0xFF forces the first sync tick after boot
+    # to publish. Exists because the select's UI state is write-only from
+    # the firmware's perspective; this avoids re-publishing an unchanged
+    # option every second. UI bookkeeping only - never gates any TX.
 
   # Spaced command re-fire state (see substitutions and the 250 ms re-fire
   # interval). refire_cmd is the command byte to re-send; refire_left is how
@@ -1008,18 +1033,23 @@ sx126x:
             id(cl_candidate_last_ms) = 0;
           }
 
-          // Separate fan repeats are about 100-130 ms apart live, while a
-          // single command burst (ours or the OEM remote's) spans three
-          // frames only ~90 ms apart end to end. The floor must sit ABOVE
-          // that burst span: at the previous 60 ms floor, frames 1 and 3 of
-          // one OEM remote press (t=0 and t=90) counted as two independent
-          // reports and could reach consensus from a single physical press
-          // landing inside our query window, after which the mismatch
-          // re-fire would fight the user's override. 95 ms collapses any
-          // one burst to a single counted report while still passing the
-          // fan's genuine ~100 ms reply repeats.
+          // Honest timing note: one 17-byte frame (8 preamble + 2 sync +
+          // 1 length + 6 payload) takes ~57 ms of airtime at 2400 bps, so
+          // successive callbacks within ONE three-frame burst arrive about
+          // 102 ms apart (45 ms gap + airtime) - the same ~100-130 ms
+          // spacing as the fan's reply trains (live: +421/+522/+621 ms IS
+          // one burst). No dedup floor can therefore distinguish "frames
+          // of one burst" from "independent transmissions", and consensus
+          // here deliberately means INTRA-BURST REDUNDANCY against
+          // per-frame bit errors on a CRC-less link, not proof of multiple
+          // bursts. The 60 ms floor only stops the same frame delivered
+          // twice (duplicate callback/reflection) from double-counting.
+          // The resulting ambiguity - an OEM remote press whose preceding
+          // 66 66 query we missed can reach consensus inside our window -
+          // is handled by the mismatch yield policy in the coordinator,
+          // not by timing.
           if (id(cl_candidate_total_count) == 0 ||
-              (now - id(cl_candidate_last_ms)) >= 95UL) {
+              (now - id(cl_candidate_last_ms)) >= 60UL) {
             id(cl_candidate_total_count)++;
             if (exact_candidate) id(cl_candidate_exact_count)++;
             id(cl_candidate_last_ms) = now;
@@ -1198,6 +1228,7 @@ sx126x:
         }
         if (observed_timer_hours > 0) {
           id(timer_active) = true;
+          id(timer_armed_hours) = (uint8_t) observed_timer_hours;
           id(timer_expiry_millis) = millis() + observed_timer_hours * 3600000UL;
           id(timer_remaining_sensor).publish_state(observed_timer_hours * 60);
         } else {
@@ -1248,6 +1279,20 @@ script:
                 ESP_LOGE("TX", "Refused command %02X: Remote Sender ID is unset", cmd);
           else:
             - lambda: |-
+                // A deliberate user command during an open MANUAL learn
+                // window means the user is operating the fan, not pairing:
+                // close the window so RX validation and the closed loop
+                // work normally for this command (the learn branch would
+                // otherwise consume every frame, silently degrading it to
+                // blind open-loop re-fire). Unprovisioned auto-learn never
+                // reaches here - the unset-ID refusal above fired first.
+                if (id(learn_active)) {
+                  id(learn_active) = false;
+                  id(learn_auto_mode) = false;
+                  id(learn_candidate_id) = 0;
+                  id(learn_candidate_first_time) = 0;
+                  ESP_LOGW("LEARN", "Learn window cancelled by user command");
+                }
                 id(tx_burst_sender_id) = id(learned_sender_id);
                 id(tx_count_sensor).publish_state(id(tx_count_sensor).state + 1);
                 const char *label = "timer";
@@ -1498,6 +1543,7 @@ script:
           }
           if (timer_hours > 0) {
             id(timer_active) = true;
+            id(timer_armed_hours) = (uint8_t) timer_hours;
             id(timer_expiry_millis) = millis() + timer_hours * 3600000UL;
             id(timer_remaining_sensor).publish_state(timer_hours * 60);
           }
@@ -1633,24 +1679,32 @@ interval:
             id(quietcool_fan).publish_state();
             id(rf_echo_guard) = false;
 
-            // Mirror timer metadata only when the actual confirmed state
-            // differs from our request. A matching local timer already began
-            // at button time and must not gain seconds on confirmation.
-            if (!state_matches) {
-              uint32_t actual_timer_hours = 0;
-              if (actual_duration == 0x1) actual_timer_hours = 1;
-              else if (actual_duration == 0x2) actual_timer_hours = 2;
-              else if (actual_duration == 0x4) actual_timer_hours = 4;
-              else if (actual_duration == 0x8) actual_timer_hours = 8;
-              else if (actual_duration == 0xC) actual_timer_hours = 12;
-              if (actual_timer_hours > 0) {
+            // Reconcile timer metadata from the confirmed state. A timer
+            // duration only (re)arms the local countdown on a MISMATCH -
+            // a matching local timer already began at button time and must
+            // not gain seconds on confirmation. But a confirmed
+            // ZERO-DURATION state (off or continuous) always clears the
+            // countdown, even when it matches the request: a mismatch
+            // reply mid-transaction (e.g. "still High/1h" after a dropped
+            // OFF) may have restored timer metadata that this later
+            // confirmed OFF must not leave behind - stale timer_active
+            // once let a "None" cancel re-energize an off fan.
+            uint32_t actual_timer_hours = 0;
+            if (actual_duration == 0x1) actual_timer_hours = 1;
+            else if (actual_duration == 0x2) actual_timer_hours = 2;
+            else if (actual_duration == 0x4) actual_timer_hours = 4;
+            else if (actual_duration == 0x8) actual_timer_hours = 8;
+            else if (actual_duration == 0xC) actual_timer_hours = 12;
+            if (actual_timer_hours > 0) {
+              if (!state_matches) {
                 id(timer_active) = true;
+                id(timer_armed_hours) = (uint8_t) actual_timer_hours;
                 id(timer_expiry_millis) = millis() + actual_timer_hours * 3600000UL;
                 id(timer_remaining_sensor).publish_state(actual_timer_hours * 60);
-              } else {
-                id(timer_active) = false;
-                id(timer_remaining_sensor).publish_state(0);
               }
+            } else {
+              id(timer_active) = false;
+              id(timer_remaining_sensor).publish_state(0);
             }
 
             id(cl_candidate_state) = 0xFF;
@@ -1672,11 +1726,44 @@ interval:
                        (unsigned int) id(cl_query_count));
               ESP_LOGW("CLOSED_LOOP", "%s", status);
             } else if (id(refire_left) > 0) {
-              id(cl_query_due) = false;
-              id(cl_query_window) = false;
-              snprintf(status, sizeof(status), "mismatch: fan is %s; spaced re-fire pending (%d left)",
-                       confirmed, id(refire_left));
-              ESP_LOGW("CLOSED_LOOP", "%s", status);
+              // Mismatch yield policy. The wire format cannot distinguish
+              // a fan reply from an OEM remote command (same frames, same
+              // sender ID, same timing), so a consensus that CONTRADICTS
+              // our request may actually be a physical remote press whose
+              // preceding 66 66 query we missed while transmitting.
+              // If the raw byte decodes as a valid OEM command, yield:
+              // cancel the remaining re-fires and surface it, instead of
+              // fighting a possible human override on air. EXCEPTION: an
+              // OFF transaction never yields - if the user really pressed
+              // a speed, the fan ends off and one re-press recovers it,
+              // whereas yielding a real dropped OFF could leave a
+              // whole-house fan running unattended. Safety points off.
+              uint8_t raw_speed_nibble = raw & 0xF0;
+              uint8_t raw_duration = raw & 0x0F;
+              bool raw_duration_ok =
+                  (raw_duration == 0x0 || raw_duration == 0x1 || raw_duration == 0x2 ||
+                   raw_duration == 0x4 || raw_duration == 0x8 || raw_duration == 0xC ||
+                   raw_duration == 0xF);
+              bool report_could_be_command =
+                  ((raw_speed_nibble == 0x90 || raw_speed_nibble == 0xA0 ||
+                    raw_speed_nibble == 0xB0) && raw_duration_ok) ||
+                  raw == 0x80;
+              bool desired_is_off = (id(cl_desired_cmd) & 0x0F) == 0;
+              if (report_could_be_command && !desired_is_off) {
+                id(refire_left) = 0;
+                id(cl_active) = false;
+                id(cl_query_due) = false;
+                id(cl_query_window) = false;
+                snprintf(status, sizeof(status),
+                         "possible OEM override: fan is %s; yielding (no re-fire)", confirmed);
+                ESP_LOGW("CLOSED_LOOP", "%s", status);
+              } else {
+                id(cl_query_due) = false;
+                id(cl_query_window) = false;
+                snprintf(status, sizeof(status), "mismatch: fan is %s; spaced re-fire pending (%d left)",
+                         confirmed, id(refire_left));
+                ESP_LOGW("CLOSED_LOOP", "%s", status);
+              }
             } else {
               id(cl_active) = false;
               id(cl_query_due) = false;
@@ -1780,6 +1867,31 @@ interval:
           id(timer_active) = false;
           id(timer_remaining_sensor).publish_state(0);
 
+  # Fan Timer select UI sync. Mirrors the device-local timer bookkeeping
+  # into the select regardless of who armed it - a select pick, an OEM
+  # remote press heard over RF, or a closed-loop confirmation - and resets
+  # it to None on expiry/off. publish_state() never fires set_action, so
+  # this mirror can never transmit; it is UI state only.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const char *desired = "None";
+          uint8_t desired_hours = 0;
+          if (id(timer_active)) {
+            switch (id(timer_armed_hours)) {
+              case 1: desired = "1 hour"; desired_hours = 1; break;
+              case 2: desired = "2 hours"; desired_hours = 2; break;
+              case 4: desired = "4 hours"; desired_hours = 4; break;
+              case 8: desired = "8 hours"; desired_hours = 8; break;
+              case 12: desired = "12 hours"; desired_hours = 12; break;
+              default: break;
+            }
+          }
+          if (id(timer_select_synced_hours) != desired_hours) {
+            id(timer_select_synced_hours) = desired_hours;
+            id(fan_timer_select).publish_state(desired);
+          }
+
   # Learn-window housekeeping is deliberately separate from the verified
   # timer mirror above. It only mutates learn globals and never reaches a
   # fan, script, or radio action. Manual windows expire at 120 seconds;
@@ -1830,11 +1942,12 @@ interval:
 # A single on_state automation (unconditional on every publish_state(),
 # unlike on_turn_on/on_turn_off/on_speed_set which only fire on a state or
 # speed edge) replaces the previous on_turn_on/on_turn_off/on_speed_set
-# triggers. That fixes two things at once: the "Fan OFF" button now always
-# transmits 0x90 even when the entity already believed it was off (because
-# control() always calls publish_state(), and on_state is not edge-
-# filtered), and a single state+speed change (e.g. Off -> High) can no
-# longer double-transmit from two edge-triggers firing on the same publish.
+# triggers. That fixes two things at once: any off command (an HA fan-card
+# toggle, or the PRG button's long-press fan.turn_off) always transmits
+# 0x90 even when the entity already believed it was off (because control()
+# always calls publish_state(), and on_state is not edge-filtered), and a
+# single state+speed change (e.g. Off -> High) can no longer
+# double-transmit from two edge-triggers firing on the same publish.
 # The rf_echo_guard check keeps RX- and timer-originated publishes silent.
 # =============================================================================
 fan:
@@ -1873,67 +1986,72 @@ fan:
                         - script.execute: send_high
 
 # =============================================================================
+# Fan Timer select
+#
+# Replaces the former Timer 1H/2H/4H buttons (and the former Fan OFF/Low/
+# Medium/High buttons, whose function lives entirely on the fan entity:
+# HA's fan card exposes off + three speeds directly, and the entity's
+# unconditional on_state transmits even a repeated off). One dropdown arms
+# the OEM timer at the CURRENT fan speed; the fan's full duration set
+# (1/2/4/8/12 h) is exposed, not just the three the OEM remote surfaces.
+#
+# Two strictly separate directions:
+#   - set_action (a deliberate user/HA selection) is the ONLY path that
+#     transmits, and only via the same send_timer / send_* wrappers the
+#     buttons used.
+#   - The 1 s sync interval below mirrors the device-local timer state INTO
+#     the select with publish_state(), which never fires set_action - so a
+#     timer started from the physical OEM remote (validated RX frame) shows
+#     up as the matching selection, expiry/off resets it to None, and none
+#     of that mirroring can ever transmit.
+# =============================================================================
+select:
+  - platform: template
+    name: "Fan Timer"
+    id: fan_timer_select
+    icon: "mdi:timer-outline"
+    options:
+      - "None"
+      - "1 hour"
+      - "2 hours"
+      - "4 hours"
+      - "8 hours"
+      - "12 hours"
+    optimistic: false
+    set_action:
+      - lambda: |-
+          uint8_t nibble = 0x0;
+          if (x == "1 hour") nibble = 0x1;
+          else if (x == "2 hours") nibble = 0x2;
+          else if (x == "4 hours") nibble = 0x4;
+          else if (x == "8 hours") nibble = 0x8;
+          else if (x == "12 hours") nibble = 0xC;
+          if (nibble != 0x0) {
+            id(send_timer)->execute(nibble);
+            return;
+          }
+          // "None" with a timer running: cancel by re-sending the current
+          // speed as continuous - the physical fan drops its timer on any
+          // new state command, so this keeps the fan running minus the
+          // countdown. "None" with no timer running is a no-op (the sync
+          // interval will simply re-publish None). The entity-state guard
+          // is defense in depth: if timer bookkeeping is ever stale while
+          // the entity reads off, cancelling must not TURN THE FAN ON.
+          if (!id(timer_active)) return;
+          if (!id(quietcool_fan).state) {
+            id(timer_active) = false;
+            id(timer_remaining_sensor).publish_state(0);
+            ESP_LOGW("TIMER", "Stale timer cleared on None with fan off; no TX");
+            return;
+          }
+          if (id(quietcool_fan).speed == 2) id(send_medium)->execute();
+          else if (id(quietcool_fan).speed >= 3) id(send_high)->execute();
+          else id(send_low)->execute();
+
+# =============================================================================
 # Control Buttons
 # =============================================================================
 button:
-  - platform: template
-    name: "Fan OFF"
-    icon: "mdi:fan-off"
-    on_press:
-      # fan.turn_off always calls control() -> publish_state(), and
-      # on_state (unlike the old on_turn_off) is not edge-filtered, so this
-      # transmits 0x90 every time, even if the entity already read as off.
-      - fan.turn_off: quietcool_fan
-
-  - platform: template
-    name: "Fan Low"
-    icon: "mdi:fan-speed-1"
-    on_press:
-      - fan.turn_on:
-          id: quietcool_fan
-          speed: 1
-
-  - platform: template
-    name: "Fan Medium"
-    icon: "mdi:fan-speed-2"
-    on_press:
-      - fan.turn_on:
-          id: quietcool_fan
-          speed: 2
-
-  - platform: template
-    name: "Fan High"
-    icon: "mdi:fan-speed-3"
-    on_press:
-      - fan.turn_on:
-          id: quietcool_fan
-          speed: 3
-
-  # Timer buttons: speed-aware duration commands, sent via send_timer.
-  - platform: template
-    name: "Timer 1H"
-    icon: "mdi:timer-outline"
-    on_press:
-      - script.execute:
-          id: send_timer
-          duration_nibble: 0x01
-
-  - platform: template
-    name: "Timer 2H"
-    icon: "mdi:timer-outline"
-    on_press:
-      - script.execute:
-          id: send_timer
-          duration_nibble: 0x02
-
-  - platform: template
-    name: "Timer 4H"
-    icon: "mdi:timer-outline"
-    on_press:
-      - script.execute:
-          id: send_timer
-          duration_nibble: 0x04
-
   # Diagnostic: transmit the OEM wake/status query (SENDER 66 66) and
   # raw-log every frame heard in the next 15 s (see query_probe_started).
   # The OEM remote sends exactly this query before every command and reads
@@ -1956,6 +2074,10 @@ button:
   - platform: template
     name: "Learn Remote ID"
     icon: "mdi:remote"
+    entity_category: config
+    # Hidden by default: pairing is a one-time setup action. Enable the
+    # entity from the device's Configuration section in HA when needed.
+    disabled_by_default: true
     on_press:
       - lambda: |-
           id(tx_burst).stop();
@@ -1978,6 +2100,10 @@ button:
   - platform: template
     name: "Forget Remote ID"
     icon: "mdi:remote-off"
+    entity_category: config
+    # Hidden by default like Learn: it erases the pairing, so it should
+    # take a deliberate enable + press, not sit on the main control card.
+    disabled_by_default: true
     on_press:
       - lambda: |-
           id(tx_burst).stop();
@@ -2043,7 +2169,9 @@ binary_sensor:
       - min_length: 1000ms
         max_length: 4999ms
         then:
-          # Long press: turn off (unconditional - see button "Fan OFF" above)
+          # Long press: turn off (unconditional - fan.turn_off always calls
+          # control() -> publish_state(), and on_state is not edge-filtered,
+          # so this transmits 0x90 even if the entity already read as off)
           - fan.turn_off: quietcool_fan
       - min_length: 5000ms
         max_length: 10000ms
@@ -2522,7 +2650,9 @@ display:
       // row's 8px digit ink height exactly, no offset needed.
       it.print(temp_icon_x, 43, id(font_icons), TextAlign::TOP_LEFT, "\U000F112B");
 
-# Status LED. PIN CONFIDENCE: MEDIUM - GPIO35 for the onboard white LED is
+# Status LED - config-category housekeeping, not a control: it belongs
+# in the device's Configuration section in HA.
+# PIN CONFIDENCE: MEDIUM - GPIO35 for the onboard white LED is
 # corroborated by general Heltec V3 community knowledge but was not in the
 # port brief's pinout list and its drive polarity (active-high assumed,
 # same as the SX1278 LoRa32 V2.1's unmodified `status_led`) is NOT confirmed
@@ -2531,6 +2661,7 @@ light:
   - platform: status_led
     name: "Status LED"
     pin: GPIO35
+    entity_category: config
 
 # =============================================================================
 # Sensors

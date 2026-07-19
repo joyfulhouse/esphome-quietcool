@@ -103,8 +103,12 @@ details, including re-arming learn later and `Forget Remote ID`, are in the
   a second. Control is fully **bi-directional** — the controller listens to
   the same RF channel and mirrors remote presses into HA without ever
   re-transmitting them (no RF echo, no loop).
-- The **Timer 1H / 2H / 4H** buttons run the fan at its current speed with the
-  OEM countdown; the OLED shows the remaining time as `HH:MM:SS`.
+- The **Fan Timer** select arms the OEM countdown at the fan's current speed —
+  pick 1 / 2 / 4 / 8 / 12 hours, or `None` to cancel a running timer (the fan
+  keeps running at its current speed). The OLED shows the remaining time as
+  `HH:MM:SS`, and the select stays in sync no matter who started the timer:
+  start one from the physical OEM remote and the select snaps to the matching
+  duration within a second.
 
 ## 7. Optional: temperatures on the OLED
 
@@ -136,17 +140,22 @@ learn its own remote. The pattern is in
 
 | Entity | Type | Purpose |
 | --- | --- | --- |
-| `QuietCool Fan` | fan | Off / Low / Medium / High, the main control |
-| `Fan OFF`, `Fan Low/Medium/High` | buttons | One-tap direct commands |
-| `Timer 1H` / `2H` / `4H` | buttons | OEM timers at the current speed |
+| `QuietCool Fan` | fan | Off / Low / Medium / High — the only fan control |
+| `Fan Timer` | select | OEM timer at the current speed: None / 1 / 2 / 4 / 8 / 12 h, synced with remote-started timers |
 | `Timer Remaining` | sensor | Countdown in seconds (also on the OLED) |
-| `Learn Remote ID` | button | Re-arm a 120 s learn window |
-| `Forget Remote ID` | button | Erase the stored ID and re-enter learn mode |
+| `Learn Remote ID` | button (config, disabled by default) | Re-arm a 120 s learn window |
+| `Forget Remote ID` | button (config, disabled by default) | Erase the stored ID and re-enter learn mode |
 | `Remote Sender ID` | text sensor | The learned four-byte ID (`CB …`) |
 | `TX Count`, `RX Valid Count`, `RX Rejected Count` | sensors | RF diagnostics |
 | `Last TX Command`, `Last Valid RX Frame` | text sensors | RF debugging |
 | `Battery Voltage` / `Battery Level` | sensors | On-board LiPo monitoring |
-| `WiFi Signal`, `Uptime`, `IP Address`, `Restart`, `Status LED` | misc | Housekeeping |
+| `WiFi Signal`, `Uptime`, `IP Address`, `Restart`, `Status LED` | misc | Housekeeping (`Status LED` under Configuration) |
+
+The `Learn Remote ID` and `Forget Remote ID` buttons live in the device's
+**Configuration** section and ship **disabled by default** (pairing normally
+happens through the automatic first-boot learn window, so they're one-time
+tools). To use one, enable it first: device page → the entity → gear icon →
+*Enabled*.
 
 ### Closed-loop confirmation entities
 
@@ -177,13 +186,14 @@ demand.
   `Remote Sender ID`: if it reads `unset`, learn mode hasn't completed and TX
   deliberately refuses (watch `TX Count` — it won't increment). Distance
   matters less than you'd think (+17 dBm reaches across a house), but metal
-  ducting between controller and fan receiver doesn't help. The current public
-  template has no confirmation loop, so an incremented `TX Count` proves only
-  that a burst was sent; it does not prove that the receiver changed state.
+  ducting between controller and fan receiver doesn't help. An incremented
+  `TX Count` proves only that a burst was sent; check
+  `Command Confirmation Status` for whether the fan actually confirmed it.
 - **Learn never confirms** — the two presses must be more than ~0.6 s and less
   than 60 s apart, and each must be a real speed/off/timer button. If the
-  first-boot window (15 minutes) has lapsed, press `Learn Remote ID` in HA or
-  hold the board's PRG button for 5–10 s to re-arm.
+  first-boot window (15 minutes) has lapsed, press `Learn Remote ID` in HA
+  (under Configuration; enable the entity first — it ships disabled) or hold
+  the board's PRG button for 5–10 s to re-arm.
 - **HA entity doesn't follow the OEM remote** — watch `RX Valid Count` while
   pressing the remote. If it doesn't increment, the remote hasn't been learned
   (or you're out of RX range); if it increments but the entity doesn't move,

@@ -341,21 +341,47 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         publish_index = timer.index("id(quietcool_fan).publish_state();")
         self.assertNotIn("delay:", timer[:publish_index])
 
-    def test_timer_buttons_use_speed_aware_script_with_correct_durations(self) -> None:
-        expected = {
-            "Timer 1H": "0x01",
-            "Timer 2H": "0x02",
-            "Timer 4H": "0x04",
-        }
-        for name, duration in expected.items():
-            with self.subTest(button=name):
-                marker = f'name: "{name}"'
-                index = self.text.index(marker)
-                # The button's on_press block is a small, bounded window
-                # after its name.
-                window = self.text[index : index + 400]
-                self.assertIn("id: send_timer", window)
-                self.assertIn(f"duration_nibble: {duration}", window)
+    def test_timer_select_maps_every_duration_and_cancels_via_state_scripts(self) -> None:
+        select_block = top_level_block(self.text, "select")
+        self.assertIn('name: "Fan Timer"', select_block)
+        self.assertIn("id: fan_timer_select", select_block)
+        # All five OEM durations plus None, each option mapped to its exact
+        # duration nibble inside set_action.
+        for option in ("None", "1 hour", "2 hours", "4 hours", "8 hours", "12 hours"):
+            self.assertIn(f'"{option}"', select_block)
+        for option, nibble in (
+            ("1 hour", "0x1"),
+            ("2 hours", "0x2"),
+            ("4 hours", "0x4"),
+            ("8 hours", "0x8"),
+            ("12 hours", "0xC"),
+        ):
+            with self.subTest(option=option):
+                self.assertIn(f'if (x == "{option}") nibble = {nibble};', select_block.replace("else if", "if"))
+        self.assertIn("id(send_timer)->execute(nibble);", select_block)
+        # "None" cancels a running timer through the existing state-command
+        # wrappers only (speed-preserving continuous), never a raw TX.
+        self.assertIn("id(send_medium)->execute();", select_block)
+        self.assertIn("id(send_high)->execute();", select_block)
+        self.assertIn("id(send_low)->execute();", select_block)
+        self.assertNotIn("sx127x.send_packet", select_block)
+        self.assertNotIn("tx_burst", select_block)
+        # Not optimistic: UI state comes only from the sync mirror.
+        self.assertIn("optimistic: false", select_block)
+
+    def test_timer_select_sync_mirrors_all_arming_sites_without_tx(self) -> None:
+        # The 1 s sync interval mirrors timer_active/timer_armed_hours into
+        # the select via publish_state (which never fires set_action).
+        sync = interval_item_containing(self.text, "id(fan_timer_select).publish_state(desired)")
+        self.assertIn("id(timer_active)", sync)
+        self.assertIn("id(timer_armed_hours)", sync)
+        self.assertNotIn("make_call", sync)
+        self.assertNotIn("tx_burst", sync)
+        self.assertNotIn("script.execute", sync)
+        # All three timer arming sites record the armed hours so a timer
+        # started from the physical OEM remote (validated RX frame) syncs
+        # into the select exactly like a locally armed one.
+        self.assertEqual(self.text.count("id(timer_armed_hours) = (uint8_t)"), 3)
 
     def test_boot_never_transmits(self) -> None:
         boot = top_level_block(self.text, "esphome")
@@ -412,15 +438,86 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("on_speed_set:", fan_block)
         self.assertIn("rf_echo_guard", fan_block)
 
-    def test_fan_off_button_is_unconditional(self) -> None:
-        index = self.text.index('name: "Fan OFF"')
-        window = self.text[index : index + 400]
-        self.assertIn("fan.turn_off: quietcool_fan", window)
-        # Must not be gated by any condition - "Fan OFF" always transmits,
-        # even when the entity already reads as off.
-        on_press_index = window.index("on_press:")
-        action_window = window[on_press_index:]
-        self.assertNotIn("if:", action_window)
+    def test_no_redundant_fan_or_timer_buttons_remain(self) -> None:
+        # Off/Low/Medium/High live on the fan entity (HA's fan card), and
+        # the timer moved to the Fan Timer select; the former one-tap
+        # buttons are deliberately gone.
+        for name in (
+            '"Fan OFF"',
+            '"Fan Low"',
+            '"Fan Medium"',
+            '"Fan High"',
+            '"Timer 1H"',
+            '"Timer 2H"',
+            '"Timer 4H"',
+        ):
+            self.assertNotIn(f"name: {name}", self.text)
+
+    def test_prg_long_press_off_is_unconditional(self) -> None:
+        # The physical PRG long-press is now the one-tap guaranteed-off
+        # path; fan.turn_off always reaches control() -> publish_state()
+        # and on_state is not edge-filtered, so it transmits even when the
+        # entity already reads as off. It must not be gated by a condition.
+        binary_block = top_level_block(self.text, "binary_sensor")
+        index = binary_block.index("fan.turn_off: quietcool_fan")
+        window = binary_block[max(0, index - 500) : index]
+        self.assertIn("min_length: 1000ms", window)
+        self.assertNotIn("if:", binary_block[binary_block.rindex("min_length: 1000ms", 0, index) : index])
+
+    def test_confirmed_zero_duration_always_clears_timer_metadata(self) -> None:
+        # Adversarial-review fix: a confirmed OFF/continuous report must
+        # clear timer_active even when it MATCHES the request, so a
+        # mismatch-restored timer can't survive the final confirmation and
+        # later let the select's None path re-energize an off fan.
+        coord = interval_item_containing(self.text, "id(cl_report_ready)")
+        arm_index = coord.index("if (!state_matches) {")
+        clear_index = coord.index("id(timer_active) = false;", arm_index)
+        # The clear branch is the else of the hours>0 check, no longer
+        # nested inside the mismatch-only guard.
+        between = coord[arm_index:clear_index]
+        self.assertIn("} else {", between)
+        self.assertNotIn("if (!state_matches)", between[between.index("} else {"):])
+
+    def test_mismatch_yield_policy_never_yields_off(self) -> None:
+        coord = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn("report_could_be_command", coord)
+        self.assertIn("desired_is_off", coord)
+        self.assertIn("(report_could_be_command && !desired_is_off)", coord)
+        self.assertIn("possible OEM override", coord)
+        # Yield cancels the re-fires; the OFF path must keep them.
+        yield_index = coord.index("possible OEM override")
+        self.assertIn("id(refire_left) = 0;", coord[coord.index("(report_could_be_command"):yield_index])
+        self.assertIn("spaced re-fire pending", coord[yield_index:])
+
+    def test_consensus_dedup_floor_is_the_validated_60ms(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        self.assertIn(">= 60UL", radio)
+        self.assertNotIn(">= 95UL", radio)
+        # The comment must document the real timing (airtime included).
+        self.assertIn("102 ms", radio)
+
+    def test_user_command_closes_manual_learn_window(self) -> None:
+        tx_burst = script_blocks(self.text)["tx_burst"]
+        self.assertIn("Learn window cancelled by user command", tx_burst)
+        cancel_index = tx_burst.index("if (id(learn_active))")
+        send_index = tx_burst.index("send_packet")
+        self.assertLess(cancel_index, send_index)
+
+    def test_timer_select_none_never_transmits_with_fan_off(self) -> None:
+        select_block = top_level_block(self.text, "select")
+        guard_index = select_block.index("if (!id(quietcool_fan).state)")
+        send_index = select_block.index("id(send_medium)->execute();")
+        self.assertLess(guard_index, send_index)
+        self.assertIn("Stale timer cleared on None with fan off; no TX", select_block)
+
+    def test_setup_entities_are_config_category_and_learn_forget_disabled(self) -> None:
+        for marker in ('name: "Learn Remote ID"', 'name: "Forget Remote ID"'):
+            index = self.text.index(marker)
+            window = self.text[index : index + 400]
+            self.assertIn("entity_category: config", window)
+            self.assertIn("disabled_by_default: true", window)
+        light_block = top_level_block(self.text, "light")
+        self.assertIn("entity_category: config", light_block)
 
     def test_rx_validation_rejects_malformed_frames(self) -> None:
         radio = top_level_block(self.text, "sx127x")
