@@ -93,7 +93,10 @@ details, including re-arming learn later and `Forget Remote ID`, are in the
 
 ## 6. Try it
 
-- In HA, turn **QuietCool Fan** on and pick Low / Medium / High — the fan
+- In HA, turn **QuietCool Fan** on and pick a speed that your fan actually
+  supports — the public template exposes Low / Medium / High, but it does not
+  yet query the receiver's speed capability or hide Medium on a two-speed fan.
+  The fan
   responds like the OEM remote pressed the button (same frames, same 3×
   burst).
 - Press a button on the **OEM remote**: the HA entity updates to match within
@@ -145,13 +148,35 @@ learn its own remote. The pattern is in
 | `Battery Voltage` / `Battery Level` | sensors | On-board LiPo monitoring |
 | `WiFi Signal`, `Uptime`, `IP Address`, `Restart`, `Status LED` | misc | Housekeeping |
 
+### Closed-loop research versus this install
+
+The OEM protocol supports a real query/response exchange. Live SX1278 research
+has validated a controller that, only after an explicit user command, sends
+`66 66`, listens for the fan's fixed six-byte reply, compares confirmed and
+requested state, and retains the existing spacing while allowing only bounded
+continuation attempts. That build publishes these additional diagnostics:
+
+| Research-build entity | Meaning |
+| --- | --- |
+| `Last Confirmed Fan State` | Last state reported by the fan itself |
+| `Command Confirmation Status` | Pending, confirmed, mismatch, or bounded failure |
+| `Fan Speed Capability` | Capability metadata reported by the receiver, including two-speed |
+
+Those entities and behaviors are **not in the public YAMLs installed by this
+guide yet**. Their absence is expected and does not indicate a failed install.
+The current templates remain command-burst plus passive OEM-remote receive
+implementations; `Last TX Command` records an attempted command, not proof that
+the fan accepted it.
+
 ## Troubleshooting
 
 - **Fan doesn't react to HA commands** — check the antenna, then check
   `Remote Sender ID`: if it reads `unset`, learn mode hasn't completed and TX
   deliberately refuses (watch `TX Count` — it won't increment). Distance
   matters less than you'd think (+17 dBm reaches across a house), but metal
-  ducting between controller and fan receiver doesn't help.
+  ducting between controller and fan receiver doesn't help. The current public
+  template has no confirmation loop, so an incremented `TX Count` proves only
+  that a burst was sent; it does not prove that the receiver changed state.
 - **Learn never confirms** — the two presses must be more than ~0.6 s and less
   than 60 s apart, and each must be a real speed/off/timer button. If the
   first-boot window (15 minutes) has lapsed, press `Learn Remote ID` in HA or

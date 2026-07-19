@@ -25,6 +25,26 @@ so the four-byte sender IDs differ per unit (see
 [firmware-analysis.md](firmware-analysis.md)) — no config change needed beyond
 letting each one run learn mode.
 
+Keep the checked-in `quietcool_sender_id: "0x00000000"` seed in every reusable
+wrapper. Each device must learn its own ID; copying an ID from another fan would
+also make any later query/reply correlation target the wrong receiver.
+
+## State confirmation and speed capability
+
+The corrected protocol research shows that a fan reply is a fixed six-byte
+payload carrying the receiver's real state and, when supplied, speed capability.
+A live-validated SX1278 controller uses that response after an explicit command
+to perform bounded query/compare/continuation handling and correctly recognized
+a two-speed receiver, whose OEM remote skips Medium.
+
+The public base files have **not** incorporated that closed-loop controller yet.
+They do not publish `Last Confirmed Fan State`, `Command Confirmation Status`, or
+`Fan Speed Capability`, and each public fan entity still exposes all three speed
+choices. For a two-speed installation, use only the speeds supported by the OEM
+control; do not interpret the public entity's Medium option as detected hardware
+capability. When a closed-loop port is eventually deployed to multiple fans,
+confirmation state and capability must remain local to each learned sender ID.
+
 ## Home Assistant display sources
 
 The OLED's indoor/outdoor/attic values come from three HA template-sensor helpers

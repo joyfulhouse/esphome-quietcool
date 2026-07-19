@@ -13,8 +13,9 @@ clean-room implementation of what that analysis found.
 
 ## Features
 
-- **Direct RF fan control** — Off / Low / Medium / High and speed-aware
-  1 / 2 / 4-hour timers, transmitted as the exact OEM frames.
+- **Direct RF fan control** — Off / Low / Medium / High (where supported by
+  the fan model) and speed-aware 1 / 2 / 4-hour timers, transmitted as the
+  exact OEM frames.
 - **Learn mode** — capture your fan's 4-byte sender ID by pressing its OEM remote
   twice. No packet sniffing or firmware extraction needed to onboard; the ID is
   persisted in NVS and survives reboots and OTA. See
@@ -32,6 +33,27 @@ clean-room implementation of what that analysis found.
 - **Safety-first** — never transmits at boot, after OTA, on API reconnect, from
   restored state, or from a received frame. Multi-model adversarially reviewed.
 - **Multi-board & multi-fan** — one shared config, thin per-device wrappers.
+
+### Closed-loop research status
+
+The reverse-engineering now establishes the fan's state-reply protocol, and a
+closed-loop controller has been validated on a live SX1278 installation. After
+an explicit user command, that implementation sends the OEM `66 66` query,
+decodes the fan's real state, compares it with the requested state, and permits
+only a bounded number of spaced continuation attempts. It also publishes `Last
+Confirmed Fan State`, `Command Confirmation Status`, and `Fan Speed Capability`;
+the last of these identified the test fan as a two-speed model.
+
+That closed-loop controller is **research-proven but not yet ported into the two
+public template YAMLs in this repository**. The checked-in `quietcool-lora32.yaml`
+and `quietcool-lora-v3.yaml` still send one three-frame command burst per explicit
+action and passively mirror valid OEM-remote commands. They do not originate
+`66 66` queries, decode fan replies, re-fire commands, or expose the three
+confirmation/capability diagnostics above. This distinction matters when
+reading [the protocol](docs/protocol.md) and
+[firmware analysis](docs/firmware-analysis.md): those documents describe what
+the fan and OEM remote actually support, not a claim that every recovered
+behavior is already shipped by these templates.
 
 ## Supported hardware
 
@@ -83,7 +105,8 @@ troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
 - [INSTALL.md](INSTALL.md) — step-by-step install, pairing, and troubleshooting
 - [docs/protocol.md](docs/protocol.md) — RF profile, frame format, command byte
 - [docs/firmware-analysis.md](docs/firmware-analysis.md) — the reverse-engineering:
-  memory map, register config, command-byte disassembly, per-unit ID mechanism
+  memory map, register config, command-byte and response-parser disassembly,
+  per-unit ID mechanism
 - [docs/hardware.md](docs/hardware.md) — boards, wiring, antenna, buying links
 - [docs/display.md](docs/display.md) — OLED layout, icon language, preview renderer
 - [docs/deployment.md](docs/deployment.md) — multi-device pattern + a real 2-fan install
@@ -105,8 +128,12 @@ docs/                            # protocol, firmware analysis, hardware, displa
 
 A whole-house fan moves a lot of air. Before energizing one: open enough windows
 for makeup air, confirm combustion appliances can't backdraft, and keep a working
-OEM control as a fallback. This firmware never transmits on its own — only from an
-explicit button press or Home Assistant command.
+OEM control as a fallback. The checked-in public templates transmit only for an
+explicit button press or Home Assistant command. Any future port of the validated
+closed-loop controller must preserve the stronger causal invariant: queries and
+spaced continuation attempts may follow an explicit command, but must remain
+bounded and must never start at boot, after OTA, on reconnect, from restored
+state, or from a received frame.
 
 
 ## Learn mode / porting to your own fan
