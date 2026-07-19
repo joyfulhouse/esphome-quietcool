@@ -8,18 +8,22 @@
 #
 # RF transmission only ever happens from ONE place: the queued core script
 # tx_burst, which contains the only send_packet call in this firmware. It
-# is invoked by five thin, delay-free wrapper scripts, all user-initiated:
+# is invoked by five thin, delay-free user-command wrappers and by two bounded
+# continuations that those wrappers arm:
 #   1. The four fixed state scripts (send_off/send_low/send_medium/send_high),
 #      invoked by the fan entity's on_state automation whenever the entity's
 #      control path (buttons, physical button, or a Home Assistant fan
 #      command) changes it.
 #   2. The speed-aware send_timer script, invoked directly by the Timer
 #      buttons.
+#   3. The pre-existing spaced re-fire backstop and the new passive 66 query;
+#      both are volatile, bounded, and can only follow a user-initiated command.
 # tx_burst's mode: queued preserves press order, so a rapid Off->High press,
 # a same-script re-press, or a timer correction can never interleave their
 # frames on air or be silently dropped.
-# Received RF frames and Home Assistant temperature sensors are display-only
-# and never reach a script that transmits. See rf_echo_guard below.
+# RX never executes a script or sends a packet. It only records consensus;
+# interval code compares that result with the already-armed desired state.
+# Home Assistant temperature sensors remain display-only. See rf_echo_guard.
 
 substitutions:
   # Device identity. Substitution-based so a second physical controller can
@@ -43,6 +47,29 @@ substitutions:
   display_indoor_entity: "sensor.quietcool_display_indoor"
   display_outdoor_entity: "sensor.quietcool_display_outdoor"
   display_attic_entity: "sensor.quietcool_display_attic"
+
+  # Spaced command re-fire remains the no-RX safety backstop. Closed-loop
+  # verification now layers a query/listen window after every actual command
+  # burst and cancels the remaining re-fires only after repeated reports agree
+  # with the requested lower-six-bit state. If every reply is lost, all of the
+  # original bounded re-fires still occur. OFF retains the larger budget.
+  command_refire_count: "3"           # extra re-sends after the initial burst
+  off_refire_count: "5"               # OFF re-fires more (safety)
+  command_refire_interval_ms: "1000"  # spacing, comfortably past the ~0.5 s busy window
+
+  # Firmware's retry tick is ~562.5 ms. Direct-query fan replies arrived
+  # 417-648 ms after query start; a query immediately following a dropped
+  # command produced its first clean report at about 805 ms from actual query
+  # TX start. Wait 200 ms after a command burst, ignore implausibly-early
+  # callbacks, and retain a conservative consensus window through scheduler/
+  # radio jitter. Raw live capture also found a second exact response triple
+  # at about +1.44/+1.54/+1.65 s. Keep a longer classification-only tail so
+  # those repeats cannot masquerade as OEM commands after confirmation; it
+  # does not extend the consensus timeout or delay the 1 s safety re-fire.
+  closed_loop_query_delay_ms: "200"
+  closed_loop_response_min_ms: "300"
+  closed_loop_response_window_ms: "1100"
+  closed_loop_response_tail_ms: "2500"
 
 esphome:
   name: ${device_name}
@@ -102,6 +129,9 @@ esphome:
           id(rx_rejected_count_sensor).publish_state(0);
           id(last_tx_command_sensor).publish_state("none");
           id(last_rx_frame_sensor).publish_state("none");
+          id(confirmed_fan_state_sensor).publish_state("unknown");
+          id(command_confirmation_status_sensor).publish_state("idle");
+          id(fan_capability_sensor).publish_state("unknown");
 
           // Raw member write ONLY - no publish_state(), so on_state (and
           // therefore TX) never fires here. With restore_mode: NO_RESTORE,
@@ -282,6 +312,126 @@ globals:
     # millis()) - so a millis() wraparound (~49.7 days of uptime) can never
     # produce a false "expired" or false "still running" result.
 
+  # Spaced command re-fire state (see substitutions and the 250 ms re-fire
+  # interval). refire_cmd is the command byte to re-send; refire_left is how
+  # many re-sends remain; refire_next_ms is the millis() the next re-send is
+  # due. Armed by the command wrappers, decremented by the interval, and
+  # cleared to 0 by a heard OEM-remote command so a physical press always
+  # wins. Never persisted - a reboot must not resurrect a stale re-fire.
+  - id: refire_cmd
+    type: uint8_t
+    restore_value: false
+    initial_value: "0x00"
+  - id: refire_left
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: refire_next_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  # Closed-loop command transaction. All state is deliberately volatile: a
+  # reboot/OTA can never resume a query or resurrect a command. RX only fills
+  # candidate/report globals; the 100 ms interval performs comparisons and
+  # the existing interval remains the only automatic command re-fire driver.
+  - id: cl_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: cl_desired_cmd
+    type: uint8_t
+    restore_value: false
+    initial_value: "0x00"
+  - id: cl_command_attempts
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_attempt_limit
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_query_due
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: cl_query_due_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_query_window
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: cl_query_epoch
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: cl_query_epoch_confirmation
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: cl_query_started_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_query_count
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_candidate_state
+    type: uint8_t
+    restore_value: false
+    initial_value: "0xFF"
+  - id: cl_candidate_raw
+    type: uint8_t
+    restore_value: false
+    initial_value: "0xFF"
+  - id: cl_candidate_capability
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_candidate_total_count
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_candidate_exact_count
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_candidate_last_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: cl_report_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: cl_report_state
+    type: uint8_t
+    restore_value: false
+    initial_value: "0xFF"
+  - id: cl_report_raw
+    type: uint8_t
+    restore_value: false
+    initial_value: "0xFF"
+  - id: cl_report_capability
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+
+  # Any received 66 66 is from an external/OEM remote: the SX1278 is
+  # half-duplex and cannot hear its own query. It therefore has priority and
+  # cancels both the local confirmation transaction and remaining re-fires.
+  - id: oem_query_seen
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: oem_query_seen_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
   - id: fan_anim_frame
     type: int
     restore_value: false
@@ -307,6 +457,20 @@ globals:
     # fan_anim_frame above: read and written only inside the display
     # lambda, never by any TX/RX/timer/battery-sensor path.
 
+  - id: query_probe_started
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+    # Diagnostic probe window anchor (millis of the last "Query Fan State"
+    # press; 0 = no probe ever run). While (millis() - started) < 15000 the
+    # RX callback WARN-logs every raw frame - any length, any prefix,
+    # BEFORE validation - so the fan's response to a 66 66 wake query can
+    # be captured with the ESP's own receiver, and a human OEM-remote press
+    # inside the window captures the remote's full query/response/command
+    # exchange. Read/written only by the probe button and the raw-log block
+    # at the top of on_packet; never gates validation, state publication,
+    # or TX.
+
 # =============================================================================
 # SX127x radio - firmware-derived CMT2300A-compatible profile
 # =============================================================================
@@ -317,6 +481,12 @@ sx127x:
   dio0_pin: GPIO26
   frequency: 433920000
   modulation: FSK
+  # OEM CMT2300A auto-select cannot be proven register-for-register, but its
+  # documented minimum RX bandwidth is 50 kHz. The former SX1278 default was
+  # 125 kHz for a Carson occupied width of only ~22.4 kHz, admitting roughly
+  # 4 dB more thermal noise. 50 kHz still leaves ample deviation/oscillator
+  # margin and changes RX only; TX framing/modulation is untouched.
+  bandwidth: 50_0kHz
   packet_mode: true
   bitsync: true
   bitrate: 2400
@@ -346,26 +516,47 @@ sx127x:
         }
         ESP_LOGV("RX", "Raw callback: %d bytes: %s", x.size(), hex.c_str());
 
-        if (x.size() != 6) {
+        // Diagnostic probe window (see query_probe_started): after a
+        // "Query Fan State" press, WARN-log every raw frame for 15 s so
+        // the fan's 66 66 response can be isolated over OTA logs without
+        // an SDR. Log-only - validation below is completely unaffected.
+        {
+          uint32_t probe_now = millis();
+          uint32_t probe_started = id(query_probe_started);
+          if (probe_started != 0 && (probe_now - probe_started) < 15000UL) {
+            ESP_LOGW("PROBE", "+%4lu ms len=%2d: %s",
+                     (unsigned long) (probe_now - probe_started),
+                     (int) x.size(), hex.c_str());
+          }
+        }
+
+        // The OEM FIFO is fixed at seven bytes including the hardware 0x06
+        // length byte, so its application payload is exactly six bytes. We
+        // keep the first six available here only for the bounded consensus
+        // recovery path below: a corrupted 06->0E length makes the SX1278
+        // append FIFO noise even though the underlying payload is still first.
+        if (x.size() < 6) {
           id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
-          ESP_LOGD("RX", "Rejected: length %d (expected 6)", x.size());
+          ESP_LOGD("RX", "Rejected: short length %d (expected 6)", x.size());
           return;
         }
 
-        if (x[4] != x[5]) {
-          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
-          ESP_LOGD("RX", "Rejected: command byte mismatch %02X != %02X", x[4], x[5]);
-          return;
-        }
-
+        uint32_t now = millis();
+        bool exact_frame = x.size() == 6 && x[4] == x[5];
         uint8_t cmd = x[4];
-
         uint8_t speed_nibble = cmd & 0xF0;
         uint8_t duration_nibble = cmd & 0x0F;
+        uint8_t state_speed = (cmd >> 4) & 0x03;
+        uint8_t canonical_state = cmd & 0x3F;
+        uint8_t capability = cmd >> 6;
         bool speed_ok = (speed_nibble == 0x90 || speed_nibble == 0xA0 || speed_nibble == 0xB0);
         bool duration_ok = (duration_nibble == 0x0 || duration_nibble == 0x1 || duration_nibble == 0x2 ||
                              duration_nibble == 0x4 || duration_nibble == 0x8 || duration_nibble == 0xC ||
                              duration_nibble == 0xF);
+        // Firmware ignores metadata bits 7:6 for state equality. Values
+        // 1/2/3 in those bits mean 1-/2-/3-speed capability; speed remains
+        // bits 5:4. Speed zero is only meaningful for an OFF report.
+        bool state_encoding_ok = duration_ok && (duration_nibble == 0 || state_speed != 0);
         // Neutral OFF, observed live from a second unit's OEM
         // remote on 2026-07-18: its Off button transmits 80 80 (speed
         // nibble 8 = no remembered speed, duration 0 = off), unlike the
@@ -394,7 +585,6 @@ sx127x:
         // self-confirm; two distinct button presses on the OEM remote are
         // the documented UX. A different valid sender restarts the pair.
         if (id(learn_active)) {
-          uint32_t now = millis();
           if (!id(learn_auto_mode) &&
               (now - id(learn_window_started)) >= 120000UL) {
             id(learn_active) = false;
@@ -403,7 +593,7 @@ sx127x:
             ESP_LOGW("LEARN", "Manual learn window expired before this frame");
             return;
           }
-          if (x[0] != 0xCB || !learn_command_ok) {
+          if (!exact_frame || x[0] != 0xCB || !learn_command_ok) {
             id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
             ESP_LOGD("LEARN", "Ignored invalid candidate %02X %02X %02X %02X cmd %02X",
                      x[0], x[1], x[2], x[3], cmd);
@@ -473,30 +663,183 @@ sx127x:
           return;
         }
 
-        // OEM firmware recognizes the CE variant of the learned sender but
-        // its branch bypasses status decoding. Meaning unestablished: log
-        // and ignore, using the learned suffix instead of a hardcoded ID.
-        if (x[0] == 0xCE && (sender_id & 0x00FFFFFFUL) ==
+        // OEM firmware recognizes CE with exact suffix/duplicate checks, but
+        // sets a flag that bypasses its normal state transition. CE is never
+        // confirmation evidence.
+        if (exact_frame && x[0] == 0xCE && (sender_id & 0x00FFFFFFUL) ==
             (id(learned_sender_id) & 0x00FFFFFFUL)) {
           ESP_LOGI("RX", "CE special frame observed and ignored: %02X %02X", x[4], x[5]);
           return;
         }
 
+        // Because this radio is half-duplex, an exact 66 66 that it receives
+        // cannot be its own query. It is an OEM remote taking physical
+        // control; cancel pending automatic work before that remote's command.
+        if (exact_frame && cmd == 0x66 && sender_id == id(learned_sender_id)) {
+          id(oem_query_seen) = true;
+          id(oem_query_seen_ms) = now;
+          id(refire_left) = 0;
+          id(cl_active) = false;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_epoch) = false;
+          id(cl_query_epoch_confirmation) = false;
+          id(cl_report_ready) = false;
+          // Stop any remaining frames/queued bursts. This is cancellation,
+          // never transmission, and gives an unmistakable physical OEM query
+          // priority even if it lands in a 45 ms local inter-frame gap.
+          id(tx_burst).stop();
+          id(command_confirmation_status_sensor).publish_state("superseded by OEM remote query");
+          ESP_LOGW("RX", "External OEM query observed; local confirmation/re-fire cancelled");
+          return;
+        }
+
+        // Closed-loop response direction is established by this local query
+        // window, not by bit 7. The fan was captured returning both 1F (no
+        // metadata) and B0/90 (2-speed metadata), and the STM32 masks bits
+        // 7:6 before comparing state. Exact frames use OEM validation. A
+        // separate confidence tier can recover a known one-bit header error
+        // or corrupted variable-length byte, but only inside this window.
+        uint32_t query_age = now - id(cl_query_started_ms);
+        // Keep the epoch independent of cl_active/cl_query_window. Consensus
+        // closes the accepting window immediately, but later repeats from the
+        // same fan response train (observed through about +1.65 s) must remain
+        // passive rather than falling through and masquerading as an OEM
+        // command. This longer tail is classification-only: correlated_response
+        // retains the shorter 1.1 s consensus bound. A real OEM 66 66 was
+        // handled above and always tears down this epoch before its command.
+        bool local_query_epoch =
+            id(cl_query_epoch) &&
+            query_age <= ${closed_loop_response_tail_ms};
+        bool correlated_response =
+            local_query_epoch && id(cl_active) && id(cl_query_window) &&
+            query_age <= ${closed_loop_response_window_ms} &&
+            query_age >= ${closed_loop_response_min_ms};
+
+        auto bit_count = [](uint8_t value) -> uint8_t {
+          uint8_t count = 0;
+          while (value != 0) {
+            count += value & 1;
+            value >>= 1;
+          }
+          return count;
+        };
+        uint32_t learned = id(learned_sender_id);
+        uint8_t expected_header[4] = {
+          0xCB,
+          (uint8_t) ((learned >> 16) & 0xFF),
+          (uint8_t) ((learned >> 8) & 0xFF),
+          (uint8_t) (learned & 0xFF)
+        };
+        uint8_t header_bit_errors = 0;
+        uint8_t ce_header_bit_errors = bit_count(x[0] ^ 0xCE);
+        for (int i = 0; i < 4; i++) {
+          header_bit_errors += bit_count(x[i] ^ expected_header[i]);
+          if (i > 0) ce_header_bit_errors += bit_count(x[i] ^ expected_header[i]);
+        }
+        bool header_recoverable =
+            header_bit_errors <= 1 && header_bit_errors < ce_header_bit_errors;
+        bool duplicate_state = x[4] == x[5];
+        bool recovered_candidate =
+            local_query_epoch && header_recoverable && duplicate_state &&
+            state_encoding_ok && (x.size() != 6 || header_bit_errors != 0);
+        bool exact_candidate =
+            local_query_epoch && x.size() == 6 && header_bit_errors == 0 &&
+            duplicate_state && state_encoding_ok;
+
+        if ((exact_candidate || recovered_candidate) &&
+            id(cl_query_epoch_confirmation)) {
+          // Before the minimum turnaround, or after this epoch already
+          // produced consensus, consume only as a passive local-query repeat.
+          // In particular, never let a fan-originated 90/A0/B0-family report
+          // reach remote_command_ok and cancel/overwrite the transaction.
+          if (!correlated_response || id(cl_report_ready)) {
+            ESP_LOGD("CLOSED_LOOP", "Passive response repeat at +%lu ms ignored after window close",
+                     (unsigned long) query_age);
+            return;
+          }
+
+          // OFF is one canonical state regardless of remembered speed; this
+          // is the same wildcard used by the OEM matcher's OFF branch.
+          if (duration_nibble == 0) canonical_state = 0;
+
+          if (id(cl_candidate_total_count) == 0 ||
+              canonical_state != id(cl_candidate_state)) {
+            id(cl_candidate_state) = canonical_state;
+            id(cl_candidate_raw) = cmd;
+            id(cl_candidate_capability) = capability;
+            id(cl_candidate_total_count) = 0;
+            id(cl_candidate_exact_count) = 0;
+            id(cl_candidate_last_ms) = 0;
+          }
+
+          // Separate fan repeats are about 100-130 ms apart live, while a
+          // single command burst (ours or the OEM remote's) spans three
+          // frames only ~90 ms apart end to end. The floor must sit ABOVE
+          // that burst span: at the previous 60 ms floor, frames 1 and 3 of
+          // one OEM remote press (t=0 and t=90) counted as two independent
+          // reports and could reach consensus from a single physical press
+          // landing inside our query window, after which the mismatch
+          // re-fire would fight the user's override. 95 ms collapses any
+          // one burst to a single counted report while still passing the
+          // fan's genuine ~100 ms reply repeats.
+          if (id(cl_candidate_total_count) == 0 ||
+              (now - id(cl_candidate_last_ms)) >= 95UL) {
+            id(cl_candidate_total_count)++;
+            if (exact_candidate) id(cl_candidate_exact_count)++;
+            id(cl_candidate_last_ms) = now;
+            id(cl_candidate_raw) = cmd;
+            if (capability != 0) id(cl_candidate_capability) = capability;
+          }
+
+          if (exact_candidate) {
+            id(rx_valid_count_sensor).publish_state(id(rx_valid_count_sensor).state + 1);
+            char rxbuf[24];
+            snprintf(rxbuf, sizeof(rxbuf), "STATE %02X %02X", cmd, cmd);
+            id(last_rx_frame_sensor).publish_state(rxbuf);
+          } else {
+            ESP_LOGW("RX", "Recovered response candidate from len=%d/header-errors=%u: state %02X",
+                     (int) x.size(), (unsigned int) header_bit_errors, canonical_state);
+          }
+
+          uint8_t candidate_total_count = id(cl_candidate_total_count);
+          uint8_t candidate_exact_count = id(cl_candidate_exact_count);
+          bool consensus = candidate_total_count >= 2 &&
+                           (candidate_exact_count >= 1 || candidate_total_count >= 3);
+          if (consensus) {
+            id(cl_report_state) = id(cl_candidate_state);
+            id(cl_report_raw) = id(cl_candidate_raw);
+            id(cl_report_capability) = id(cl_candidate_capability);
+            id(cl_report_ready) = true;
+            id(cl_query_window) = false;
+            ESP_LOGI("CLOSED_LOOP", "Response consensus state=%02X raw=%02X (%u total/%u exact)",
+                     id(cl_report_state), id(cl_report_raw),
+                     (unsigned int) candidate_total_count,
+                     (unsigned int) candidate_exact_count);
+          }
+          return;
+        }
+
+        // Normal six-byte traffic remains just as strict as the OEM parser.
+        // The recovery above never makes a malformed callback valid here.
+        if (x.size() != 6) {
+          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+          ESP_LOGD("RX", "Rejected: length %d (expected 6)", x.size());
+          return;
+        }
+        if (x[4] != x[5]) {
+          id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
+          ESP_LOGD("RX", "Rejected: command byte mismatch %02X != %02X", x[4], x[5]);
+          return;
+        }
         if (sender_id != id(learned_sender_id)) {
           id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
           ESP_LOGD("RX", "Rejected: sender mismatch %02X %02X %02X %02X", x[0], x[1], x[2], x[3]);
           return;
         }
-
-        // Wake/status-query frame, not a fan state. Log only.
-        if (cmd == 0x66) {
-          ESP_LOGI("RX", "Wake/status query observed (66 66)");
-          return;
-        }
-
-        if (!(speed_ok && duration_ok) && !off_neutral) {
+        if (!state_encoding_ok) {
           id(rx_rejected_count_sensor).publish_state(id(rx_rejected_count_sensor).state + 1);
-          ESP_LOGD("RX", "Rejected: invalid command byte %02X", cmd);
+          ESP_LOGD("RX", "Rejected: invalid state byte %02X", cmd);
           return;
         }
 
@@ -510,7 +853,6 @@ sx127x:
         // have been swallowed as if it were still part of the first burst.
         // Sliding the window on every duplicate keeps the 45 ms intra-burst
         // frames suppressed while still accepting a distinct later press.
-        uint32_t now = millis();
         bool is_duplicate =
             (cmd == id(last_valid_rx_command)) && ((now - id(last_valid_rx_time)) < 450);
         id(last_valid_rx_command) = cmd;
@@ -521,10 +863,40 @@ sx127x:
         }
 
         id(rx_valid_count_sensor).publish_state(id(rx_valid_count_sensor).state + 1);
-        char rxbuf[8];
-        sprintf(rxbuf, "%02X %02X", cmd, cmd);
+        char rxbuf[24];
+        snprintf(rxbuf, sizeof(rxbuf), "%02X %02X", cmd, cmd);
         id(last_rx_frame_sensor).publish_state(rxbuf);
         ESP_LOGI("RX", "Valid state frame accepted: %02X %02X", cmd, cmd);
+
+        // An exact normal command outside our correlated response window is
+        // authoritative OEM traffic. State-only/capability report encodings
+        // that are not valid remote commands publish passively but never
+        // cancel work. A received OEM query already cancelled even earlier.
+        bool recent_oem_query =
+            id(oem_query_seen) && (now - id(oem_query_seen_ms)) < 2000UL;
+        bool remote_command_ok =
+            ((speed_ok && duration_ok) || off_neutral) &&
+            (!local_query_epoch || recent_oem_query);
+        if (remote_command_ok) {
+          id(refire_left) = 0;
+          id(cl_active) = false;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          // Tear the query epoch down too, exactly like the 66 66 branch
+          // above: an authoritative OEM command ends any local epoch, so
+          // follow-up frames in what was the tail get processed normally
+          // instead of being swallowed as passive repeats.
+          id(cl_query_epoch) = false;
+          id(cl_query_epoch_confirmation) = false;
+          id(cl_report_ready) = false;
+          if (recent_oem_query) {
+            // If a new local burst was started after the OEM query, stop its
+            // remaining repeats when the corresponding physical command is
+            // heard. Never stop on an uncorroborated set-bit state report.
+            id(tx_burst).stop();
+          }
+          id(command_confirmation_status_sensor).publish_state("superseded by OEM remote command");
+        }
 
         // Our own TX cannot self-receive (the SX1278 is half-duplex), so
         // this only ever triggers on genuine concurrent OEM traffic. If our
@@ -538,6 +910,25 @@ sx127x:
           return;
         }
 
+        // While a command transaction is pending, don't let a stale reply
+        // (e.g. the previous transaction's in-flight query answer after a
+        // rapid A->B command change) flicker the entity back to the old
+        // state: publish mid-transaction observed state only when it
+        // already agrees with what the user just asked for. With no
+        // transaction pending (manual probe, ordinary passive traffic)
+        // everything publishes as before. Diagnostics above still counted
+        // the frame either way.
+        if (id(cl_active)) {
+          uint8_t desired_duration_nibble = id(cl_desired_cmd) & 0x0F;
+          bool matches_desired = desired_duration_nibble == 0
+              ? duration_nibble == 0
+              : canonical_state == (id(cl_desired_cmd) & 0x3F);
+          if (!matches_desired) {
+            ESP_LOGD("RX", "Transaction pending, skipping stale observed-state publish for %02X", cmd);
+            return;
+          }
+        }
+
         id(rf_echo_guard) = true;
         if (off_neutral) {
           // 80 80: off with no remembered speed - turn the entity off but
@@ -546,9 +937,9 @@ sx127x:
           id(quietcool_fan).state = false;
         } else {
           int observed_speed = 1;
-          if (speed_nibble == 0xA0) observed_speed = 2;
-          else if (speed_nibble == 0xB0) observed_speed = 3;
-          id(quietcool_fan).speed = observed_speed;
+          if (state_speed == 2) observed_speed = 2;
+          else if (state_speed == 3) observed_speed = 3;
+          if (state_speed != 0) id(quietcool_fan).speed = observed_speed;
           id(quietcool_fan).state = (duration_nibble != 0x00);
         }
         id(quietcool_fan).publish_state();
@@ -628,6 +1019,19 @@ script:
                 else if (cmd == 0x9F) label = "LOW";
                 else if (cmd == 0xAF) label = "MED";
                 else if (cmd == 0xBF) label = "HIGH";
+                else if (cmd == 0x66) label = "QUERY";
+                if (cmd == 0x66) {
+                  // Anchor every locally-transmitted query at its actual
+                  // serialized execution time, including a queued diagnostic
+                  // probe. The coordinator opens cl_query_window only for an
+                  // automatic confirmation query; manual probes remain normal
+                  // passive observed-state updates without being mislabeled
+                  // as an OEM command.
+                  id(cl_query_epoch) = true;
+                  id(cl_query_epoch_confirmation) =
+                      id(cl_active) && id(cl_query_window);
+                  id(cl_query_started_ms) = millis();
+                }
                 char txbuf[24];
                 snprintf(txbuf, sizeof(txbuf), "%02X (%s)", cmd, label);
                 id(last_tx_command_sensor).publish_state(txbuf);
@@ -645,6 +1049,35 @@ script:
                           cmd, cmd
                         };
                   - delay: 45ms
+            - lambda: |-
+                // Only a completed state-command burst belonging to the
+                // current user request may schedule a verification query.
+                // Query bursts themselves and stale queued commands cannot.
+                if (cmd != 0x66 && id(cl_active) && cmd == id(cl_desired_cmd)) {
+                  id(cl_command_attempts) = id(cl_command_attempts) + 1;
+                  // Rapid repeated presses of the same command can queue
+                  // multiple user-authorized bursts without consuming
+                  // refire_left. Once those completed bursts have already
+                  // reached this transaction's bounded attempt budget, make
+                  // the effective automatic retry budget zero so mismatch or
+                  // timeout terminates instead of waiting on a gated re-fire.
+                  if (id(cl_command_attempts) >= id(cl_attempt_limit)) {
+                    id(refire_left) = 0;
+                  }
+                  id(cl_query_window) = false;
+                  id(cl_query_due) = true;
+                  id(cl_query_due_ms) = millis() + ${closed_loop_query_delay_ms};
+                  // Preserve the original one-second safety spacing, measured
+                  // from the actual end of this serialized burst.
+                  if (id(refire_left) > 0 && cmd == id(refire_cmd)) {
+                    id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+                  }
+                  char status[64];
+                  snprintf(status, sizeof(status), "pending response after command %u/%u",
+                           (unsigned int) id(cl_command_attempts),
+                           (unsigned int) id(cl_attempt_limit));
+                  id(command_confirmation_status_sensor).publish_state(status);
+                }
 
   - id: send_off
     then:
@@ -662,6 +1095,29 @@ script:
       - script.execute:
           id: tx_burst
           cmd: 0x90
+      - lambda: |-
+          // Arm safety re-fire: OFF is re-sent extra times, spaced past the
+          // fan's dead-time, so a dropped OFF can't leave the fan running.
+          if (id(learned_sender_id) == 0) return;
+          id(refire_cmd) = 0x90;
+          id(refire_left) = ${off_refire_count};
+          id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+          id(cl_active) = true;
+          id(cl_desired_cmd) = 0x90;
+          id(cl_command_attempts) = 0;
+          id(cl_attempt_limit) = ${off_refire_count} + 1;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_count) = 0;
+          id(cl_candidate_state) = 0xFF;
+          id(cl_candidate_raw) = 0xFF;
+          id(cl_candidate_capability) = 0;
+          id(cl_candidate_total_count) = 0;
+          id(cl_candidate_exact_count) = 0;
+          id(cl_candidate_last_ms) = 0;
+          id(cl_report_ready) = false;
+          id(oem_query_seen) = false;
+          id(command_confirmation_status_sensor).publish_state("pending OFF confirmation");
 
   - id: send_low
     then:
@@ -678,6 +1134,27 @@ script:
       - script.execute:
           id: tx_burst
           cmd: 0x9F
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          id(refire_cmd) = 0x9F;
+          id(refire_left) = ${command_refire_count};
+          id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+          id(cl_active) = true;
+          id(cl_desired_cmd) = 0x9F;
+          id(cl_command_attempts) = 0;
+          id(cl_attempt_limit) = ${command_refire_count} + 1;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_count) = 0;
+          id(cl_candidate_state) = 0xFF;
+          id(cl_candidate_raw) = 0xFF;
+          id(cl_candidate_capability) = 0;
+          id(cl_candidate_total_count) = 0;
+          id(cl_candidate_exact_count) = 0;
+          id(cl_candidate_last_ms) = 0;
+          id(cl_report_ready) = false;
+          id(oem_query_seen) = false;
+          id(command_confirmation_status_sensor).publish_state("pending LOW confirmation");
 
   - id: send_medium
     then:
@@ -692,6 +1169,27 @@ script:
       - script.execute:
           id: tx_burst
           cmd: 0xAF
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          id(refire_cmd) = 0xAF;
+          id(refire_left) = ${command_refire_count};
+          id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+          id(cl_active) = true;
+          id(cl_desired_cmd) = 0xAF;
+          id(cl_command_attempts) = 0;
+          id(cl_attempt_limit) = ${command_refire_count} + 1;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_count) = 0;
+          id(cl_candidate_state) = 0xFF;
+          id(cl_candidate_raw) = 0xFF;
+          id(cl_candidate_capability) = 0;
+          id(cl_candidate_total_count) = 0;
+          id(cl_candidate_exact_count) = 0;
+          id(cl_candidate_last_ms) = 0;
+          id(cl_report_ready) = false;
+          id(oem_query_seen) = false;
+          id(command_confirmation_status_sensor).publish_state("pending MEDIUM confirmation");
 
   - id: send_high
     then:
@@ -706,6 +1204,27 @@ script:
       - script.execute:
           id: tx_burst
           cmd: 0xBF
+      - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          id(refire_cmd) = 0xBF;
+          id(refire_left) = ${command_refire_count};
+          id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+          id(cl_active) = true;
+          id(cl_desired_cmd) = 0xBF;
+          id(cl_command_attempts) = 0;
+          id(cl_attempt_limit) = ${command_refire_count} + 1;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_count) = 0;
+          id(cl_candidate_state) = 0xFF;
+          id(cl_candidate_raw) = 0xFF;
+          id(cl_candidate_capability) = 0;
+          id(cl_candidate_total_count) = 0;
+          id(cl_candidate_exact_count) = 0;
+          id(cl_candidate_last_ms) = 0;
+          id(cl_report_ready) = false;
+          id(oem_query_seen) = false;
+          id(command_confirmation_status_sensor).publish_state("pending HIGH confirmation");
 
   - id: send_timer
     parameters:
@@ -754,6 +1273,27 @@ script:
           id: tx_burst
           cmd: !lambda 'return id(timer_tx_command);'
       - lambda: |-
+          if (id(learned_sender_id) == 0) return;
+          id(refire_cmd) = id(timer_tx_command);
+          id(refire_left) = ${command_refire_count};
+          id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+          id(cl_active) = true;
+          id(cl_desired_cmd) = id(timer_tx_command);
+          id(cl_command_attempts) = 0;
+          id(cl_attempt_limit) = ${command_refire_count} + 1;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_count) = 0;
+          id(cl_candidate_state) = 0xFF;
+          id(cl_candidate_raw) = 0xFF;
+          id(cl_candidate_capability) = 0;
+          id(cl_candidate_total_count) = 0;
+          id(cl_candidate_exact_count) = 0;
+          id(cl_candidate_last_ms) = 0;
+          id(cl_report_ready) = false;
+          id(oem_query_seen) = false;
+          id(command_confirmation_status_sensor).publish_state("pending TIMER confirmation");
+      - lambda: |-
           if (id(learned_sender_id) == 0) {
             return;
           }
@@ -791,6 +1331,201 @@ script:
 # entity's OFF state locally, same as an observed RX frame would.
 # =============================================================================
 interval:
+  # Closed-loop coordinator. RX never executes a script: it only raises
+  # cl_report_ready after response consensus. This interval compares that
+  # report, publishes confirmed diagnostics/entity state, and launches the
+  # passive 66 query through tx_burst. Actual command retries remain in the
+  # original 250 ms spaced re-fire interval immediately below.
+  - interval: 100ms
+    then:
+      - lambda: |-
+          if (id(oem_query_seen) && (millis() - id(oem_query_seen_ms)) >= 2000UL) {
+            id(oem_query_seen) = false;
+          }
+          if (id(cl_query_epoch) &&
+              (millis() - id(cl_query_started_ms)) > ${closed_loop_response_tail_ms}) {
+            id(cl_query_epoch) = false;
+            id(cl_query_epoch_confirmation) = false;
+          }
+
+          if (id(cl_report_ready)) {
+            id(cl_report_ready) = false;
+            uint8_t actual = id(cl_report_state);
+            uint8_t raw = id(cl_report_raw);
+            uint8_t actual_duration = actual & 0x0F;
+            uint8_t actual_speed = (actual >> 4) & 0x03;
+            uint8_t desired = id(cl_desired_cmd) & 0x3F;
+            uint8_t desired_duration = id(cl_desired_cmd) & 0x0F;
+            bool state_matches = desired_duration == 0
+                ? actual_duration == 0
+                : actual == desired;
+
+            const char *speed_name = "UNKNOWN";
+            if (actual_speed == 1) speed_name = "LOW";
+            else if (actual_speed == 2) speed_name = "MEDIUM";
+            else if (actual_speed == 3) speed_name = "HIGH";
+
+            char confirmed[64];
+            if (actual_duration == 0) {
+              snprintf(confirmed, sizeof(confirmed), "OFF (raw %02X)", raw);
+            } else if (actual_duration == 0x0F) {
+              snprintf(confirmed, sizeof(confirmed), "%s continuous (raw %02X)", speed_name, raw);
+            } else {
+              unsigned int hours = 0;
+              if (actual_duration == 0x1) hours = 1;
+              else if (actual_duration == 0x2) hours = 2;
+              else if (actual_duration == 0x4) hours = 4;
+              else if (actual_duration == 0x8) hours = 8;
+              else if (actual_duration == 0xC) hours = 12;
+              snprintf(confirmed, sizeof(confirmed), "%s timer %uh (raw %02X)", speed_name, hours, raw);
+            }
+            id(confirmed_fan_state_sensor).publish_state(confirmed);
+
+            uint8_t report_capability = id(cl_report_capability);
+            if (report_capability >= 1 && report_capability <= 3) {
+              char capability_text[16];
+              snprintf(capability_text, sizeof(capability_text), "%u-speed",
+                       (unsigned int) report_capability);
+              id(fan_capability_sensor).publish_state(capability_text);
+            }
+
+            // Publish the independently confirmed physical state directly,
+            // never through FanCall/control(), so on_state cannot echo RF.
+            id(rf_echo_guard) = true;
+            if (actual_speed != 0) id(quietcool_fan).speed = actual_speed;
+            id(quietcool_fan).state = actual_duration != 0;
+            id(quietcool_fan).publish_state();
+            id(rf_echo_guard) = false;
+
+            // Mirror timer metadata only when the actual confirmed state
+            // differs from our request. A matching local timer already began
+            // at button time and must not gain seconds on confirmation.
+            if (!state_matches) {
+              uint32_t actual_timer_hours = 0;
+              if (actual_duration == 0x1) actual_timer_hours = 1;
+              else if (actual_duration == 0x2) actual_timer_hours = 2;
+              else if (actual_duration == 0x4) actual_timer_hours = 4;
+              else if (actual_duration == 0x8) actual_timer_hours = 8;
+              else if (actual_duration == 0xC) actual_timer_hours = 12;
+              if (actual_timer_hours > 0) {
+                id(timer_active) = true;
+                id(timer_expiry_millis) = millis() + actual_timer_hours * 3600000UL;
+                id(timer_remaining_sensor).publish_state(actual_timer_hours * 60);
+              } else {
+                id(timer_active) = false;
+                id(timer_remaining_sensor).publish_state(0);
+              }
+            }
+
+            id(cl_candidate_state) = 0xFF;
+            id(cl_candidate_raw) = 0xFF;
+            id(cl_candidate_capability) = 0;
+            id(cl_candidate_total_count) = 0;
+            id(cl_candidate_exact_count) = 0;
+            id(cl_candidate_last_ms) = 0;
+
+            char status[160];
+            if (state_matches) {
+              id(refire_left) = 0;
+              id(cl_active) = false;
+              id(cl_query_due) = false;
+              id(cl_query_window) = false;
+              snprintf(status, sizeof(status), "confirmed %s after %u command(s), %u query(s)",
+                       confirmed,
+                       (unsigned int) id(cl_command_attempts),
+                       (unsigned int) id(cl_query_count));
+              ESP_LOGW("CLOSED_LOOP", "%s", status);
+            } else if (id(refire_left) > 0) {
+              id(cl_query_due) = false;
+              id(cl_query_window) = false;
+              snprintf(status, sizeof(status), "mismatch: fan is %s; spaced re-fire pending (%d left)",
+                       confirmed, id(refire_left));
+              ESP_LOGW("CLOSED_LOOP", "%s", status);
+            } else {
+              id(cl_active) = false;
+              id(cl_query_due) = false;
+              id(cl_query_window) = false;
+              snprintf(status, sizeof(status), "FAILED after bounded attempts: fan is %s", confirmed);
+              ESP_LOGE("CLOSED_LOOP", "%s", status);
+            }
+            id(command_confirmation_status_sensor).publish_state(status);
+          }
+
+          // Query timeout does not consume or remove a re-fire. With retries
+          // left, the unchanged spaced backstop proceeds; after the final
+          // command's final query, the transaction terminates explicitly.
+          if (id(cl_active) && id(cl_query_window) &&
+              (millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}) {
+            id(cl_query_window) = false;
+            if (id(refire_left) > 0) {
+              char status[128];
+              snprintf(status, sizeof(status), "no response consensus; spaced re-fire pending (%d left)",
+                       id(refire_left));
+              id(command_confirmation_status_sensor).publish_state(status);
+            } else {
+              id(cl_active) = false;
+              char status[128];
+              snprintf(status, sizeof(status), "FAILED: no consensus after %u command(s), %u query(s)",
+                       (unsigned int) id(cl_command_attempts),
+                       (unsigned int) id(cl_query_count));
+              id(command_confirmation_status_sensor).publish_state(status);
+              ESP_LOGE("CLOSED_LOOP", "%s", status);
+            }
+          }
+      - if:
+          condition:
+            lambda: |-
+              return id(cl_active) && id(cl_query_due) &&
+                     id(learned_sender_id) != 0 &&
+                     !id(tx_burst).is_running() &&
+                     (int32_t)(millis() - id(cl_query_due_ms)) >= 0;
+          then:
+            - lambda: |-
+                id(cl_query_due) = false;
+                id(cl_query_window) = true;
+                id(cl_query_count) = id(cl_query_count) + 1;
+                char status[64];
+                snprintf(status, sizeof(status), "query %u after command %u/%u",
+                         (unsigned int) id(cl_query_count),
+                         (unsigned int) id(cl_command_attempts),
+                         (unsigned int) id(cl_attempt_limit));
+                id(command_confirmation_status_sensor).publish_state(status);
+                ESP_LOGI("CLOSED_LOOP", "%s", status);
+            - script.execute:
+                id: tx_burst
+                cmd: 0x66
+
+  # Spaced command re-fire driver. When a command wrapper has armed a re-fire
+  # (refire_left > 0), re-send refire_cmd through the single tx_burst path once
+  # its spacing has elapsed, then decrement. This is the open-loop reliability
+  # backstop for the fan's post-command dead-time: at least one of the spaced
+  # re-sends lands while the fan is listening. tx_burst still refuses when
+  # unprovisioned, and a heard OEM-remote command zeroes refire_left (in
+  # on_packet) so this can never fight a physical press. Rollover-safe signed
+  # compare, exactly like the timer arithmetic.
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(refire_left) > 0 &&
+                     id(learned_sender_id) != 0 &&
+                     !id(tx_burst).is_running() &&
+                     (!id(cl_active) ||
+                      id(cl_command_attempts) < id(cl_attempt_limit)) &&
+                     (!id(cl_active) ||
+                      (!id(cl_query_due) && !id(cl_query_window) && !id(cl_report_ready))) &&
+                     (int32_t)(millis() - id(refire_next_ms)) >= 0;
+          then:
+            - script.execute:
+                id: tx_burst
+                cmd: !lambda 'return id(refire_cmd);'
+            - lambda: |-
+                id(refire_left) = id(refire_left) - 1;
+                id(refire_next_ms) = millis() + ${command_refire_interval_ms};
+                ESP_LOGD("REFIRE", "Re-sent 0x%02X (%d re-fires left)",
+                         id(refire_cmd), id(refire_left));
+
   - interval: 20s
     then:
       - lambda: |-
@@ -963,11 +1698,39 @@ button:
           id: send_timer
           duration_nibble: 0x04
 
+  # Diagnostic: transmit the OEM wake/status query (SENDER 66 66) and
+  # raw-log every frame heard in the next 15 s (see query_probe_started).
+  # The OEM remote sends exactly this query before every command and reads
+  # the fan's current-state response; this probe exists to capture and
+  # decode that response with our own receiver. The query is passive
+  # traffic to the fan (no state change) and tx_burst still refuses it
+  # while unprovisioned.
+  - platform: template
+    name: "Query Fan State (probe)"
+    icon: "mdi:radar"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(query_probe_started) = millis();
+          ESP_LOGW("PROBE", "Probe window open: TXing 66 66 wake query, raw-logging RX for 15 s");
+      - script.execute:
+          id: tx_burst
+          cmd: 0x66
+
   - platform: template
     name: "Learn Remote ID"
     icon: "mdi:remote"
     on_press:
       - lambda: |-
+          id(tx_burst).stop();
+          id(refire_left) = 0;
+          id(cl_active) = false;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_epoch) = false;
+          id(cl_query_epoch_confirmation) = false;
+          id(cl_report_ready) = false;
+          id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
           id(learn_active) = true;
           id(learn_auto_mode) = false;
           id(learn_window_started) = millis();
@@ -981,6 +1744,15 @@ button:
     icon: "mdi:remote-off"
     on_press:
       - lambda: |-
+          id(tx_burst).stop();
+          id(refire_left) = 0;
+          id(cl_active) = false;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_epoch) = false;
+          id(cl_query_epoch_confirmation) = false;
+          id(cl_report_ready) = false;
+          id(command_confirmation_status_sensor).publish_state("idle (remote ID forgotten)");
           id(learned_sender_id) = 0;
           learned_sender_id->update();
           // FIX 2: suppress on_boot's compiled-default reseed so this
@@ -1042,6 +1814,15 @@ binary_sensor:
           # as the Home Assistant button. The 5000ms boundary does not
           # overlap the 1-4999ms unconditional-Off gesture above.
           - lambda: |-
+              id(tx_burst).stop();
+              id(refire_left) = 0;
+              id(cl_active) = false;
+              id(cl_query_due) = false;
+              id(cl_query_window) = false;
+              id(cl_query_epoch) = false;
+              id(cl_query_epoch_confirmation) = false;
+              id(cl_report_ready) = false;
+              id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
               id(learn_active) = true;
               id(learn_auto_mode) = false;
               id(learn_window_started) = millis();
@@ -1677,5 +2458,26 @@ text_sensor:
     name: "Last Valid RX Frame"
     id: last_rx_frame_sensor
     icon: "mdi:radio-tower"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Last Confirmed Fan State"
+    id: confirmed_fan_state_sensor
+    icon: "mdi:fan-check"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Command Confirmation Status"
+    id: command_confirmation_status_sensor
+    icon: "mdi:check-network-outline"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "Fan Speed Capability"
+    id: fan_capability_sensor
+    icon: "mdi:fan-auto"
     entity_category: diagnostic
     update_interval: never

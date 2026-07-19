@@ -37,13 +37,15 @@ A live-validated SX1278 controller uses that response after an explicit command
 to perform bounded query/compare/continuation handling and correctly recognized
 a two-speed receiver, whose OEM remote skips Medium.
 
-The public base files have **not** incorporated that closed-loop controller yet.
-They do not publish `Last Confirmed Fan State`, `Command Confirmation Status`, or
-`Fan Speed Capability`, and each public fan entity still exposes all three speed
-choices. For a two-speed installation, use only the speeds supported by the OEM
-control; do not interpret the public entity's Medium option as detected hardware
-capability. When a closed-loop port is eventually deployed to multiple fans,
-confirmation state and capability must remain local to each learned sender ID.
+Both public base files now incorporate that closed-loop controller and publish
+`Last Confirmed Fan State`, `Command Confirmation Status`, and
+`Fan Speed Capability`. The fan entity still statically exposes all three speed
+choices (ESPHome entities are fixed at compile time); on a two-speed
+installation, `Fan Speed Capability` will report `2-speed` after the first
+confirmed command — use only the speeds your OEM control supports rather than
+interpreting the entity's Medium option as detected hardware capability. When
+deploying to multiple fans, confirmation state and capability remain local to
+each device's learned sender ID.
 
 ## Home Assistant display sources
 

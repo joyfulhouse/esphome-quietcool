@@ -13,6 +13,12 @@ clean-room implementation of what that analysis found.
 
 ## Features
 
+- **Closed-loop confirmation** — after every command the controller sends the
+  OEM's own `66 66` status query, decodes the fan's reply, and **verifies the
+  fan actually did it**. Confirmed state, confirmation status, and the fan's
+  reported speed capability (2-speed vs 3-speed) are all published to Home
+  Assistant. A lost command is retried on a bounded, spaced schedule until the
+  fan confirms — or the failure is reported explicitly instead of guessed at.
 - **Direct RF fan control** — Off / Low / Medium / High (where supported by
   the fan model) and speed-aware 1 / 2 / 4-hour timers, transmitted as the
   exact OEM frames.
@@ -34,26 +40,24 @@ clean-room implementation of what that analysis found.
   restored state, or from a received frame. Multi-model adversarially reviewed.
 - **Multi-board & multi-fan** — one shared config, thin per-device wrappers.
 
-### Closed-loop research status
+### How the closed loop works
 
-The reverse-engineering now establishes the fan's state-reply protocol, and a
-closed-loop controller has been validated on a live SX1278 installation. After
-an explicit user command, that implementation sends the OEM `66 66` query,
-decodes the fan's real state, compares it with the requested state, and permits
-only a bounded number of spaced continuation attempts. It also publishes `Last
-Confirmed Fan State`, `Command Confirmation Status`, and `Fan Speed Capability`;
-the last of these identified the test fan as a two-speed model.
-
-That closed-loop controller is **research-proven but not yet ported into the two
-public template YAMLs in this repository**. The checked-in `quietcool-lora32.yaml`
-and `quietcool-lora-v3.yaml` still send one three-frame command burst per explicit
-action and passively mirror valid OEM-remote commands. They do not originate
-`66 66` queries, decode fan replies, re-fire commands, or expose the three
-confirmation/capability diagnostics above. This distinction matters when
-reading [the protocol](docs/protocol.md) and
-[firmware analysis](docs/firmware-analysis.md): those documents describe what
-the fan and OEM remote actually support, not a claim that every recovered
-behavior is already shipped by these templates.
+The fan answers the OEM `66 66` status query with a six-byte state report
+(`CB` + your remote's ID suffix + a duplicated state byte). This firmware uses
+the exact validation rules recovered from the OEM remote's STM32: state is
+compared on the lower six bits, any zero-duration report confirms Off
+regardless of remembered speed, and bits 7:6 carry the fan's speed-capability
+metadata. After each command burst the controller queries, requires **response
+consensus** (repeated agreeing reports inside a bounded listen window — with a
+deliberately narrow recovery tier for weak-link bit errors, since the fan has
+no CRC), and then either confirms and stops, or lets the pre-existing spaced
+re-fire backstop continue up to its fixed attempt budget. Every outcome —
+`confirmed`, `mismatch`, `no consensus`, `FAILED`, or `superseded by OEM
+remote` — is published to Home Assistant, and a physical OEM remote press
+always takes priority over pending automatic work. Validated live on an
+SX1278 installation, where the capability diagnostics also identified the test
+fan as a two-speed model. Full detail in [docs/protocol.md](docs/protocol.md)
+and [docs/firmware-analysis.md](docs/firmware-analysis.md).
 
 ## Supported hardware
 
@@ -128,12 +132,13 @@ docs/                            # protocol, firmware analysis, hardware, displa
 
 A whole-house fan moves a lot of air. Before energizing one: open enough windows
 for makeup air, confirm combustion appliances can't backdraft, and keep a working
-OEM control as a fallback. The checked-in public templates transmit only for an
-explicit button press or Home Assistant command. Any future port of the validated
-closed-loop controller must preserve the stronger causal invariant: queries and
-spaced continuation attempts may follow an explicit command, but must remain
-bounded and must never start at boot, after OTA, on reconnect, from restored
-state, or from a received frame.
+OEM control as a fallback. The checked-in templates preserve a strict causal
+invariant: RF only ever originates from an explicit button press or Home
+Assistant command, plus the bounded follow-ups those arm — the confirmation
+query and the spaced re-fire attempts, both volatile and hard-limited. Nothing
+transmits at boot, after OTA, on reconnect, from restored state, or from a
+received frame, and a heard OEM-remote press cancels all pending automatic
+work.
 
 
 ## Learn mode / porting to your own fan

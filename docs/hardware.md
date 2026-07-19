@@ -48,18 +48,16 @@ Receive bandwidth is an RX-only noise/selectivity setting; it does not alter the
 
 | Target | Checked-in setting | Hardware status |
 | --- | --- | --- |
-| TTGO V2.1 / SX1278 public template | No explicit value; ESPHome's wider 125 kHz default | Command/passive RX hardware verified |
-| Live SX1278 closed-loop research | Explicit 50 kHz | Query/reply and confirmation verified on a real fan |
-| V3 / SX1262 public template | Explicit 117.3 kHz | Compiles; awaiting hardware bring-up |
+| TTGO V2.1 / SX1278 public template | Explicit 50 kHz | Query/reply and confirmation verified on a real fan |
+| V3 / SX1262 public template | Explicit 58.6 kHz (nearest FSK-legal value to 50 kHz) | Compiles; awaiting hardware bring-up |
 
 The recovered 2400 bps, ±10 kHz-deviation signal occupies roughly 22 kHz by
-Carson's rule, so 50 kHz leaves useful margin while admitting substantially less
-noise than 125 kHz. The fixed controller location that motivated the
-closed-loop work successfully decoded query replies with the explicit 50 kHz
-SX1278 setting. That result is a validated porting target, not a controlled
-bandwidth comparison or a description of the current public YAML: the public
-SX1278 file still needs the source change, configuration validation, compile,
-and public hardware regression testing.
+Carson's rule, so 50 kHz leaves useful margin while admitting substantially
+less noise than the old permissive 125 kHz default. The fixed controller
+location that motivated the closed-loop work successfully decoded query
+replies with the explicit 50 kHz SX1278 setting; the SX1262's FSK bandwidth
+enum has no 50 kHz entry, so the V3 file uses 58.6 kHz (with 78.2 kHz as the
+next-wider legal step if RX proves marginal on real hardware).
 
 ## Why not BLE?
 

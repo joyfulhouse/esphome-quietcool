@@ -268,10 +268,11 @@ window interlock stayed enabled. The final flashed artifact had SHA-256:
 ```
 
 This validation occurred in the downstream working configuration used for the
-2026-07-18 research. The public YAML templates currently in this repository are
-still command/passive-RX implementations and **do not yet contain this
-closed-loop controller**. V3 is likewise passive RX, not a query/confirmation
-loop. This section records the proven design for a future public source port.
+2026-07-18 research. Both public YAML templates now contain this closed-loop
+controller: `quietcool-lora32.yaml` is the same source with an anonymized,
+unprovisioned sender seed, and `quietcool-lora-v3.yaml` carries the identical
+logic on the SX1262 (58.6 kHz RX bandwidth, nearest FSK-legal value to the
+validated 50 kHz; awaiting hardware bring-up).
 
 ## Analysis tooling
 

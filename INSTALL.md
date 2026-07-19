@@ -148,25 +148,28 @@ learn its own remote. The pattern is in
 | `Battery Voltage` / `Battery Level` | sensors | On-board LiPo monitoring |
 | `WiFi Signal`, `Uptime`, `IP Address`, `Restart`, `Status LED` | misc | Housekeeping |
 
-### Closed-loop research versus this install
+### Closed-loop confirmation entities
 
-The OEM protocol supports a real query/response exchange. Live SX1278 research
-has validated a controller that, only after an explicit user command, sends
-`66 66`, listens for the fan's fixed six-byte reply, compares confirmed and
-requested state, and retains the existing spacing while allowing only bounded
-continuation attempts. That build publishes these additional diagnostics:
+The OEM protocol supports a real query/response exchange, and the templates
+implement it: after each explicit command the controller sends the OEM `66 66`
+status query, listens for the fan's fixed six-byte reply, compares confirmed
+and requested state, and allows only bounded, spaced continuation attempts if
+the fan hasn't confirmed. Three extra diagnostics expose the result:
 
-| Research-build entity | Meaning |
+| Entity | Meaning |
 | --- | --- |
 | `Last Confirmed Fan State` | Last state reported by the fan itself |
 | `Command Confirmation Status` | Pending, confirmed, mismatch, or bounded failure |
-| `Fan Speed Capability` | Capability metadata reported by the receiver, including two-speed |
+| `Fan Speed Capability` | Capability metadata reported by the receiver (e.g. `2-speed`) |
 
-Those entities and behaviors are **not in the public YAMLs installed by this
-guide yet**. Their absence is expected and does not indicate a failed install.
-The current templates remain command-burst plus passive OEM-remote receive
-implementations; `Last TX Command` records an attempted command, not proof that
-the fan accepted it.
+`Last TX Command` still records only that a command was attempted;
+`Last Confirmed Fan State` is the fan's own answer. If your controller is
+mounted far from the fan, confirmation may intermittently time out (the fan's
+replies are much weaker than its reception); commands still go through and the
+spaced re-fire backstop still runs — you'll just see `no response consensus`
+in `Command Confirmation Status` instead of `confirmed`. A `Query Fan State
+(probe)` diagnostic button sends a single non-energizing status query on
+demand.
 
 ## Troubleshooting
 

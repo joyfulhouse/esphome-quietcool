@@ -68,6 +68,41 @@ def list_item_containing(text: str, section_name: str, marker: str) -> str:
     raise ValueError(f"No {section_name} item contains {marker!r}")
 
 
+def interval_item_containing(text: str, marker: str) -> str:
+    """Return one top-level interval item instead of the aggregate block."""
+    section = top_level_block(text, "interval")
+    for match in re.finditer(r"(?ms)^  - interval:.*?(?=^  - interval:|\Z)", section):
+        item = match.group(0)
+        if marker in item:
+            return item
+    raise ValueError(f"No interval item contains {marker!r}")
+
+
+def oem_state_matches(desired: int, reported: int) -> bool:
+    """Model the comparison recovered from STM32 function 0x08005F90."""
+    desired_state = desired & 0x3F
+    reported_state = reported & 0x3F
+    if (desired & 0x0F) == 0:
+        return (reported_state & 0x0F) == 0
+    return desired_state == reported_state
+
+
+def simulate_same_command_attempts(attempt_limit: int, queued_user_bursts: int) -> tuple[int, int]:
+    """Model queued same-command bursts followed by bounded automatic retries."""
+    attempts = 0
+    refires_left = attempt_limit - 1
+    for _ in range(queued_user_bursts):
+        attempts += 1
+        if attempts >= attempt_limit:
+            refires_left = 0
+    while refires_left > 0 and attempts < attempt_limit:
+        refires_left -= 1
+        attempts += 1
+        if attempts >= attempt_limit:
+            refires_left = 0
+    return attempts, refires_left
+
+
 class QuietCoolESPHomeConfigTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -80,6 +115,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         expected_lines = (
             "  frequency: 433920000",
             "  modulation: FSK",
+            "  bandwidth: 50_0kHz",
             "  packet_mode: true",
             "  bitsync: true",
             "  bitrate: 2400",
@@ -152,7 +188,6 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_sender_id_seed_and_persisted_global(self) -> None:
         substitutions = top_level_block(self.text, "substitutions")
-        # Ships unprovisioned: a fresh flash boots into learn mode.
         self.assertIn('quietcool_sender_id: "0x00000000"', substitutions)
 
         globals_block = top_level_block(self.text, "globals")
@@ -205,21 +240,27 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                         "id(tx_count_sensor).state + 1", body
                     )
 
-    def test_four_command_bytes_are_byte_identical(self) -> None:
-        # The four state commands are byte-identical to the verified OEM
-        # frames. The 4-byte sender ID is learned per fan at runtime (the
-        # default seed is 0x00000000 = learn mode), so only the command byte
-        # is asserted here; tx_burst composes <learned sender> + <cmd> + <cmd>
-        # MSB-first (see test_tx_burst_payload_byte_order_is_msb_first).
-        expected = {"send_off": 0x90, "send_low": 0x9F, "send_medium": 0xAF, "send_high": 0xBF}
+    def test_example_seed_composes_the_four_end_to_end_payloads(self) -> None:
+        # The public template ships unprovisioned (0x00000000); this models a
+        # provisioned example ID to pin the payload-composition math.
+        seed = 0xCB123456
+        sender_bytes = [(seed >> shift) & 0xFF for shift in (24, 16, 8, 0)]
+        self.assertEqual(sender_bytes, [0xCB, 0x12, 0x34, 0x56])
+        expected = {
+            "send_off": [0xCB, 0x12, 0x34, 0x56, 0x90, 0x90],
+            "send_low": [0xCB, 0x12, 0x34, 0x56, 0x9F, 0x9F],
+            "send_medium": [0xCB, 0x12, 0x34, 0x56, 0xAF, 0xAF],
+            "send_high": [0xCB, 0x12, 0x34, 0x56, 0xBF, 0xBF],
+        }
         scripts = script_blocks(self.text)
-        for script_id, command in expected.items():
+        for script_id, payload in expected.items():
             with self.subTest(script_id=script_id):
                 command_match = re.search(
                     r"(?m)^\s+cmd:\s*0x([0-9A-Fa-f]{2})\s*$", scripts[script_id]
                 )
                 self.assertIsNotNone(command_match)
-                self.assertEqual(int(command_match.group(1), 16), command)
+                command = int(command_match.group(1), 16)
+                self.assertEqual(sender_bytes + [command, command], payload)
 
     def test_fixed_state_scripts_route_through_tx_burst_with_correct_command_byte(self) -> None:
         # These four command bytes are byte-identical to the previously
@@ -391,6 +432,63 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         for nibble in ("0x0", "0x1", "0x2", "0x4", "0x8", "0xC", "0xF"):
             self.assertIn(f"duration_nibble == {nibble}", radio)
 
+    def test_oem_lower_six_bit_state_comparison_model(self) -> None:
+        # The firmware compares desired/reported state after shifting both
+        # bytes left two bits, which discards capability metadata bits 7:6.
+        # OFF is the one special case: remembered speed is a wildcard.
+        self.assertTrue(oem_state_matches(0x9F, 0x1F))  # capability unknown
+        self.assertTrue(oem_state_matches(0x9F, 0x9F))  # 2-speed metadata
+        self.assertTrue(oem_state_matches(0xAF, 0x6F))  # 1-speed metadata
+        self.assertTrue(oem_state_matches(0xAF, 0xEF))  # 3-speed metadata
+        for off_report in (0x00, 0x10, 0x80, 0x90, 0xB0, 0xF0):
+            with self.subTest(off_report=off_report):
+                self.assertTrue(oem_state_matches(0x90, off_report))
+        self.assertFalse(oem_state_matches(0x9F, 0xB0))
+        self.assertFalse(oem_state_matches(0xBF, 0x1F))
+
+    def test_correlated_response_decoder_uses_firmware_state_fields(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        self.assertIn("uint8_t state_speed = (cmd >> 4) & 0x03;", radio)
+        self.assertIn("uint8_t canonical_state = cmd & 0x3F;", radio)
+        self.assertIn("uint8_t capability = cmd >> 6;", radio)
+        self.assertIn("bool state_encoding_ok", radio)
+        self.assertIn("duration_nibble == 0 || state_speed != 0", radio)
+
+        # Direction comes from our bounded query window, never from bit 7:
+        # both live 1F and B0/90 response forms must reach the same branch.
+        response_start = radio.index("bool local_query_epoch")
+        response_end = radio.index("// Normal six-byte traffic", response_start)
+        response = radio[response_start:response_end]
+        self.assertNotIn("cmd & 0x80", response)
+        self.assertNotIn("cmd < 0x80", response)
+        self.assertIn("id(cl_query_window)", response)
+        self.assertIn("${closed_loop_response_min_ms}", response)
+        self.assertIn("${closed_loop_response_window_ms}", response)
+
+    def test_correlated_recovery_never_weakens_normal_validation(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        # A one-bit known-header repair and an overlength first-six-byte
+        # recovery are only candidates inside a locally-opened response
+        # window. Normal traffic retains exact length, duplicate, and sender.
+        self.assertIn("header_bit_errors <= 1", radio)
+        self.assertIn("if (x.size() < 6)", radio)
+        self.assertIn("bool recovered_candidate", radio)
+        self.assertIn("cl_candidate_exact_count", radio)
+        self.assertIn("cl_candidate_total_count", radio)
+        self.assertIn("candidate_exact_count >= 1 || candidate_total_count >= 3", radio)
+
+        normal_start = radio.index("// Normal six-byte traffic")
+        normal = radio[normal_start:]
+        self.assertIn("if (x.size() != 6)", normal)
+        self.assertIn("if (x[4] != x[5])", normal)
+        self.assertIn("sender_id != id(learned_sender_id)", normal)
+
+    def test_rx_callback_never_executes_a_transmit_action(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        self.assertNotRegex(radio, r"(?m)^\s+- script\.execute:")
+        self.assertNotRegex(radio, r"(?m)^\s+- sx127x\.send_packet:")
+        self.assertNotIn("id(tx_burst).execute", radio)
+
     def test_rx_handles_wake_query_and_special_frame_without_publishing(self) -> None:
         radio = top_level_block(self.text, "sx127x")
         self.assertIn("cmd == 0x66", radio)
@@ -400,16 +498,16 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
             r"\(id\(learned_sender_id\) & 0x00FFFFFFUL\)",
         )
 
-        # Neither branch may publish the fan entity or execute a script
-        # before its own return - both are log-and-ignore only.
-        wake_start = radio.index("if (cmd == 0x66)")
+        # Neither branch may publish the fan entity or execute a script.
+        # CE is log-only; an external query is an OEM-priority cancellation
+        # event, but still cannot actuate or publish fan state directly.
+        wake_start = radio.index("if (exact_frame && cmd == 0x66 &&")
         wake_end = radio.index("return;", wake_start) + len("return;")
         wake_branch = radio[wake_start:wake_end]
-        self.assertNotIn("publish_state", wake_branch)
         self.assertNotIn("script.execute", wake_branch)
         self.assertNotIn("quietcool_fan", wake_branch)
 
-        ce_start = radio.index("if (x[0] == 0xCE")
+        ce_start = radio.index("if (exact_frame && x[0] == 0xCE")
         ce_end = radio.index("return;", ce_start) + len("return;")
         ce_branch = radio[ce_start:ce_end]
         self.assertNotIn("publish_state", ce_branch)
@@ -458,13 +556,12 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("sx127x.send_packet", learn_block)
 
     def test_learn_window_timeout_and_auto_rearm_are_rx_storage_only(self) -> None:
-        interval_block = top_level_block(self.text, "interval")
-        self.assertIn("id(learn_active)", interval_block)
-        self.assertIn("120000UL", interval_block)
-        self.assertIn("id(learn_auto_mode)", interval_block)
-        self.assertIn("id(learn_candidate_id) = 0;", interval_block)
-        self.assertNotIn("script.execute", interval_block)
-        self.assertNotIn("sx127x.send_packet", interval_block)
+        learn_interval = interval_item_containing(self.text, "id(learn_active)")
+        self.assertIn("120000UL", learn_interval)
+        self.assertIn("id(learn_auto_mode)", learn_interval)
+        self.assertIn("id(learn_candidate_id) = 0;", learn_interval)
+        self.assertNotIn("script.execute", learn_interval)
+        self.assertNotIn("sx127x.send_packet", learn_interval)
 
     def test_learn_command_ok_excludes_wake_query(self) -> None:
         # FIX 1b: only a real state-command frame (speed nibble 9/A/B with
@@ -589,6 +686,9 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn('publish_state("unset")', forget_button)
 
         for item in (learn_button, forget_button):
+            self.assertIn("id(tx_burst).stop();", item)
+            self.assertIn("id(cl_query_epoch) = false;", item)
+            self.assertIn("id(cl_query_epoch_confirmation) = false;", item)
             for banned in ("sx127x.send_packet", "script.execute", "fan.turn_on", "fan.turn_off"):
                 with self.subTest(banned=banned):
                     self.assertNotIn(banned, item)
@@ -602,6 +702,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         very_long = prg[prg.index("min_length: 5000ms") :]
         self.assertIn("id(learn_active) = true;", very_long)
         self.assertIn("id(learn_auto_mode) = false;", very_long)
+        self.assertIn("id(tx_burst).stop();", very_long)
+        self.assertIn("id(cl_query_epoch) = false;", very_long)
         self.assertNotIn("fan.turn_off", very_long)
 
     def test_remote_sender_id_text_sensor_present(self) -> None:
@@ -657,8 +759,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertLess(command_write, if_duplicate)
 
     def test_rx_accepts_neutral_off_80_for_observed_state_only(self) -> None:
-        # Observed live from a second unit's OEM remote
-        # (2026-07-18): its Off button transmits 80 80 - speed nibble 8
+        # Observed live from a second unit's OEM remote: its Off
+        # button transmits 80 80 - speed nibble 8
         # ("no remembered speed"), duration 0 - which the original
         # downstairs-derived 9/A/B whitelist rejected, leaving the entity
         # stuck on the previous state. 0x80 must be decodable as OFF, but
@@ -667,7 +769,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         # any TX payload.
         radio = top_level_block(self.text, "sx127x")
         self.assertIn("bool off_neutral = (cmd == 0x80);", radio)
-        self.assertIn("if (!(speed_ok && duration_ok) && !off_neutral)", radio)
+        self.assertIn("if (!state_encoding_ok)", radio)
         # Decode branch: off_neutral turns the entity off WITHOUT touching
         # its remembered speed.
         off_branch = radio.index("if (off_neutral)")
@@ -748,6 +850,186 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("id: rx_rejected_count_sensor", self.text)
         self.assertIn("id: last_tx_command_sensor", self.text)
         self.assertIn("id: last_rx_frame_sensor", self.text)
+
+    def test_closed_loop_globals_are_volatile_and_boot_safe(self) -> None:
+        globals_block = top_level_block(self.text, "globals")
+        required = (
+            "cl_active", "cl_desired_cmd", "cl_command_attempts",
+            "cl_attempt_limit", "cl_query_due", "cl_query_due_ms",
+            "cl_query_window", "cl_query_epoch", "cl_query_epoch_confirmation",
+            "cl_query_started_ms", "cl_query_count",
+            "cl_candidate_state", "cl_candidate_total_count",
+            "cl_candidate_exact_count", "cl_report_ready",
+            "cl_report_state", "cl_report_raw", "cl_report_capability",
+            "oem_query_seen_ms", "oem_query_seen",
+        )
+        for global_id in required:
+            with self.subTest(global_id=global_id):
+                start = globals_block.index(f"- id: {global_id}")
+                next_id = globals_block.find("\n  - id:", start + 1)
+                item = globals_block[start:] if next_id == -1 else globals_block[start:next_id]
+                self.assertIn("restore_value: false", item)
+
+        boot = top_level_block(self.text, "esphome")
+        self.assertIn('id(confirmed_fan_state_sensor).publish_state("unknown");', boot)
+        self.assertIn('id(command_confirmation_status_sensor).publish_state("idle");', boot)
+        self.assertNotIn("script.execute", boot)
+
+    def test_every_command_wrapper_arms_closed_loop_and_keeps_refire(self) -> None:
+        scripts = script_blocks(self.text)
+        expected = {
+            "send_off": ("0x90", "${off_refire_count}"),
+            "send_low": ("0x9F", "${command_refire_count}"),
+            "send_medium": ("0xAF", "${command_refire_count}"),
+            "send_high": ("0xBF", "${command_refire_count}"),
+        }
+        for script_id, (command, refires) in expected.items():
+            with self.subTest(script_id=script_id):
+                wrapper = scripts[script_id]
+                self.assertIn(f"id(refire_cmd) = {command};", wrapper)
+                self.assertIn(f"id(refire_left) = {refires};", wrapper)
+                self.assertIn("id(cl_active) = true;", wrapper)
+                self.assertIn(f"id(cl_desired_cmd) = {command};", wrapper)
+                self.assertIn("id(cl_candidate_total_count) = 0;", wrapper)
+                self.assertIn("id(cl_candidate_exact_count) = 0;", wrapper)
+
+        timer = scripts["send_timer"]
+        self.assertIn("id(refire_cmd) = id(timer_tx_command);", timer)
+        self.assertIn("id(cl_desired_cmd) = id(timer_tx_command);", timer)
+        self.assertIn("id(cl_active) = true;", timer)
+
+    def test_closed_loop_is_bounded_and_layered_on_spaced_refire(self) -> None:
+        substitutions = top_level_block(self.text, "substitutions")
+        self.assertIn('command_refire_count: "3"', substitutions)
+        self.assertIn('off_refire_count: "5"', substitutions)
+        self.assertIn('command_refire_interval_ms: "1000"', substitutions)
+        self.assertIn("closed_loop_query_delay_ms", substitutions)
+        self.assertIn("closed_loop_response_window_ms", substitutions)
+        self.assertIn("closed_loop_response_min_ms", substitutions)
+
+        tx_burst = script_blocks(self.text)["tx_burst"]
+        self.assertIn("cmd != 0x66", tx_burst)
+        self.assertIn("cmd == id(cl_desired_cmd)", tx_burst)
+        self.assertIn("id(cl_command_attempts) = id(cl_command_attempts) + 1;", tx_burst)
+        self.assertIn("id(cl_query_due) = true;", tx_burst)
+        self.assertIn("id(cl_command_attempts) >= id(cl_attempt_limit)", tx_burst)
+        self.assertIn("id(refire_left) = 0;", tx_burst)
+        self.assertIn("id(refire_next_ms) = millis() + ${command_refire_interval_ms};", tx_burst)
+
+        query_interval = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn("interval: 100ms", query_interval)
+        self.assertIn("id(cl_query_window) = true;", query_interval)
+        self.assertIn("id: tx_burst", query_interval)
+        self.assertRegex(query_interval, r"(?m)^\s+cmd: 0x66\s*$")
+        self.assertIn("id(cl_query_count) = id(cl_query_count) + 1;", query_interval)
+        self.assertIn("id(cl_active) = false;", query_interval)
+        self.assertIn("id(refire_left) = 0;", query_interval)
+
+        refire_interval = interval_item_containing(self.text, 'ESP_LOGD("REFIRE"')
+        self.assertIn("interval: 250ms", refire_interval)
+        self.assertIn("id: tx_burst", refire_interval)
+        self.assertIn("id(refire_left) = id(refire_left) - 1;", refire_interval)
+        self.assertIn("id(cl_command_attempts) < id(cl_attempt_limit)", refire_interval)
+        self.assertIn("!id(cl_query_due)", refire_interval)
+        self.assertIn("!id(cl_query_window)", refire_interval)
+
+    def test_rapid_same_command_presses_cannot_strand_retry_state(self) -> None:
+        # Normal commands permit four total bursts; four rapidly queued Low
+        # presses therefore consume the budget directly. OFF permits six;
+        # five rapid presses leave exactly one effective automatic attempt.
+        self.assertEqual(simulate_same_command_attempts(4, 4), (4, 0))
+        self.assertEqual(simulate_same_command_attempts(6, 5), (6, 0))
+        self.assertEqual(simulate_same_command_attempts(6, 6), (6, 0))
+
+    def test_oem_query_supersedes_closed_loop_without_rx_transmit(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        query_start = radio.index("if (exact_frame && cmd == 0x66 &&")
+        query_end = radio.index("return;", query_start) + len("return;")
+        branch = radio[query_start:query_end]
+        self.assertIn("id(oem_query_seen) = true;", branch)
+        self.assertIn("id(refire_left) = 0;", branch)
+        self.assertIn("id(cl_active) = false;", branch)
+        self.assertIn("id(cl_query_due) = false;", branch)
+        self.assertIn("id(cl_query_window) = false;", branch)
+        self.assertIn("id(cl_query_epoch) = false;", branch)
+        self.assertIn("id(cl_query_epoch_confirmation) = false;", branch)
+        self.assertIn("id(tx_burst).stop();", branch)
+        self.assertNotIn("script.execute", branch)
+
+    def test_query_epoch_consumes_post_consensus_repeats(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        epoch = radio.index("bool local_query_epoch")
+        passive = radio.index("if (!correlated_response || id(cl_report_ready))", epoch)
+        normal = radio.index("// Normal six-byte traffic", passive)
+        cancel = radio.index("bool remote_command_ok", normal)
+        self.assertTrue(epoch < passive < normal < cancel)
+        self.assertIn("id(cl_query_epoch)", radio[epoch:passive])
+        self.assertIn("return;", radio[passive:normal])
+
+        tx_burst = script_blocks(self.text)["tx_burst"]
+        self.assertIn("if (cmd == 0x66)", tx_burst)
+        self.assertIn("id(cl_query_epoch) = true;", tx_burst)
+        self.assertIn("id(cl_query_epoch_confirmation)", tx_burst)
+        self.assertIn("id(cl_query_started_ms) = millis();", tx_burst)
+
+        remote_cancel = radio[normal:]
+        self.assertIn("!local_query_epoch || recent_oem_query", remote_cancel)
+        self.assertIn("if (recent_oem_query)", remote_cancel)
+        self.assertIn("id(tx_burst).stop();", remote_cancel)
+
+        coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn(
+            "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}",
+            coordinator,
+        )
+
+    def test_late_fan_response_tail_is_quarantined_without_extending_consensus(self) -> None:
+        # Live raw logging showed a second exact fan-response burst at about
+        # +1.44/+1.54/+1.65 s after the local query.  That tail must remain
+        # attributable to our query after the 1.1 s consensus/no-response
+        # window closes, or its set-bit 90/A0/B0 state can masquerade as an
+        # OEM command and overwrite a successful confirmation diagnostic.
+        substitutions = top_level_block(self.text, "substitutions")
+        self.assertIn('closed_loop_response_tail_ms: "2500"', substitutions)
+
+        radio = top_level_block(self.text, "sx127x")
+        epoch_start = radio.index("bool local_query_epoch")
+        response_end = radio.index("auto bit_count", epoch_start)
+        response_preamble = radio[epoch_start:response_end]
+        self.assertIn(
+            "query_age <= ${closed_loop_response_tail_ms}", response_preamble
+        )
+        self.assertIn(
+            "query_age <= ${closed_loop_response_window_ms}", response_preamble
+        )
+
+        coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn(
+            "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_tail_ms}",
+            coordinator,
+        )
+        # The actual no-response decision remains on the shorter bound; the
+        # tail is classification-only and must never delay a safety re-fire.
+        self.assertIn(
+            "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}",
+            coordinator,
+        )
+
+    def test_confirmation_diagnostics_and_capability_are_published(self) -> None:
+        for name, sensor_id in (
+            ("Last Confirmed Fan State", "confirmed_fan_state_sensor"),
+            ("Command Confirmation Status", "command_confirmation_status_sensor"),
+            ("Fan Speed Capability", "fan_capability_sensor"),
+        ):
+            with self.subTest(name=name):
+                item = list_item_containing(self.text, "text_sensor", f'name: "{name}"')
+                self.assertIn(f"id: {sensor_id}", item)
+                self.assertIn("update_interval: never", item)
+
+        query_interval = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn("id(confirmed_fan_state_sensor).publish_state", query_interval)
+        self.assertIn("id(command_confirmation_status_sensor).publish_state", query_interval)
+        self.assertIn("id(fan_capability_sensor).publish_state", query_interval)
 
     def test_homeassistant_display_temperature_aliases_present(self) -> None:
         substitutions = top_level_block(self.text, "substitutions")
@@ -1293,7 +1575,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertLess(publish_index, timer_index)
 
     def test_timer_expiry_interval_never_transmits(self) -> None:
-        interval_block = top_level_block(self.text, "interval")
+        interval_block = interval_item_containing(self.text, "Device-local timer expired")
         self.assertIn("id(timer_active)", interval_block)
         self.assertIn(
             "(int32_t) (id(timer_expiry_millis) - millis())", interval_block

@@ -211,8 +211,10 @@ query, reporting `OFF (raw 90)`, `2-speed`, and
 transmission. The flashed artifact's SHA-256 was
 `674ea45beb02e14d27eebd7bdfcfdddd1c7c74acf050238fa192f0e744237689`.
 
-The public YAML templates currently checked into this repository have **not yet
-been ported to that closed-loop implementation**. They remain command/passive-RX
-controllers; in particular, the V3 template is not a query/confirmation loop.
-The protocol and design here are authoritative research for that future source
-port, not a claim that the current templates already ship it.
+Both public YAML templates in this repository now ship that closed-loop
+implementation: `quietcool-lora32.yaml` carries the same source the live
+SX1278 validation ran (with an anonymized, unprovisioned sender seed), and
+`quietcool-lora-v3.yaml` carries the identical logic on the SX1262 with a
+58.6 kHz receive bandwidth (the nearest FSK-legal value to the validated
+50 kHz). The V3 board has not yet had hardware bring-up, so its closed loop
+compiles and validates but is not yet bench-verified on air.

@@ -18,16 +18,15 @@
   analysis and live captures establish a fixed six-byte fan reply
   (`CB|CE`, exact three-byte ID suffix, duplicated state byte), lower-six-bit
   state comparison, capability metadata in bits 7:6, and the OEM `66 66`
-  query flow. The checked-in public YAMLs do not implement closed-loop control
-  yet.
-- A public closed-loop port must bring across the validated spaced safety
-  re-fire and layer query confirmation on top of it—never substitute a rapid
-  retry loop. It must keep `tx_burst` as the sole send point, correlate replies
-  to a local post-command query, treat `CE` as non-confirming, enforce exact ID
-  and duplicate-byte checks, compare reported state with the desired command,
-  and bound both query and command attempts. It must publish confirmed state,
-  confirmation status, and speed capability without allowing any RX path to
-  trigger an unrelated transmission. Add regression tests for all of those
+  query flow. Both checked-in public YAMLs implement this closed-loop control.
+- Changes to the closed loop must keep the validated spaced safety re-fire
+  underneath query confirmation—never substitute a rapid retry loop. Keep
+  `tx_burst` as the sole send point, correlate replies to a local post-command
+  query, treat `CE` as non-confirming, enforce exact ID and duplicate-byte
+  checks, compare reported state with the desired command, and bound both
+  query and command attempts. Confirmed state, confirmation status, and speed
+  capability must publish without allowing any RX path to trigger an unrelated
+  transmission. Keep regression tests green for all of those
   invariants before documenting the feature as shipped.
 - The live SX1278 research used an explicit 50 kHz RX bandwidth. The public
   SX1278 template currently omits `bandwidth` and therefore uses ESPHome's
