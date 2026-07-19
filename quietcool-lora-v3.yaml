@@ -2475,7 +2475,10 @@ display:
         it.print(left_zone_center_x, 43, id(font_learn_prompt), TextAlign::TOP_CENTER, "ID SAVED");
       } else {
         // ---- KEEP IN SYNC: STATE_WORD ----
-        it.print(left_zone_center_x, 34, id(font_state), TextAlign::TOP_CENTER, state_str);
+        // y=32 (moved up with the countdown's 43->41 shift so the two rows
+        // keep their spacing): at 34/43 the countdown's digit ink clipped
+        // into the bottom status-icon row on real hardware.
+        it.print(left_zone_center_x, 32, id(font_state), TextAlign::TOP_CENTER, state_str);
 
         // ---- KEEP IN SYNC: COUNTDOWN (HH:MM:SS while a timer is active, blank otherwise) ----
         // HH:MM:SS (zero-padded, ticking every second) while a device-local
@@ -2488,7 +2491,10 @@ display:
           int hh = remaining_ms / 3600000;
           int mm = (remaining_ms % 3600000) / 60000;
           int ss = (remaining_ms % 60000) / 1000;
-          it.printf(left_zone_center_x, 43, id(font_timer), TextAlign::TOP_CENTER, "%02d:%02d:%02d", hh, mm, ss);
+          // y=41 (not the 43 the learn prompts use): the countdown font's
+          // taller digit ink was clipping into the bottom status-icon row
+          // at 43 on real hardware.
+          it.printf(left_zone_center_x, 41, id(font_timer), TextAlign::TOP_CENTER, "%02d:%02d:%02d", hh, mm, ss);
         }
       }
 

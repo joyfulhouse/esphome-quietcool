@@ -77,14 +77,18 @@ FAN_FRAME_STEP = {0: 0, 1: 1, 2: 2, 3: 3}  # speed idx -> frame-index step/refre
 
 # ---- KEEP IN SYNC: STATE_WORD ----
 LEFT_ZONE_CENTER_X = 27
-STATE_WORD_POS = (LEFT_ZONE_CENTER_X, 34)  # TOP_CENTER
+# y=32, moved up with the countdown's 43->41 shift so the two rows keep
+# their spacing (countdown ink was clipping the bottom status-icon row).
+STATE_WORD_POS = (LEFT_ZONE_CENTER_X, 32)  # TOP_CENTER
 STATE_WORD_FONT_SIZE = 11
 SPEED_NAMES = ("OFF", "LOW", "MED", "HIGH")
 
 # ---- KEEP IN SYNC: COUNTDOWN ----
 # HH:MM:SS while a timer is active; blank while continuous-on (running,
 # no timer) or off - no infinity glyph (removed: illegible "OO" at 18px).
-COUNTDOWN_POS = (LEFT_ZONE_CENTER_X, 43)  # TOP_CENTER
+# y=41, not the 43 the learn prompts use: the countdown font's taller digit
+# ink was clipping into the bottom status-icon row at 43 on real hardware.
+COUNTDOWN_POS = (LEFT_ZONE_CENTER_X, 41)  # TOP_CENTER
 COUNTDOWN_FONT_SIZE = 11
 
 # ---- KEEP IN SYNC: LEARN_STATE ----
