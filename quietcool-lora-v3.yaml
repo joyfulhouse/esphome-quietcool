@@ -6,8 +6,8 @@
 # port report for what still needs bench confirmation.
 #
 # STRUCTURE: this is a deliberate standalone file, NOT a `packages:`
-# include of quietcool-lora32.yaml (contrast quietcool-lora32-
-# upstairs.yaml, which IS a package include because it targets the
+# include of quietcool-lora32.yaml (contrast a second-device wrapper of the
+# SX1278 config, which CAN be a package include because it targets the
 # byte-identical TTGO LoRa32 V2.1/SX1278 hardware). quietcool-lora32.
 # yaml mixes radio-agnostic logic (fan entity, learn mode, timer mirror,
 # diagnostics, display) with board-specific config (esp32: board, spi:
@@ -21,8 +21,7 @@
 # section below (globals, fan entity, on_state, buttons, PRG button,
 # scripts, timer interval, display, sensors) is copied verbatim from
 # quietcool-lora32.yaml, and only the radio- and board-touching
-# sections differ. quietcool-lora32.yaml and quietcool-lora32-
-# upstairs.yaml are untouched by this file's existence.
+# sections differ. The SX1278 config is untouched by this file's existence.
 #
 # RADIO DIFFERENCE: the SX1262 is a different Semtech packet engine from
 # the SX1278 (separate ESPHome `sx126x` component, not `sx127x`), but
@@ -44,16 +43,15 @@
 # two-burst confirmation) - is copied byte-for-byte from
 # quietcool-lora32.yaml and MUST NOT be changed independently of it.
 #
-# Default seed is 0x00000000 (unlike the downstairs file's compiled-in
-# 0xCB004739): this is a new board with no already-known sender ID, so it
-# ships in auto-learn mode exactly like quietcool-lora32-upstairs.yaml was
-# first flashed. See README "Learn mode / porting to your own fan".
+# Default seed is 0x00000000: a new board with no already-known sender ID,
+# so it ships in auto-learn mode and captures the fan's remote on first
+# flash. See README "Learn mode / porting to your own fan".
 
 substitutions:
   # Device identity. Follows the same substitution pattern as the
-  # downstairs/upstairs files: a real third unit should override
+  # the SX1278 LoRa32 files: a real third unit should override
   # device_name/device_friendly_name/fallback_ap_ssid/quietcool_sender_id/
-  # display_*_entity the same way quietcool-lora32-upstairs.yaml overrides
+  # display_*_entity the same way a second-device wrapper overrides
   # quietcool-lora32.yaml's defaults. These are placeholder-but-
   # functional defaults for the first V3 bring-up.
   device_name: quietcool-lora-v3
@@ -66,8 +64,8 @@ substitutions:
   quietcool_sender_id: "0x00000000"
 
   # Stable Home Assistant display-source aliases, same mechanism as the
-  # other two files. Defaulted to the downstairs entity IDs as placeholders;
-  # re-point these (like quietcool-lora32-upstairs.yaml does) once this
+  # other two files. Defaulted to the SX1278 LoRa32 entity IDs as placeholders;
+  # re-point these (like a second-device wrapper does) once this
   # unit's install location is known.
   display_indoor_entity: "sensor.quietcool_display_indoor"
   display_outdoor_entity: "sensor.quietcool_display_outdoor"
@@ -179,7 +177,7 @@ captive_portal:
 # PIN CONFIDENCE: HIGH. sda/scl/reset_pin cross-checked against both the
 # official ESPHome device catalog (devices.esphome.io/devices/heltec-wifi-
 # lora-32-v3) and an independent Home Assistant community sx126x/Heltec-V3
-# thread; both agree. reset_pin: GPIO21 is new relative to the downstairs
+# thread; both agree. reset_pin: GPIO21 is new relative to the SX1278 LoRa32
 # config (which leaves the SSD1306 reset_pin unset) - the V3 catalog entry
 # sets it explicitly, so it's carried here too.
 i2c:
@@ -599,7 +597,7 @@ sx126x:
         bool duration_ok = (duration_nibble == 0x0 || duration_nibble == 0x1 || duration_nibble == 0x2 ||
                              duration_nibble == 0x4 || duration_nibble == 0x8 || duration_nibble == 0xC ||
                              duration_nibble == 0xF);
-        // Neutral OFF, observed live from the upstairs installation's OEM
+        // Neutral OFF, observed live from a second unit's OEM
         // remote on 2026-07-18: its Off button transmits 80 80 (speed
         // nibble 8 = no remembered speed, duration 0 = off), unlike the
         // downstairs remote's speed-remembered x0 form. Accepted for
@@ -685,7 +683,7 @@ sx126x:
             // burst now match the freshly learned sender and would
             // otherwise fall through to the normal observed-state path
             // and publish the LEARNING press as live fan state (seen on
-            // the upstairs onboarding 2026-07-18: entity stuck "Low"
+            // a second-unit onboarding: entity stuck "Low"
             // right after LEARNED). With the tracker seeded they hit the
             // sliding dedup window and are suppressed like any other
             // intra-burst repeat.
@@ -815,7 +813,7 @@ sx126x:
 # =============================================================================
 # Firmware-derived six-byte application payloads. Hardware supplies preamble,
 # sync, and the variable-length byte. Low and High are physically verified
-# on the downstairs/upstairs SX1278 units; nothing on this board is
+# on the the SX1278 LoRa32 SX1278 units; nothing on this board is
 # physically verified yet.
 #
 #   OFF:  (LOW | OFF)  = 0x90 | 0x00 = 0x90
@@ -1498,7 +1496,7 @@ display:
     model: "SSD1306 128x64"
     address: 0x3C
     # PIN CONFIDENCE: HIGH. The V3's OLED reset line is a real GPIO (GPIO21)
-    # unlike the downstairs V2.1 config, which leaves reset_pin unset;
+    # unlike the SX1278 LoRa32 V2.1 config, which leaves reset_pin unset;
     # cross-checked against the same two independent sources as the i2c:
     # block above.
     reset_pin: GPIO21
@@ -1742,7 +1740,7 @@ display:
 # Status LED. PIN CONFIDENCE: MEDIUM - GPIO35 for the onboard white LED is
 # corroborated by general Heltec V3 community knowledge but was not in the
 # port brief's pinout list and its drive polarity (active-high assumed,
-# same as the downstairs V2.1's unmodified `status_led`) is NOT confirmed
+# same as the SX1278 LoRa32 V2.1's unmodified `status_led`) is NOT confirmed
 # from any source consulted here; flagged for bring-up.
 light:
   - platform: status_led
@@ -1765,7 +1763,7 @@ sensor:
   - platform: uptime
     name: "Uptime"
 
-  # Battery telemetry - DIFFERENT HARDWARE PATH from the downstairs/upstairs
+  # Battery telemetry - DIFFERENT HARDWARE PATH from the the SX1278 LoRa32
   # V2.1 boards. The V2.1's VBAT divider is always-on and lands on GPIO35,
   # which this board uses for the status LED (see `light:` above) - V3 puts
   # VBAT sensing on a separate ADC pin (GPIO1) gated by a dedicated enable
@@ -1806,7 +1804,7 @@ sensor:
   # the full table). This is a commonly used single-cell Li-ion/LiPo
   # approximation, not a datasheet curve for this exact cell, and is
   # sensitive to load current, temperature, and cell age - treat it as
-  # indicative, not precise. Identical curve to the downstairs/upstairs
+  # indicative, not precise. Identical curve to the the SX1278 LoRa32
   # boards - the curve is a generic LiPo characteristic, not board-specific.
   - platform: template
     name: "Battery Level"

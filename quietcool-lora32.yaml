@@ -2,8 +2,8 @@
 #
 # The SX127x packet engine emits the eight-byte 0xAA preamble, 0x2D 0xD4
 # sync word, and variable payload-length byte. Scripts send the recovered
-# six-byte payload only: the NVS-persisted four-byte sender ID followed by a
-# repeated command. The checked-in seed CB 00 47 39 preserves this unit.
+# six-byte payload only: the NVS-persisted four-byte sender ID (learned from
+# your OEM remote) followed by a repeated command.
 # CRC, whitening, Manchester encoding, and FEC are disabled.
 #
 # RF transmission only ever happens from ONE place: the queued core script
@@ -24,17 +24,18 @@
 substitutions:
   # Device identity. Substitution-based so a second physical controller can
   # reuse this whole file unchanged via a tiny wrapper YAML that overrides
-  # these (see quietcool-lora32-upstairs.yaml): ESPHome gives the including
+  # these (see a second-device wrapper): ESPHome gives the including
   # file's substitutions precedence over a package's.
   device_name: quietcool-lora32
   device_friendly_name: "QuietCool RF Controller"
   fallback_ap_ssid: "QuietCool-LoRa32"
 
-  # Compile-time onboarding seed, deliberately substitution-based and
-  # !secret-free so third parties can set it to 0x00000000 and learn their
-  # own OEM remote without packet captures or firmware extraction. This
-  # default preserves this installation's verified on-air sender bytes.
-  quietcool_sender_id: "0xCB004739"
+  # Compile-time onboarding seed. Ships as 0x00000000 so a fresh flash boots
+  # into learn mode and captures YOUR fan's four-byte sender ID from two OEM
+  # remote presses (no packet captures or firmware extraction). If you already
+  # know your ID you may hard-set it here (e.g. "0xCB123456"), but learn mode
+  # is the intended path.
+  quietcool_sender_id: "0x00000000"
 
   # Stable Home Assistant display-source aliases. This installation points
   # them at UI-editable template helpers; third-party builds can re-point any
@@ -365,7 +366,7 @@ sx127x:
         bool duration_ok = (duration_nibble == 0x0 || duration_nibble == 0x1 || duration_nibble == 0x2 ||
                              duration_nibble == 0x4 || duration_nibble == 0x8 || duration_nibble == 0xC ||
                              duration_nibble == 0xF);
-        // Neutral OFF, observed live from the upstairs installation's OEM
+        // Neutral OFF, observed live from a second unit's OEM
         // remote on 2026-07-18: its Off button transmits 80 80 (speed
         // nibble 8 = no remembered speed, duration 0 = off), unlike the
         // downstairs remote's speed-remembered x0 form. Accepted for
@@ -451,7 +452,7 @@ sx127x:
             // burst now match the freshly learned sender and would
             // otherwise fall through to the normal observed-state path
             // and publish the LEARNING press as live fan state (seen on
-            // the upstairs onboarding 2026-07-18: entity stuck "Low"
+            // a second-unit onboarding: entity stuck "Low"
             // right after LEARNED). With the tracker seeded they hit the
             // sliding dedup window and are suppressed like any other
             // intra-burst repeat.

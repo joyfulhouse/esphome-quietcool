@@ -60,16 +60,16 @@ Two remotes (for two fans bought together) were dumped and compared byte-for-byt
 | SHA-256 | `418dedb1…df66cef` | `1163edca…073cec00` |
 
 They differ in **exactly three bytes**, all in the `0x7800–0x7802` per-unit ID
-slot (`39 47 00` → runtime `CB 00 47 39`; `D3 D7 03` → runtime `CB 03 D7 D3`).
+slot (each remote's little-endian ID suffix, which boot prepends with `CB`).
 Everything else — code, button table, packet templates — is identical. There is
 no per-fan firmware variant; only the ID is factory-burned.
 
 ### Confirmed: learn mode reads the real ID
 
 This firmware's [learn mode](../README.md#learn-mode--porting-to-your-own-fan)
-captured `CB 03 D7 D3` over the air from two remote presses — byte-for-byte what
-the dump holds at `0x7800`. No dumping is needed to onboard a fan; the dump only
-*confirmed* the over-the-air capture after the fact.
+captured a unit's four-byte sender ID over the air from two remote presses —
+byte-for-byte what that remote's dump holds at `0x7800`. No dumping is needed to
+onboard a fan; the dump only *confirmed* the over-the-air capture after the fact.
 
 ### The `80` vs `90` "Off" question
 

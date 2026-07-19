@@ -152,7 +152,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_sender_id_seed_and_persisted_global(self) -> None:
         substitutions = top_level_block(self.text, "substitutions")
-        self.assertIn('quietcool_sender_id: "0xCB004739"', substitutions)
+        # Ships unprovisioned: a fresh flash boots into learn mode.
+        self.assertIn('quietcool_sender_id: "0x00000000"', substitutions)
 
         globals_block = top_level_block(self.text, "globals")
         start = globals_block.index("- id: learned_sender_id")
@@ -204,25 +205,21 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                         "id(tx_count_sensor).state + 1", body
                     )
 
-    def test_default_seed_preserves_our_four_end_to_end_payloads(self) -> None:
-        seed = 0xCB004739
-        sender_bytes = [(seed >> shift) & 0xFF for shift in (24, 16, 8, 0)]
-        self.assertEqual(sender_bytes, [0xCB, 0x00, 0x47, 0x39])
-        expected = {
-            "send_off": [0xCB, 0x00, 0x47, 0x39, 0x90, 0x90],
-            "send_low": [0xCB, 0x00, 0x47, 0x39, 0x9F, 0x9F],
-            "send_medium": [0xCB, 0x00, 0x47, 0x39, 0xAF, 0xAF],
-            "send_high": [0xCB, 0x00, 0x47, 0x39, 0xBF, 0xBF],
-        }
+    def test_four_command_bytes_are_byte_identical(self) -> None:
+        # The four state commands are byte-identical to the verified OEM
+        # frames. The 4-byte sender ID is learned per fan at runtime (the
+        # default seed is 0x00000000 = learn mode), so only the command byte
+        # is asserted here; tx_burst composes <learned sender> + <cmd> + <cmd>
+        # MSB-first (see test_tx_burst_payload_byte_order_is_msb_first).
+        expected = {"send_off": 0x90, "send_low": 0x9F, "send_medium": 0xAF, "send_high": 0xBF}
         scripts = script_blocks(self.text)
-        for script_id, payload in expected.items():
+        for script_id, command in expected.items():
             with self.subTest(script_id=script_id):
                 command_match = re.search(
                     r"(?m)^\s+cmd:\s*0x([0-9A-Fa-f]{2})\s*$", scripts[script_id]
                 )
                 self.assertIsNotNone(command_match)
-                command = int(command_match.group(1), 16)
-                self.assertEqual(sender_bytes + [command, command], payload)
+                self.assertEqual(int(command_match.group(1), 16), command)
 
     def test_fixed_state_scripts_route_through_tx_burst_with_correct_command_byte(self) -> None:
         # These four command bytes are byte-identical to the previously
@@ -660,7 +657,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertLess(command_write, if_duplicate)
 
     def test_rx_accepts_neutral_off_80_for_observed_state_only(self) -> None:
-        # Observed live from the upstairs installation's OEM remote
+        # Observed live from a second unit's OEM remote
         # (2026-07-18): its Off button transmits 80 80 - speed nibble 8
         # ("no remembered speed"), duration 0 - which the original
         # downstairs-derived 9/A/B whitelist rejected, leaving the entity
@@ -683,7 +680,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("0x80", scripts)
 
     def test_learn_accept_seeds_burst_dedup_tracker(self) -> None:
-        # Seen on the upstairs onboarding (2026-07-18): learn accepted on a
+        # Seen on a second-unit onboarding: learn accepted on a
         # frame of the second OEM burst, and that burst's remaining 45 ms
         # repeats - now matching the freshly learned sender - fell through
         # to the observed-state path and published the LEARNING press as

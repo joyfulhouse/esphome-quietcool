@@ -87,7 +87,6 @@ fan via [Learn mode](#learn-mode--porting-to-your-own-fan).
 
 ```
 quietcool-lora32.yaml            # TTGO LoRa32 V2.1 / SX1278 — shared base config
-quietcool-lora32-upstairs.yaml   # example second device (includes the base)
 quietcool-lora-v3.yaml           # Heltec/HiLetgo ESP32-S3 / SX1262 port
 secrets.yaml.example             # copy to secrets.yaml (gitignored)
 tests/                           # config regression tests (pytest/unittest)
@@ -122,7 +121,8 @@ fan's ID from its OEM remote through the existing receive path.
 
    This is deliberately a normal substitution, not a `!secret`, so the
    portable configuration has no extra secrets-file dependency. The checked-in
-   default is `0xCB004739` for this installation.
+   default is `0x00000000` — the firmware ships in learn mode and captures
+   your fan's ID on first boot.
 2. Flash normally. When the persisted ID is zero, boot enters auto-learn and
    the OLED shows `LEARN / REMOTE X2`. Auto-learn stays armed - re-arming its
    120-second listening window as needed - for up to **15 minutes after
@@ -139,8 +139,9 @@ fan's ID from its OEM remote through the existing receive path.
    requirement that also blocks a parked, unprovisioned unit from picking up
    a neighboring installation's ID from overheard query/command cross-talk.
 4. On acceptance the OLED briefly shows `LEARNED / ID SAVED`, the
-   `Remote Sender ID` Home Assistant text sensor publishes a value such as
-   `CB 00 47 39`, and the ID is force-committed to NVS. Until an ID is set,
+   `Remote Sender ID` Home Assistant text sensor publishes the captured
+   four-byte ID (always beginning `CB`), and it is force-committed to NVS.
+   Until an ID is set,
    `tx_burst` logs an error and refuses to transmit or increment `TX Count`.
 
 Only a six-byte, `CB`-prefixed frame carrying a valid speed/duration
