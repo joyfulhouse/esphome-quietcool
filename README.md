@@ -19,7 +19,7 @@ complete kit: ESP32 + 433 MHz radio + OLED + antenna):
 | [LilyGO TTGO LoRa32 V2.1 (433 MHz)](https://amzn.to/4vBvqOU) | [HiLetgo ESP32 LoRa V3 (SX1262)](https://amzn.to/4wagWqi) |
 | :---: | :---: |
 | [![LilyGO TTGO LoRa32 V2.1 433 MHz board](docs/images/lilygo-ttgo-lora32-v21.jpg)](https://amzn.to/4vBvqOU) | [![HiLetgo ESP32 LoRa V3 SX1262 board with OLED and 433–510 MHz antenna](docs/images/hiletgo-esp32-lora-v3.jpg)](https://amzn.to/4wagWqi) |
-| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and verified on (SX1278, `quietcool-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — newer SX1262/ESP32-S3 port (`quietcool-lora-v3.yaml`); builds, awaiting hardware bring-up |
+| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and **verified working on real fans** (SX1278, `quietcool-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — ⚠️ **not yet confirmed working**: the SX1262/ESP32-S3 port (`quietcool-lora-v3.yaml`) compiles but hasn't been tested on real hardware. Choose the LilyGO unless you want to help with bring-up |
 
 <sub>Disclosure: as an Amazon Associate (store `joyfulhousegi-20`) the maintainers
 may earn from qualifying purchases through the links above. They cost you nothing
