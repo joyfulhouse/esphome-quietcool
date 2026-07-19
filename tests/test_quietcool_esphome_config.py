@@ -240,14 +240,15 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                         "id(tx_count_sensor).state + 1", body
                     )
 
-    def test_example_seed_composes_the_four_end_to_end_payloads(self) -> None:
+    def test_example_seed_composes_the_end_to_end_payloads(self) -> None:
         # The public template ships unprovisioned (0x00000000); this models a
         # provisioned example ID to pin the payload-composition math.
+        # send_off is speed-matched at runtime (90/A0/B0) and asserted
+        # separately in test_send_off_is_speed_matched.
         seed = 0xCB123456
         sender_bytes = [(seed >> shift) & 0xFF for shift in (24, 16, 8, 0)]
         self.assertEqual(sender_bytes, [0xCB, 0x12, 0x34, 0x56])
         expected = {
-            "send_off": [0xCB, 0x12, 0x34, 0x56, 0x90, 0x90],
             "send_low": [0xCB, 0x12, 0x34, 0x56, 0x9F, 0x9F],
             "send_medium": [0xCB, 0x12, 0x34, 0x56, 0xAF, 0xAF],
             "send_high": [0xCB, 0x12, 0x34, 0x56, 0xBF, 0xBF],
@@ -263,12 +264,12 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertEqual(sender_bytes + [command, command], payload)
 
     def test_fixed_state_scripts_route_through_tx_burst_with_correct_command_byte(self) -> None:
-        # These four command bytes are byte-identical to the previously
+        # The three ON command bytes are byte-identical to the previously
         # verified firmware and must never change. The actual six-byte
         # payload (sender ID + repeated command byte) is constructed in
         # exactly one place: tx_burst (see test_only_tx_burst_transmits).
+        # OFF is speed-matched at runtime - see test_send_off_is_speed_matched.
         expected = {
-            "send_off": 0x90,
             "send_low": 0x9F,
             "send_medium": 0xAF,
             "send_high": 0xBF,
@@ -282,6 +283,35 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertRegex(wrapper, rf"(?m)^\s+cmd:\s*0x{command_byte:02X}\s*$")
                 self.assertNotIn("sx127x.send_packet", wrapper)
                 self.assertNotIn("delay:", wrapper)
+
+    def test_send_off_is_speed_matched_and_reaimed_by_the_closed_loop(self) -> None:
+        # Live evidence (2026-07-19): a fan running a High/1h timer ignored
+        # six spaced 0x90 bursts and confirmed OFF first-try once in Low.
+        # OFF must therefore be the speed-matched variant (90/A0/B0), like
+        # the OEM remote's remembered speed, and the closed loop must
+        # re-aim the re-fires at the fan's reported speed on a mismatch.
+        off = script_blocks(self.text)["send_off"]
+        self.assertIn("uint8_t off_speed_nibble = 0x90;", off)
+        self.assertIn("if (id(quietcool_fan).speed == 2) off_speed_nibble = 0xA0;", off)
+        self.assertIn("else if (id(quietcool_fan).speed >= 3) off_speed_nibble = 0xB0;", off)
+        self.assertIn("id(off_tx_command) = off_speed_nibble;", off)
+        self.assertIn("cmd: !lambda 'return id(off_tx_command);'", off)
+        # The 0x80 neutral form must never be transmittable: the adaptation
+        # is gated on reported speed 1-3.
+        coord = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn("desired_is_off && actual_speed >= 1 && actual_speed <= 3", coord)
+        self.assertIn("(uint8_t) (0x80 | (actual_speed << 4))", coord)
+        self.assertIn("id(off_tx_command) = adapted_off;", coord)
+
+    def test_yield_policy_requires_a_running_state_report(self) -> None:
+        # A fan that missed our ON command reports its off state (90/A0/B0
+        # - valid command encodings), so an off report on an ON transaction
+        # must re-fire, not yield.
+        coord = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn(
+            "report_could_be_command && !desired_is_off &&\n                  actual_duration != 0",
+            coord,
+        )
 
     def test_no_script_uses_a_literal_data_array(self) -> None:
         # Post-refactor, the only payload construction lives in tx_burst's
@@ -383,12 +413,28 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         # into the select exactly like a locally armed one.
         self.assertEqual(self.text.count("id(timer_armed_hours) = (uint8_t)"), 3)
 
-    def test_boot_never_transmits(self) -> None:
+    def test_boot_never_transmits_a_state_command(self) -> None:
+        # The one deliberate exception to no-TX-at-boot is a single
+        # NON-ENERGIZING 66 66 status query: delayed 12 s, gated on a
+        # provisioned sender, and routed through tx_burst like everything
+        # else. STATE commands (anything that could change the fan) remain
+        # forbidden at boot.
         boot = top_level_block(self.text, "esphome")
         self.assertNotIn("sx127x.send_packet", boot)
-        self.assertNotIn("script.execute", boot)
         self.assertNotIn("fan.turn_on", boot)
         self.assertNotIn("fan.turn_off", boot)
+        for script_id in ("send_off", "send_low", "send_medium", "send_high", "send_timer"):
+            self.assertNotIn(script_id, boot)
+        # Exactly one script.execute, and it is the 0x66 query, delayed and
+        # provisioning-gated.
+        self.assertEqual(boot.count("script.execute"), 1)
+        query_index = boot.index("script.execute")
+        window = boot[query_index:query_index + 200]
+        self.assertIn("id: tx_burst", window)
+        self.assertRegex(window, r"(?m)^\s+cmd:\s*0x66\s*$")
+        before = boot[:query_index]
+        self.assertIn("- delay: 12s", before)
+        self.assertIn("return id(learned_sender_id) != 0;", before)
         # The boot lambda performs a raw (unpublished) speed-field
         # initialization on the fan entity (FIX 3; see
         # test_bare_turn_on_after_boot_defaults_to_low_not_high) but must
@@ -482,7 +528,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         coord = interval_item_containing(self.text, "id(cl_report_ready)")
         self.assertIn("report_could_be_command", coord)
         self.assertIn("desired_is_off", coord)
-        self.assertIn("(report_could_be_command && !desired_is_off)", coord)
+        self.assertIn("report_could_be_command && !desired_is_off &&", coord)
         self.assertIn("possible OEM override", coord)
         # Yield cancels the re-fires; the OFF path must keep them.
         yield_index = coord.index("possible OEM override")
@@ -509,6 +555,14 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         send_index = select_block.index("id(send_medium)->execute();")
         self.assertLess(guard_index, send_index)
         self.assertIn("Stale timer cleared on None with fan off; no TX", select_block)
+
+    def test_refresh_button_sends_only_the_status_query(self) -> None:
+        index = self.text.index('name: "Refresh Fan State"')
+        window = self.text[index : index + 400]
+        self.assertIn("id: tx_burst", window)
+        self.assertRegex(window, r"(?m)^\s+cmd:\s*0x66\s*$")
+        for forbidden in ("0x90", "0x9F", "0xAF", "0xBF", "send_timer"):
+            self.assertNotIn(forbidden, window)
 
     def test_setup_entities_are_config_category_and_learn_forget_disabled(self) -> None:
         for marker in ('name: "Learn Remote ID"', 'name: "Forget Remote ID"'):
@@ -970,12 +1024,14 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         boot = top_level_block(self.text, "esphome")
         self.assertIn('id(confirmed_fan_state_sensor).publish_state("unknown");', boot)
         self.assertIn('id(command_confirmation_status_sensor).publish_state("idle");', boot)
-        self.assertNotIn("script.execute", boot)
+        # Boot may execute exactly one script: the delayed non-energizing
+        # status query (see test_boot_never_transmits_a_state_command).
+        self.assertEqual(boot.count("script.execute"), 1)
 
     def test_every_command_wrapper_arms_closed_loop_and_keeps_refire(self) -> None:
         scripts = script_blocks(self.text)
         expected = {
-            "send_off": ("0x90", "${off_refire_count}"),
+            "send_off": ("id(off_tx_command)", "${off_refire_count}"),
             "send_low": ("0x9F", "${command_refire_count}"),
             "send_medium": ("0xAF", "${command_refire_count}"),
             "send_high": ("0xBF", "${command_refire_count}"),

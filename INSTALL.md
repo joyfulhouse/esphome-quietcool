@@ -143,6 +143,7 @@ learn its own remote. The pattern is in
 | `QuietCool Fan` | fan | Off / Low / Medium / High — the only fan control |
 | `Fan Timer` | select | OEM timer at the current speed: None / 1 / 2 / 4 / 8 / 12 h, synced with remote-started timers |
 | `Timer Remaining` | sensor | Countdown in seconds (also on the OLED) |
+| `Refresh Fan State` | button | Non-energizing status query; resyncs entity/timer/select from the fan |
 | `Learn Remote ID` | button (config, disabled by default) | Re-arm a 120 s learn window |
 | `Forget Remote ID` | button (config, disabled by default) | Erase the stored ID and re-enter learn mode |
 | `Remote Sender ID` | text sensor | The learned four-byte ID (`CB …`) |
@@ -176,9 +177,12 @@ the fan hasn't confirmed. Three extra diagnostics expose the result:
 mounted far from the fan, confirmation may intermittently time out (the fan's
 replies are much weaker than its reception); commands still go through and the
 spaced re-fire backstop still runs — you'll just see `no response consensus`
-in `Command Confirmation Status` instead of `confirmed`. A `Query Fan State
-(probe)` diagnostic button sends a single non-energizing status query on
-demand.
+in `Command Confirmation Status` instead of `confirmed`. A `Refresh Fan
+State` button sends a single non-energizing status query on demand to resync
+the entity, timer, and Fan Timer select from the fan's reply (the `Query Fan
+State (probe)` diagnostic does the same plus 15 s of raw RX logging), and the
+controller automatically queries once ~12 s after every boot/OTA so a reboot
+can't leave HA guessing.
 
 ## Troubleshooting
 

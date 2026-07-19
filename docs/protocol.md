@@ -129,6 +129,16 @@ with `canonical_state`. For an Off request, the OEM uses an intentional
 wildcard: any report with duration nibble zero confirms Off, regardless of its
 remembered speed or capability bits.
 
+**However, that wildcard describes the remote's own state comparison — not
+the fan's command acceptance.** Live testing found a fan running a High timer
+ignored six spaced `90` Off bursts (it kept replying its running state), then
+accepted Off first-try when in Low. Transmit the **speed-matched Off variant**
+(`90` from Low, `A0` from Medium, `B0` from High — the OEM remote's
+remembered-speed behavior). The templates do this automatically, and on a
+confirmation mismatch they re-aim the remaining Off re-fires at the speed the
+fan itself reported. The neutral `80` form is decoded on receive but never
+transmitted.
+
 Exact live responses include:
 
 | Response | Meaning |
@@ -184,11 +194,15 @@ as a new OEM command.
 A validated closed-loop controller layers this onto the existing spaced
 re-fire safety mechanism:
 
-1. Record the desired state and send the normal three-frame command burst.
+1. Record the desired state and send the normal three-frame command burst
+   (Off uses the speed-matched variant per the acceptance note above).
 2. Schedule a `66 66` query 200 ms after that burst actually completes.
 3. Compare a consensus response using lower-six-bit state and the Off wildcard.
 4. Cancel remaining spaced re-fires only after a match. On mismatch or no
-   consensus, leave the one-second spaced re-fire eligible.
+   consensus, leave the one-second spaced re-fire eligible; an Off mismatch
+   re-aims the variant at the fan's reported speed, and a running-state
+   mismatch that decodes as a valid remote command yields to the possible
+   physical override (Off transactions never yield).
 5. Stop after a fixed attempt budget: four total command bursts normally, six
    total for Off.
 6. Publish the diagnostics `Last Confirmed Fan State`, `Command Confirmation

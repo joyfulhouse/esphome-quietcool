@@ -148,6 +148,28 @@ esphome:
           // Pre-seeding speed to 1 (Low) - a plain int field write with no
           // side effects - gives a sane default with no transmission.
           id(quietcool_fan).speed = 1;
+      # Post-boot state resync: one non-energizing 66 66 status query,
+      # 12 s after boot. All timer/closed-loop state is volatile, so a
+      # reboot/OTA otherwise leaves HA showing a guessed state until the
+      # next RF event; the fan's reply resyncs entity + timer + select
+      # passively through the normal RX path. This is a deliberate,
+      # narrow exception to the no-TX-at-boot rule: the query is the
+      # OEM's own wake/status frame (sent before every remote command),
+      # cannot change fan state, fires exactly once per boot after a
+      # delay (a brownout loop cycling faster than 12 s never queries),
+      # and tx_burst still refuses it while unprovisioned. STATE
+      # commands remain forbidden at boot/OTA/reconnect/from RX.
+      - delay: 12s
+      - if:
+          condition:
+            lambda: 'return id(learned_sender_id) != 0;'
+          then:
+            - logger.log:
+                level: INFO
+                format: "Post-boot status query to resync fan state (non-energizing)"
+            - script.execute:
+                id: tx_burst
+                cmd: 0x66
 
 esp32:
   board: ttgo-lora32-v21
@@ -295,6 +317,16 @@ globals:
     type: uint8_t
     restore_value: false
     initial_value: "0x00"
+
+  - id: off_tx_command
+    type: uint8_t
+    restore_value: false
+    initial_value: "0x90"
+    # The speed-matched OFF variant for the current transaction (90/A0/B0,
+    # like the OEM remote's remembered speed). Computed by send_off from
+    # the entity's speed and re-aimed by the closed-loop coordinator when
+    # a mismatch reply reveals the fan's true speed. Never 0x80: the
+    # neutral form is decoded on RX but never transmitted.
 
   - id: timer_active
     type: bool
@@ -1006,14 +1038,16 @@ sx127x:
 # sync, and the variable-length 0x06 byte. Low and High are physically verified;
 # the remaining actions still require individual physical checks.
 #
-#   OFF:  (LOW | OFF)  = 0x90 | 0x00 = 0x90
+#   OFF:  speed-matched  = 0x90 / 0xA0 / 0xB0 (from Low / Med / High)
 #   LOW:  (LOW | ON)   = 0x90 | 0x0F = 0x9F
 #   MED:  (MED | ON)   = 0xA0 | 0x0F = 0xAF
 #   HIGH: (HIGH | ON)  = 0xB0 | 0x0F = 0xBF
 #
-# These four payloads are byte-identical to the previously verified firmware
-# and must not change. send_timer below computes the speed-aware
-# timer/duration byte at runtime instead of hardcoding a Low-only command.
+# The three ON payloads are byte-identical to the previously verified
+# firmware and must not change. OFF is speed-matched at runtime (like the
+# OEM remote's remembered speed) after live evidence that a fan running a
+# High timer ignores 0x90 - see send_off. send_timer likewise computes the
+# speed-aware timer/duration byte at runtime.
 #
 # All RF transmission is serialized through tx_burst, the single queued
 # core script and the ONLY place send_packet is called. The four
@@ -1060,11 +1094,11 @@ script:
                 id(tx_burst_sender_id) = id(learned_sender_id);
                 id(tx_count_sensor).publish_state(id(tx_count_sensor).state + 1);
                 const char *label = "timer";
-                if (cmd == 0x90) label = "OFF";
+                if (cmd == 0x66) label = "QUERY";
+                else if ((cmd & 0x0F) == 0x0) label = "OFF";  // 90/A0/B0 speed-matched variants
                 else if (cmd == 0x9F) label = "LOW";
                 else if (cmd == 0xAF) label = "MED";
                 else if (cmd == 0xBF) label = "HIGH";
-                else if (cmd == 0x66) label = "QUERY";
                 if (cmd == 0x66) {
                   // Anchor every locally-transmitted query at its actual
                   // serialized execution time, including a queued diagnostic
@@ -1126,10 +1160,25 @@ script:
 
   - id: send_off
     then:
+      - lambda: |-
+          // SPEED-MATCHED OFF, exactly like the OEM remote's remembered
+          // speed: 90 from Low, A0 from Medium, B0 from High. Live evidence
+          // (2026-07-19): six spaced 0x90 bursts were all IGNORED by a fan
+          // running a High/1h timer (it kept replying B1), then an OFF
+          // confirmed on the first attempt once the fan was in Low - the
+          // receiver requires the variant to match its current speed, and
+          // the OEM matcher's duration-0 wildcard describes the REMOTE's
+          // comparison, not the fan's acceptance. If this entity-derived
+          // guess is wrong, the closed-loop mismatch reply carries the
+          // fan's true speed and the coordinator re-aims the re-fires.
+          uint8_t off_speed_nibble = 0x90;
+          if (id(quietcool_fan).speed == 2) off_speed_nibble = 0xA0;
+          else if (id(quietcool_fan).speed >= 3) off_speed_nibble = 0xB0;
+          id(off_tx_command) = off_speed_nibble;
       - logger.log:
           level: WARN
-          format: "=== TX request: OFF (0x90) - ID: %08lX ==="
-          args: [ "(unsigned long) id(learned_sender_id)" ]
+          format: "=== TX request: OFF (0x%02X, speed-matched) - ID: %08lX ==="
+          args: [ "id(off_tx_command)", "(unsigned long) id(learned_sender_id)" ]
       - lambda: |-
           if (id(learned_sender_id) == 0) return;
           // Off is a non-timer command (duration nibble 0x0): matches the
@@ -1139,16 +1188,16 @@ script:
           id(timer_remaining_sensor).publish_state(0);
       - script.execute:
           id: tx_burst
-          cmd: 0x90
+          cmd: !lambda 'return id(off_tx_command);'
       - lambda: |-
           // Arm safety re-fire: OFF is re-sent extra times, spaced past the
           // fan's dead-time, so a dropped OFF can't leave the fan running.
           if (id(learned_sender_id) == 0) return;
-          id(refire_cmd) = 0x90;
+          id(refire_cmd) = id(off_tx_command);
           id(refire_left) = ${off_refire_count};
           id(refire_next_ms) = millis() + ${command_refire_interval_ms};
           id(cl_active) = true;
-          id(cl_desired_cmd) = 0x90;
+          id(cl_desired_cmd) = id(off_tx_command);
           id(cl_command_attempts) = 0;
           id(cl_attempt_limit) = ${off_refire_count} + 1;
           id(cl_query_due) = false;
@@ -1513,7 +1562,15 @@ interval:
                     raw_speed_nibble == 0xB0) && raw_duration_ok) ||
                   raw == 0x80;
               bool desired_is_off = (id(cl_desired_cmd) & 0x0F) == 0;
-              if (report_could_be_command && !desired_is_off) {
+              // Yield only to a RUNNING-state report. A fan that missed
+              // our ON command reports its (off) idle state - 90/A0/B0,
+              // all valid command encodings - so an off report on an ON
+              // transaction is overwhelmingly a dropped command, not a
+              // user press, and must keep its re-fires (live 2026-07-19:
+              // a post-boot LOW wrongly yielded to the fan's own
+              // still-off 90 reply).
+              if (report_could_be_command && !desired_is_off &&
+                  actual_duration != 0) {
                 id(refire_left) = 0;
                 id(cl_active) = false;
                 id(cl_query_due) = false;
@@ -1522,6 +1579,22 @@ interval:
                          "possible OEM override: fan is %s; yielding (no re-fire)", confirmed);
                 ESP_LOGW("CLOSED_LOOP", "%s", status);
               } else {
+                // Re-aim an OFF transaction at the fan's ACTUAL speed.
+                // Live evidence (2026-07-19): a fan running High/1h ignored
+                // six 0x90 bursts; the receiver wants the speed-matched
+                // variant (90/A0/B0), and this mismatch reply just told us
+                // which one. 0x80|(speed<<4) yields exactly 90/A0/B0 for
+                // speeds 1-3; the neutral 0x80 itself is never sent.
+                if (desired_is_off && actual_speed >= 1 && actual_speed <= 3) {
+                  uint8_t adapted_off = (uint8_t) (0x80 | (actual_speed << 4));
+                  if (adapted_off != id(cl_desired_cmd)) {
+                    id(cl_desired_cmd) = adapted_off;
+                    id(refire_cmd) = adapted_off;
+                    id(off_tx_command) = adapted_off;
+                    ESP_LOGW("CLOSED_LOOP",
+                             "Re-aiming OFF at fan-reported speed: variant 0x%02X", adapted_off);
+                  }
+                }
                 id(cl_query_due) = false;
                 id(cl_query_window) = false;
                 snprintf(status, sizeof(status), "mismatch: fan is %s; spaced re-fire pending (%d left)",
@@ -1816,6 +1889,19 @@ select:
 # Control Buttons
 # =============================================================================
 button:
+  # User-facing state refresh: one non-energizing 66 66 status query. The
+  # fan's reply resyncs the entity, timer, and Fan Timer select passively
+  # through the normal RX path (no probe logging - see the diagnostic
+  # probe below for that). Same TX path and unprovisioned refusal as
+  # every other transmission.
+  - platform: template
+    name: "Refresh Fan State"
+    icon: "mdi:refresh"
+    on_press:
+      - script.execute:
+          id: tx_burst
+          cmd: 0x66
+
   # Diagnostic: transmit the OEM wake/status query (SENDER 66 66) and
   # raw-log every frame heard in the next 15 s (see query_probe_started).
   # The OEM remote sends exactly this query before every command and reads
@@ -2226,10 +2312,10 @@ display:
         it.print(left_zone_center_x, 43, id(font_learn_prompt), TextAlign::TOP_CENTER, "ID SAVED");
       } else {
         // ---- KEEP IN SYNC: STATE_WORD ----
-        // y=32 (moved up with the countdown's 43->41 shift so the two rows
-        // keep their spacing): at 34/43 the countdown's digit ink clipped
-        // into the bottom status-icon row on real hardware.
-        it.print(left_zone_center_x, 32, id(font_state), TextAlign::TOP_CENTER, state_str);
+        // y=29/40 (originally 34/43): raised twice per on-hardware review -
+        // the countdown's digit ink clipped the bottom status-icon row, and
+        // the state word then needed 2px more air above the countdown.
+        it.print(left_zone_center_x, 29, id(font_state), TextAlign::TOP_CENTER, state_str);
 
         // ---- KEEP IN SYNC: COUNTDOWN (HH:MM:SS while a timer is active, blank otherwise) ----
         // HH:MM:SS (zero-padded, ticking every second) while a device-local
@@ -2242,10 +2328,9 @@ display:
           int hh = remaining_ms / 3600000;
           int mm = (remaining_ms % 3600000) / 60000;
           int ss = (remaining_ms % 60000) / 1000;
-          // y=41 (not the 43 the learn prompts use): the countdown font's
-          // taller digit ink was clipping into the bottom status-icon row
-          // at 43 on real hardware.
-          it.printf(left_zone_center_x, 41, id(font_timer), TextAlign::TOP_CENTER, "%02d:%02d:%02d", hh, mm, ss);
+          // y=40 (not the 43 the learn prompts use); see the state-word
+          // note above.
+          it.printf(left_zone_center_x, 40, id(font_timer), TextAlign::TOP_CENTER, "%02d:%02d:%02d", hh, mm, ss);
         }
       }
 
