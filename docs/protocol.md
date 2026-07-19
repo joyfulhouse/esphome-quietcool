@@ -363,5 +363,5 @@ public compile hashes were `0x80f65068` (SX1278) and `0x0be208d7` (SX1262).
 The live downstream SX1278 wrapper hash was `0xef85b7d8`, and its flashed binary
 SHA-256 was
 `714c455a1673c3c3255132df84f68d020afbbcfd989594c34c997a940cafc59d`.
-The public named artifacts were not flashed. The upstairs controller was offline
+The public named artifacts were not flashed. The second (upstairs) unit was offline
 and not flashed, and the V3 board still awaits hardware bring-up.

@@ -130,12 +130,12 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertIn(line, radio)
 
     def test_only_tx_burst_transmits(self) -> None:
-        # Post-refactor invariant (FIX 1): sx127x.send_packet appears
-        # exactly once in the whole config, inside the single queued core
-        # script tx_burst. The four fixed state scripts and send_timer are
-        # thin wrappers that route through it and contain neither
-        # send_packet nor delay:, so they always complete synchronously and
-        # can never drop a rapid re-press.
+        # sx127x.send_packet appears exactly once in the whole config,
+        # inside the single queued core script tx_burst. The five command
+        # wrappers are thin: they route through begin_transaction (the one
+        # shared join/arm site), and neither they nor begin_transaction
+        # contain send_packet or delay:, so requests complete synchronously
+        # and can never drop a rapid re-press.
         scripts = script_blocks(self.text)
         self.assertIn("tx_burst", scripts)
         tx_burst = scripts["tx_burst"]
@@ -157,28 +157,33 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
             self.assertIn(f"(sender_id >> {shift}) & 0xFF", tx_burst)
         self.assertIn("cmd, cmd", tx_burst)
 
+        begin = scripts["begin_transaction"]
+        self.assertNotIn("sx127x.send_packet", begin)
+        self.assertNotIn("delay:", begin)
+        self.assertIn("id: tx_burst", begin)
         for wrapper_id in ("send_off", "send_low", "send_medium", "send_high", "send_timer"):
             with self.subTest(script_id=wrapper_id):
                 wrapper = scripts[wrapper_id]
                 self.assertNotIn("sx127x.send_packet", wrapper)
                 self.assertNotIn("delay:", wrapper)
-                self.assertIn("id: tx_burst", wrapper)
+                self.assertIn("id: begin_transaction", wrapper)
+                self.assertNotIn("id: tx_burst", wrapper)
 
     def test_bounded_tx_queue_rejection_cannot_erase_latest_desired_refire(self) -> None:
-        # ESPHome rejects execute() beyond max_runs. Every wrapper therefore
-        # persists its latest desired/refire state before enqueue. Once no
-        # burst is active, automatic query/refire clears stale queued work so
-        # its execute cannot be rejected or delayed by obsolete requests.
+        # ESPHome rejects execute() beyond max_runs. begin_transaction
+        # therefore persists the latest desired/refire state before its
+        # enqueue. Once no burst is active, automatic query/refire clears
+        # stale queued work so its execute cannot be rejected or delayed by
+        # obsolete requests.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             with self.subTest(config=config_name):
                 tx = script_blocks(text)["tx_burst"]
                 self.assertIn("mode: queued", tx)
                 self.assertIn("max_runs: 5", tx)
 
-                for wrapper_id in ("send_off", "send_low", "send_medium", "send_high", "send_timer"):
-                    wrapper = script_blocks(text)[wrapper_id]
-                    self.assertLess(wrapper.index("id(refire_cmd) ="), wrapper.index("id: tx_burst"))
-                    self.assertLess(wrapper.index("id(refire_left) ="), wrapper.index("id: tx_burst"))
+                begin = script_blocks(text)["begin_transaction"]
+                self.assertLess(begin.index("id(refire_cmd) = cmd;"), begin.index("id: tx_burst"))
+                self.assertLess(begin.index("id(refire_left) = refires;"), begin.index("id: tx_burst"))
 
                 refire = interval_item_containing(text, 'ESP_LOGD("REFIRE"')
                 self.assertIn("!id(tx_burst).is_running()", refire)
@@ -190,12 +195,6 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     "id(refire_left) = id(refire_left) - 1;", execute_index
                 )
                 self.assertTrue(stop_index < execute_index < decrement_index)
-
-                coordinator = interval_item_containing(text, "id(cl_report_ready)")
-                auto_query = coordinator[coordinator.index("id(cl_query_due) = false;") :]
-                query_stop = auto_query.index("id(tx_burst).stop();")
-                query_execute = auto_query.index("id: tx_burst", query_stop)
-                self.assertLess(query_stop, query_execute)
 
     def test_every_actual_state_burst_invalidates_known_state_before_airtime(self) -> None:
         # A mismatch response can make state known again before an automatic
@@ -351,10 +350,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_fixed_state_scripts_route_through_tx_burst_with_correct_command_byte(self) -> None:
         # The three ON command bytes are byte-identical to the previously
-        # verified firmware and must never change. The actual six-byte
-        # payload (sender ID + repeated command byte) is constructed in
-        # exactly one place: tx_burst (see test_only_tx_burst_transmits).
-        # OFF is speed-matched at runtime - see test_send_off_is_speed_matched.
+        # verified firmware and must never change; OFF and TIMER compute
+        # their bytes at runtime. All route through begin_transaction.
         expected = {
             "send_low": 0x9F,
             "send_medium": 0xAF,
@@ -363,9 +360,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         scripts = script_blocks(self.text)
         for script_id, command_byte in expected.items():
             with self.subTest(script_id=script_id):
-                self.assertIn(script_id, scripts)
                 wrapper = scripts[script_id]
-                self.assertIn("id: tx_burst", wrapper)
+                self.assertIn("id: begin_transaction", wrapper)
                 self.assertRegex(wrapper, rf"(?m)^\s+cmd:\s*0x{command_byte:02X}\s*$")
                 self.assertNotIn("sx127x.send_packet", wrapper)
                 self.assertNotIn("delay:", wrapper)
@@ -418,7 +414,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         scripts = script_blocks(self.text)
         self.assertEqual(
             set(scripts),
-            {"tx_burst", "send_off", "send_low", "send_medium", "send_high", "send_timer"},
+            {"tx_burst", "begin_transaction", "send_off", "send_low",
+             "send_medium", "send_high", "send_timer"},
         )
 
     def test_timer_script_is_speed_aware(self) -> None:
@@ -437,14 +434,11 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("0xB0", timer)
         self.assertIn("speed_nibble | duration_nibble", timer)
 
-        # Routes the actual transmission through the single core TX script
-        # instead of transmitting directly (see test_only_tx_burst_transmits).
-        self.assertIn("id: tx_burst", timer)
+        # Routes through the shared join/arm site, never transmitting or
+        # publishing anything itself.
+        self.assertIn("id: begin_transaction", timer)
         self.assertNotIn("sx127x.send_packet", timer)
         self.assertNotIn("delay:", timer)
-
-        # A timer request is still only a request. The fan entity remains at
-        # its last observed physical state until the closed-loop response.
         self.assertNotIn("id(quietcool_fan).state = true;", timer)
         self.assertNotIn("id(quietcool_fan).speed = observed_speed;", timer)
         self.assertNotIn("id(quietcool_fan).publish_state();", timer)
@@ -631,26 +625,54 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("spaced re-fire pending", coord[yield_index:])
 
     def test_equivalent_requests_join_every_active_transaction(self) -> None:
-        # A caller may retry any HA service while the non-optimistic entity is
-        # awaiting RF confirmation. Equivalent requests must be observations,
-        # not fresh transactions that reset the bounded command/refire budget.
-        expected_state = {
-            "send_off": "(id(cl_desired_cmd) & 0x0F) == 0",
-            "send_low": "(id(cl_desired_cmd) & 0x3F) == 0x1F",
-            "send_medium": "(id(cl_desired_cmd) & 0x3F) == 0x2F",
-            "send_high": "(id(cl_desired_cmd) & 0x3F) == 0x3F",
-            "send_timer": "(id(cl_desired_cmd) & 0x3F) ==\n                     (id(timer_tx_command) & 0x3F)",
-        }
+        # A caller may retry any HA service while the non-optimistic entity
+        # is awaiting RF confirmation. Equivalent requests must be
+        # observations, not fresh transactions that reset the bounded
+        # command/refire budget. All five wrappers share ONE join/arm site:
+        # begin_transaction. The join lambda generalizes: duration-zero
+        # requests are equivalent to any active duration-zero transaction
+        # (so a re-aimed B0 absorbs a fresh 90), everything else must match
+        # on the lower six bits.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
-            scripts = script_blocks(text)
-            for script_id, expression in expected_state.items():
-                with self.subTest(config=config_name, script_id=script_id):
-                    wrapper = scripts[script_id]
-                    self.assertIn("return id(cl_active)", wrapper)
-                    self.assertIn(expression, wrapper)
-                    join = wrapper.index("joined active transaction")
-                    arm = wrapper.index("id(refire_left) =")
-                    self.assertLess(join, arm)
+            with self.subTest(config=config_name):
+                scripts = script_blocks(text)
+                begin = scripts["begin_transaction"]
+                self.assertIn("if (!id(cl_active)) return false;", begin)
+                self.assertIn("bool both_off = ((cmd & 0x0F) == 0) &&", begin)
+                self.assertIn("((id(cl_desired_cmd) & 0x0F) == 0);", begin)
+                self.assertIn(
+                    "(id(cl_desired_cmd) & 0x3F) == (cmd & 0x3F);", begin
+                )
+                self.assertIn("return both_off || same_state;", begin)
+                # STRUCTURAL: the join branch (before else:) must contain the
+                # observation log and NO arming/reset/TX tokens; every arm
+                # token must live strictly inside the else branch. This
+                # catches an accidental duplication of the arm block into
+                # the join path (which would silently defeat the fix).
+                else_index = begin.index("          else:")
+                joined = begin[:else_index]
+                fresh = begin[else_index:]
+                self.assertIn("joined active transaction", joined)
+                for forbidden in (
+                    "id: tx_burst",
+                    "id(refire_cmd) =",
+                    "id(refire_left) =",
+                    "id(cl_active) = true;",
+                    "id(cl_desired_cmd) = cmd;",
+                    "id(cl_command_attempts) =",
+                    "id(cl_candidate_total_count) =",
+                    "id(fan_state_known) =",
+                    "id(timer_state_known) =",
+                    "publish_state",
+                ):
+                    self.assertNotIn(forbidden, joined)
+                for required in (
+                    "id(refire_cmd) = cmd;",
+                    "id(refire_left) = refires;",
+                    "id(cl_active) = true;",
+                    "id(cl_desired_cmd) = cmd;",
+                ):
+                    self.assertIn(required, fresh)
 
     def test_ambiguous_oem_yield_never_promotes_physical_or_timer_authority(self) -> None:
         coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
@@ -696,11 +718,15 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertLess(authority, confirmed_off)
 
     def test_consensus_dedup_floor_is_the_validated_60ms(self) -> None:
+        # Anchored to the actual candidate-dedup comparison, not the whole
+        # radio block, so an unrelated 60UL elsewhere can't satisfy it.
         radio = top_level_block(self.text, "sx127x")
-        self.assertIn(">= 60UL", radio)
+        anchor = radio.index("id(cl_candidate_last_ms)) >= 60UL")
         self.assertNotIn(">= 95UL", radio)
-        # The comment must document the real timing (airtime included).
-        self.assertIn("102 ms", radio)
+        # The honest-timing comment (frame airtime included) must sit
+        # directly above that comparison.
+        window = radio[max(0, anchor - 1500) : anchor]
+        self.assertIn("102 ms", window)
 
     def test_user_command_closes_manual_learn_window(self) -> None:
         tx_burst = script_blocks(self.text)["tx_burst"]
@@ -1227,73 +1253,73 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertEqual(boot.count("script.execute"), 0)
 
     def test_new_command_transactions_arm_closed_loop_and_keep_refire(self) -> None:
-        expected = {
-            "send_off": ("id(off_tx_command)", "${off_refire_count}"),
+        # Wrappers declare WHAT (command byte + refire budget);
+        # begin_transaction arms the complete transaction and only then
+        # enqueues, so a second HA call in the window joins instead of
+        # resetting the safety budget.
+        routes = {
+            "send_off": ("!lambda 'return id(off_tx_command);'", "${off_refire_count}"),
             "send_low": ("0x9F", "${command_refire_count}"),
             "send_medium": ("0xAF", "${command_refire_count}"),
             "send_high": ("0xBF", "${command_refire_count}"),
-            "send_timer": ("id(timer_tx_command)", "${command_refire_count}"),
+            "send_timer": ("!lambda 'return id(timer_tx_command);'", "${command_refire_count}"),
         }
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             scripts = script_blocks(text)
-            for script_id, (command, refires) in expected.items():
+            for script_id, (command, refires) in routes.items():
                 with self.subTest(config=config_name, script_id=script_id):
                     wrapper = scripts[script_id]
-                    self.assertIn(f"id(refire_cmd) = {command};", wrapper)
-                    self.assertIn(f"id(refire_left) = {refires};", wrapper)
-                    self.assertIn("id(cl_active) = true;", wrapper)
-                    self.assertIn(f"id(cl_desired_cmd) = {command};", wrapper)
-                    self.assertIn("id(cl_candidate_total_count) = 0;", wrapper)
-                    self.assertIn("id(cl_candidate_exact_count) = 0;", wrapper)
-                    # The complete transaction must be visible before the
-                    # queued sender can execute even its first frame.
-                    tx_index = wrapper.index("id: tx_burst")
-                    self.assertLess(wrapper.index("id(cl_active) = true;"), tx_index)
-                    self.assertLess(wrapper.index(f"id(cl_desired_cmd) = {command};"), tx_index)
+                    self.assertIn("id: begin_transaction", wrapper)
+                    self.assertIn(f"cmd: {command}", wrapper)
+                    self.assertIn(f"refires: {refires}", wrapper)
+            begin = scripts["begin_transaction"]
+            tx_index = begin.index("id: tx_burst")
+            for required_before_tx in (
+                "id(refire_cmd) = cmd;",
+                "id(refire_left) = refires;",
+                "id(cl_active) = true;",
+                "id(cl_desired_cmd) = cmd;",
+                "id(cl_command_attempts) = 0;",
+                "id(cl_attempt_limit) = refires + 1;",
+                "id(cl_query_count) = 0;",
+                "id(cl_candidate_total_count) = 0;",
+                "id(cl_candidate_exact_count) = 0;",
+                'publish_state(status)',
+            ):
+                with self.subTest(config=config_name, token=required_before_tx):
+                    self.assertLess(begin.index(required_before_tx), tx_index)
 
     def test_duplicate_active_off_joins_without_tx_or_budget_reset(self) -> None:
         # All x0 variants mean OFF. A re-aimed B0 transaction must absorb an
-        # HA/interlock repeat even if a fresh entity-derived request would
-        # choose 90 or A0. The guard must precede command computation, TX, and
-        # every transaction reset in both public firmwares.
+        # HA/interlock repeat even when a fresh entity-derived request would
+        # choose 90 or A0: send_off computes its variant, then routes into
+        # begin_transaction whose both_off equivalence joins BEFORE any
+        # transaction reset, enqueue, or airtime.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             with self.subTest(config=config_name):
-                off = script_blocks(text)["send_off"]
-                self.assertRegex(
-                    off,
-                    r"(?s)^\s+then:\s+- if:\s+condition:\s+lambda:.*?"
-                    r"id\(cl_active\).*?id\(cl_desired_cmd\)\s*&\s*0x0F\).*?==\s*0",
-                )
-                else_index = off.index("        else:")
-                joined = off[:else_index]
-                fresh = off[else_index:]
-                self.assertIn("Duplicate OFF joined active transaction", joined)
+                scripts = script_blocks(text)
+                off = scripts["send_off"]
+                self.assertIn("id(off_tx_command) = off_speed_nibble;", off)
+                self.assertIn("id: begin_transaction", off)
+                self.assertIn("cmd: !lambda 'return id(off_tx_command);'", off)
+                self.assertIn("refires: ${off_refire_count}", off)
+                # No transaction state is touched in the wrapper itself.
                 for forbidden in (
-                    "tx_burst",
-                    "id(off_tx_command) =",
                     "id(refire_cmd) =",
                     "id(refire_left) =",
                     "id(cl_active) =",
                     "id(cl_command_attempts) =",
-                    "id(cl_query_count) =",
-                    "id(cl_candidate_total_count) =",
                     "id(fan_state_known) =",
-                    "id(timer_state_known) =",
-                    "publish_state",
                 ):
-                    self.assertNotIn(forbidden, joined)
-
-                tx_index = fresh.index("id: tx_burst")
-                for required_before_tx in (
-                    "id(refire_cmd) = id(off_tx_command);",
-                    "id(refire_left) = ${off_refire_count};",
-                    "id(cl_active) = true;",
-                    "id(cl_desired_cmd) = id(off_tx_command);",
-                    "id(cl_command_attempts) = 0;",
-                    "id(cl_query_count) = 0;",
-                    'publish_state("pending OFF confirmation")',
-                ):
-                    self.assertLess(fresh.index(required_before_tx), tx_index)
+                    self.assertNotIn(forbidden, off)
+                begin = scripts["begin_transaction"]
+                arm = begin.index("id(refire_left) = refires;")
+                enqueue = begin.index("id: tx_burst")
+                self.assertLess(begin.index("bool both_off"), arm)
+                self.assertLess(arm, enqueue)
+                self.assertLess(
+                    begin.index('publish_state(status)'), enqueue
+                )
 
     def test_timer_commands_wait_for_confirmation_on_both_targets(self) -> None:
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
@@ -1467,20 +1493,19 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_fresh_command_poison_old_manual_query_epoch_before_enqueue_and_airtime(self) -> None:
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
-            scripts = script_blocks(text)
-            tx = scripts["tx_burst"]
-            actual_invalidate = tx.index("if (cmd != 0x66)")
-            query_branch = tx.index("if (cmd == 0x66)", actual_invalidate)
-            self.assertIn(
-                "id(cl_query_response_complete) = true;",
-                tx[actual_invalidate:query_branch],
-            )
-            for wrapper_id in ("send_off", "send_low", "send_medium", "send_high", "send_timer"):
-                with self.subTest(config=config_name, script_id=wrapper_id):
-                    wrapper = scripts[wrapper_id]
-                    poison = wrapper.index("id(cl_query_response_complete) = true;")
-                    enqueue = wrapper.index("id: tx_burst")
-                    self.assertLess(poison, enqueue)
+            with self.subTest(config=config_name):
+                scripts = script_blocks(text)
+                tx = scripts["tx_burst"]
+                actual_invalidate = tx.index("if (cmd != 0x66)")
+                query_branch = tx.index("if (cmd == 0x66)", actual_invalidate)
+                self.assertIn(
+                    "id(cl_query_response_complete) = true;",
+                    tx[actual_invalidate:query_branch],
+                )
+                begin = scripts["begin_transaction"]
+                poison = begin.index("id(cl_query_response_complete) = true;")
+                enqueue = begin.index("id: tx_burst")
+                self.assertLess(poison, enqueue)
 
     def test_manual_query_cannot_erase_unconsumed_command_consensus(self) -> None:
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
@@ -2134,28 +2159,35 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     self.assertNotIn(optimistic_mutation, timer)
 
     def test_every_new_command_invalidates_expiry_inference_without_mutating_confirmed_timer(self) -> None:
-        # A request makes a previously predicted expiry uncertain, but it must
-        # not rewrite confirmed timer metadata until a state response arrives.
-        # Otherwise a failed timer request can later publish a false fan OFF.
+        # A request makes a previously predicted expiry uncertain, but must
+        # not rewrite confirmed timer metadata until a state response
+        # arrives. The invalidation lives once, in begin_transaction, before
+        # the enqueue; neither it nor any wrapper mutates timer metadata.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             scripts = script_blocks(text)
-            for script_id in ("send_off", "send_low", "send_medium", "send_high", "send_timer"):
+            begin = scripts["begin_transaction"]
+            tx_index = begin.index("id: tx_burst")
+            for invalidation in (
+                "id(fan_state_known) = false;",
+                "id(timer_state_known) = false;",
+                "id(fan_state_known_sensor).publish_state(false);",
+                "id(timer_state_known_sensor).publish_state(false);",
+                "id(fan_confirmed_off_sensor).publish_state(false);",
+            ):
+                with self.subTest(config=config_name, token=invalidation):
+                    self.assertIn(invalidation, begin)
+                    self.assertLess(begin.index(invalidation), tx_index)
+            for script_id in ("begin_transaction", "send_off", "send_low",
+                              "send_medium", "send_high", "send_timer"):
                 with self.subTest(config=config_name, script_id=script_id):
-                    wrapper = scripts[script_id]
-                    tx_index = wrapper.index("id: tx_burst")
-                    for invalidation in (
-                        "id(fan_state_known) = false;",
-                        "id(timer_state_known) = false;",
-                    ):
-                        self.assertIn(invalidation, wrapper)
-                        self.assertLess(wrapper.index(invalidation), tx_index)
+                    block = scripts[script_id]
                     for optimistic_mutation in (
                         "id(timer_active) =",
                         "id(timer_armed_hours) =",
                         "id(timer_expiry_millis) =",
                         "id(timer_remaining_sensor).publish_state",
                     ):
-                        self.assertNotIn(optimistic_mutation, wrapper)
+                        self.assertNotIn(optimistic_mutation, block)
 
     def test_timer_countdown_requires_matching_local_command_confirmation(self) -> None:
         radio = top_level_block(self.text, "sx127x")

@@ -88,6 +88,18 @@ transaction that confirmed after one command and one query. Full detail is in
 [docs/protocol.md](docs/protocol.md) and
 [docs/firmware-analysis.md](docs/firmware-analysis.md).
 
+> ⚠️ **Safety automations MUST gate on `Fan Confirmed Off` (or
+> `Fan State Known`), never on the bare `fan.*` entity.** This is a hard
+> requirement, not a preference: ESPHome's Fan API cannot represent
+> "unknown", and on every boot, OTA update, crash recovery, or API
+> reconnect Home Assistant re-reads the entity's raw compiled default
+> (Off/Low) the moment it subscribes — *before* any query has confirmed
+> anything. An automation keyed to `fan.state` will therefore see a
+> spurious "Off" edge on every reboot even though this firmware never
+> *publishes* optimistically — the API layer reports raw fields on
+> subscribe, outside any publish discipline. `Fan Confirmed Off` is
+> immune: it is false until authoritative query consensus proves Off.
+
 All duration-zero commands (`80`, `90`, `A0`, and `B0`) are semantically Off.
 The transmitter may preserve the fan's remembered-speed nibble as an
 OEM-faithful compatibility policy, but a duplicate active Off request joins the

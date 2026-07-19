@@ -121,7 +121,7 @@ On 2026-07-19, final config validation and compilation succeeded under ESPHome
 2026.7.0 for both public targets and both downstream SX1278 wrappers. The public
 compile hashes were `0x80f65068` (SX1278) and `0x0be208d7` (SX1262). The live
 downstairs wrapper built as `0xef85b7d8` at 14:25:44 PDT and was OTA-flashed
-exactly once to `10.100.8.46` at about 14:26 PDT; the flashed binary SHA-256 was
+exactly once to the downstairs controller at about 14:26 PDT; the flashed binary SHA-256 was
 `714c455a1673c3c3255132df84f68d020afbbcfd989594c34c997a940cafc59d`.
 
 Post-OTA, 62 idle seconds left `TX Count` at zero, all three authority flags
@@ -137,7 +137,7 @@ interlock remained enabled. These are RF/entity observations, not independent
 motor or airflow proof.
 
 This rollout used the downstream wrapper, not a public named artifact. The
-upstairs controller was offline and was not flashed. The public V3 target was
+second (upstairs) unit was offline and was not flashed. The public V3 target was
 compiled but has not been tested on SX1262 hardware.
 
 ## Home Assistant display sources

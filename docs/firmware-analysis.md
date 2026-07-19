@@ -372,7 +372,7 @@ SX1278 wrappers. Public compile hashes were `0x80f65068` for SX1278 and
 714c455a1673c3c3255132df84f68d020afbbcfd989594c34c997a940cafc59d
 ```
 
-That downstream artifact was OTA-flashed exactly once to `10.100.8.46` at about
+That downstream artifact was OTA-flashed exactly once to the downstairs controller at about
 14:26 PDT. During 62 idle seconds after boot, `TX Count` remained zero,
 `Fan State Known`, `Timer State Known`, and `Fan Confirmed Off` remained false,
 the last confirmed state remained unknown, and confirmation status remained
@@ -399,7 +399,7 @@ transaction logic: `quietcool-lora32.yaml` on SX1278 and
 `quietcool-lora-v3.yaml` on SX1262. The latter uses a 58.6 kHz RX bandwidth,
 the nearest FSK-legal value to the validated SX1278 50 kHz setting, and still
 awaits hardware bring-up. The rollout used a downstream wrapper, not either
-public named artifact. The upstairs controller was offline and was not flashed;
+public named artifact. The second (upstairs) unit was offline and was not flashed;
 the V3 build was compiled but has not been tested on hardware.
 
 ## Analysis tooling

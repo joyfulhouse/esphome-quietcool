@@ -1273,61 +1273,65 @@ script:
                   id(command_confirmation_status_sensor).publish_state(status);
                 }
 
-  - id: send_off
+  - id: begin_transaction
+    parameters:
+      cmd: uint8_t
+      refires: uint8_t
     then:
       - if:
           condition:
             lambda: |-
-              // All duration-zero variants (80/90/A0/B0) mean OFF. Join an
-              // active OFF transaction semantically so a re-aimed B0 cannot
-              // be reset by a duplicate request that would otherwise choose
-              // 90. Spaced re-fire already supplies the redundant attempts.
-              return id(cl_active) &&
-                     ((id(cl_desired_cmd) & 0x0F) == 0);
+              // Equivalent-request JOIN (2026-07-19 Off-flapping RCA): a
+              // request equal to the ACTIVE transaction's desired state is
+              // an observation, not a fresh transaction - joining preserves
+              // the bounded command/refire budget so an entity-feedback
+              // storm cannot reset it. Off equivalence spans every
+              // duration-zero variant (80/90/A0/B0), so a duplicate Off
+              // still joins after a mismatch re-aims 90 -> B0; every other
+              // command must match on the lower six bits.
+              //
+              // Deliberate scope: only true duplicates join. Rapid A->B->A
+              // alternation starts a fresh transaction per genuinely new
+              // desired state and may spend one extra attempt re-sending A
+              // (tx_burst's stale-command guard discards the obsolete B
+              // burst before airtime); the budget stays hard-bounded.
+              if (!id(cl_active)) return false;
+              bool both_off = ((cmd & 0x0F) == 0) &&
+                              ((id(cl_desired_cmd) & 0x0F) == 0);
+              bool same_state =
+                  (id(cl_desired_cmd) & 0x3F) == (cmd & 0x3F);
+              return both_off || same_state;
           then:
             - lambda: |-
-                // Observation only: do not enqueue, reset a counter, clear a
-                // report, alter timer data, or overwrite confirmation status.
+                // Observation only: no enqueue, no counter reset, no
+                // report/candidate clear, no status overwrite.
                 ESP_LOGW("CLOSED_LOOP",
-                         "Duplicate OFF joined active transaction (%u/%u command(s), %d re-fires left)",
+                         "Duplicate request 0x%02X joined active transaction (%u/%u command(s), %d re-fires left)",
+                         cmd,
                          (unsigned int) id(cl_command_attempts),
                          (unsigned int) id(cl_attempt_limit),
                          id(refire_left));
           else:
             - lambda: |-
-                // OEM-faithful remembered-speed OFF: 90 from Low, A0 from
-                // Medium, B0 from High. Production showed intermittent 0x90
-                // acceptance from High, so speed matching is compatibility
-                // policy, not a proven receiver requirement. A mismatch can
-                // still re-aim subsequent retries from the reported speed.
-                uint8_t off_speed_nibble = 0x90;
-                if (id(quietcool_fan).speed == 2) off_speed_nibble = 0xA0;
-                else if (id(quietcool_fan).speed >= 3) off_speed_nibble = 0xB0;
-                id(off_tx_command) = off_speed_nibble;
-            - logger.log:
-                level: WARN
-                format: "=== TX request: OFF (0x%02X, OEM speed variant) - ID: %08lX ==="
-                args: [ "id(off_tx_command)", "(unsigned long) id(learned_sender_id)" ]
-            - lambda: |-
-                // Make the complete transaction visible before tx_burst can
-                // run. A second HA call in this window will therefore join it
-                // instead of resetting the safety budget.
+                // Arm the COMPLETE transaction before tx_burst can run, so a
+                // second HA call in this window joins it instead of
+                // resetting the safety budget. Until a response arrives,
+                // prior state/timer knowledge is no longer authoritative:
+                // this command may change both.
                 if (id(learned_sender_id) == 0) return;
-                // Until a response arrives, any prior timer-based expiry is
-                // no longer authoritative: this command may have changed it.
                 id(fan_state_known) = false;
                 id(timer_state_known) = false;
                 id(fan_state_known_sensor).publish_state(false);
                 id(timer_state_known_sensor).publish_state(false);
                 id(fan_confirmed_off_sensor).publish_state(false);
-                id(refire_cmd) = id(off_tx_command);
-                id(refire_left) = ${off_refire_count};
+                id(refire_cmd) = cmd;
+                id(refire_left) = refires;
                 id(refire_next_ms) = millis() + ${command_refire_interval_ms};
                 id(cl_active) = true;
-                id(cl_desired_cmd) = id(off_tx_command);
+                id(cl_desired_cmd) = cmd;
                 id(cl_command_attempts) = 0;
                 id(cl_last_command_completed_ms) = 0;
-                id(cl_attempt_limit) = ${off_refire_count} + 1;
+                id(cl_attempt_limit) = refires + 1;
                 id(cl_query_due) = false;
                 id(cl_query_window) = false;
                 id(cl_query_count) = 0;
@@ -1340,184 +1344,71 @@ script:
                 id(cl_report_ready) = false;
                 id(cl_report_confirmation) = false;
                 id(cl_query_response_complete) = true;
-                id(command_confirmation_status_sensor).publish_state("pending OFF confirmation");
+                const char *label = "TIMER";
+                if ((cmd & 0x0F) == 0x0) label = "OFF";
+                else if (cmd == 0x9F) label = "LOW";
+                else if (cmd == 0xAF) label = "MEDIUM";
+                else if (cmd == 0xBF) label = "HIGH";
+                char status[48];
+                snprintf(status, sizeof(status), "pending %s confirmation", label);
+                id(command_confirmation_status_sensor).publish_state(status);
             - script.execute:
                 id: tx_burst
-                cmd: !lambda 'return id(off_tx_command);'
+                cmd: !lambda 'return cmd;'
+
+  - id: send_off
+    then:
+      - lambda: |-
+          // OEM-faithful remembered-speed OFF: 90 from Low, A0 from
+          // Medium, B0 from High. Production showed intermittent 0x90
+          // acceptance from High, so speed matching is compatibility
+          // policy, not a proven receiver requirement. A mismatch can
+          // still re-aim subsequent retries from the reported speed.
+          uint8_t off_speed_nibble = 0x90;
+          if (id(quietcool_fan).speed == 2) off_speed_nibble = 0xA0;
+          else if (id(quietcool_fan).speed >= 3) off_speed_nibble = 0xB0;
+          id(off_tx_command) = off_speed_nibble;
+      - logger.log:
+          level: WARN
+          format: "=== TX request: OFF (0x%02X, OEM speed variant) - ID: %08lX ==="
+          args: [ "id(off_tx_command)", "(unsigned long) id(learned_sender_id)" ]
+      - script.execute:
+          id: begin_transaction
+          cmd: !lambda 'return id(off_tx_command);'
+          refires: ${off_refire_count}
 
   - id: send_low
     then:
-      - if:
-          condition:
-            lambda: |-
-              // An equivalent request while this exact state is already
-              // pending is an observation, not a fresh transaction:
-              // joining preserves the bounded command/refire budget and
-              // stops entity-feedback loops from resetting it (see the
-              // send_off join and the 2026-07-19 Off-flapping RCA).
-              return id(cl_active) &&
-                     ((id(cl_desired_cmd) & 0x3F) == 0x1F);
-          then:
-            - lambda: |-
-                // Observation only: no enqueue, no counter reset, no
-                // report/candidate clear, no status overwrite.
-                ESP_LOGW("CLOSED_LOOP",
-                         "Duplicate LOW joined active transaction (%u/%u command(s), %d re-fires left)",
-                         (unsigned int) id(cl_command_attempts),
-                         (unsigned int) id(cl_attempt_limit),
-                         id(refire_left));
-          else:
-            - logger.log:
-                level: WARN
-                format: "=== TX request: LOW (0x9F) - ID: %08lX ==="
-                args: [ "(unsigned long) id(learned_sender_id)" ]
-            - lambda: |-
-                if (id(learned_sender_id) == 0) return;
-                id(fan_state_known) = false;
-                id(timer_state_known) = false;
-                id(fan_state_known_sensor).publish_state(false);
-                id(timer_state_known_sensor).publish_state(false);
-                id(fan_confirmed_off_sensor).publish_state(false);
-                id(refire_cmd) = 0x9F;
-                id(refire_left) = ${command_refire_count};
-                id(refire_next_ms) = millis() + ${command_refire_interval_ms};
-                id(cl_active) = true;
-                id(cl_desired_cmd) = 0x9F;
-                id(cl_command_attempts) = 0;
-                id(cl_last_command_completed_ms) = 0;
-                id(cl_attempt_limit) = ${command_refire_count} + 1;
-                id(cl_query_due) = false;
-                id(cl_query_window) = false;
-                id(cl_query_count) = 0;
-                id(cl_candidate_state) = 0xFF;
-                id(cl_candidate_raw) = 0xFF;
-                id(cl_candidate_capability) = 0;
-                id(cl_candidate_total_count) = 0;
-                id(cl_candidate_exact_count) = 0;
-                id(cl_candidate_last_ms) = 0;
-                id(cl_report_ready) = false;
-                id(cl_report_confirmation) = false;
-                id(cl_query_response_complete) = true;
-                id(command_confirmation_status_sensor).publish_state("pending LOW confirmation");
-            - script.execute:
-                id: tx_burst
-                cmd: 0x9F
+      - logger.log:
+          level: WARN
+          format: "=== TX request: LOW (0x9F) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - script.execute:
+          id: begin_transaction
+          cmd: 0x9F
+          refires: ${command_refire_count}
 
   - id: send_medium
     then:
-      - if:
-          condition:
-            lambda: |-
-              // An equivalent request while this exact state is already
-              // pending is an observation, not a fresh transaction:
-              // joining preserves the bounded command/refire budget and
-              // stops entity-feedback loops from resetting it (see the
-              // send_off join and the 2026-07-19 Off-flapping RCA).
-              return id(cl_active) &&
-                     ((id(cl_desired_cmd) & 0x3F) == 0x2F);
-          then:
-            - lambda: |-
-                // Observation only: no enqueue, no counter reset, no
-                // report/candidate clear, no status overwrite.
-                ESP_LOGW("CLOSED_LOOP",
-                         "Duplicate MEDIUM joined active transaction (%u/%u command(s), %d re-fires left)",
-                         (unsigned int) id(cl_command_attempts),
-                         (unsigned int) id(cl_attempt_limit),
-                         id(refire_left));
-          else:
-            - logger.log:
-                level: WARN
-                format: "=== TX request: MEDIUM (0xAF) - ID: %08lX ==="
-                args: [ "(unsigned long) id(learned_sender_id)" ]
-            - lambda: |-
-                if (id(learned_sender_id) == 0) return;
-                id(fan_state_known) = false;
-                id(timer_state_known) = false;
-                id(fan_state_known_sensor).publish_state(false);
-                id(timer_state_known_sensor).publish_state(false);
-                id(fan_confirmed_off_sensor).publish_state(false);
-                id(refire_cmd) = 0xAF;
-                id(refire_left) = ${command_refire_count};
-                id(refire_next_ms) = millis() + ${command_refire_interval_ms};
-                id(cl_active) = true;
-                id(cl_desired_cmd) = 0xAF;
-                id(cl_command_attempts) = 0;
-                id(cl_last_command_completed_ms) = 0;
-                id(cl_attempt_limit) = ${command_refire_count} + 1;
-                id(cl_query_due) = false;
-                id(cl_query_window) = false;
-                id(cl_query_count) = 0;
-                id(cl_candidate_state) = 0xFF;
-                id(cl_candidate_raw) = 0xFF;
-                id(cl_candidate_capability) = 0;
-                id(cl_candidate_total_count) = 0;
-                id(cl_candidate_exact_count) = 0;
-                id(cl_candidate_last_ms) = 0;
-                id(cl_report_ready) = false;
-                id(cl_report_confirmation) = false;
-                id(cl_query_response_complete) = true;
-                id(command_confirmation_status_sensor).publish_state("pending MEDIUM confirmation");
-            - script.execute:
-                id: tx_burst
-                cmd: 0xAF
+      - logger.log:
+          level: WARN
+          format: "=== TX request: MEDIUM (0xAF) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - script.execute:
+          id: begin_transaction
+          cmd: 0xAF
+          refires: ${command_refire_count}
 
   - id: send_high
     then:
-      - if:
-          condition:
-            lambda: |-
-              // An equivalent request while this exact state is already
-              // pending is an observation, not a fresh transaction:
-              // joining preserves the bounded command/refire budget and
-              // stops entity-feedback loops from resetting it (see the
-              // send_off join and the 2026-07-19 Off-flapping RCA).
-              return id(cl_active) &&
-                     ((id(cl_desired_cmd) & 0x3F) == 0x3F);
-          then:
-            - lambda: |-
-                // Observation only: no enqueue, no counter reset, no
-                // report/candidate clear, no status overwrite.
-                ESP_LOGW("CLOSED_LOOP",
-                         "Duplicate HIGH joined active transaction (%u/%u command(s), %d re-fires left)",
-                         (unsigned int) id(cl_command_attempts),
-                         (unsigned int) id(cl_attempt_limit),
-                         id(refire_left));
-          else:
-            - logger.log:
-                level: WARN
-                format: "=== TX request: HIGH (0xBF) - ID: %08lX ==="
-                args: [ "(unsigned long) id(learned_sender_id)" ]
-            - lambda: |-
-                if (id(learned_sender_id) == 0) return;
-                id(fan_state_known) = false;
-                id(timer_state_known) = false;
-                id(fan_state_known_sensor).publish_state(false);
-                id(timer_state_known_sensor).publish_state(false);
-                id(fan_confirmed_off_sensor).publish_state(false);
-                id(refire_cmd) = 0xBF;
-                id(refire_left) = ${command_refire_count};
-                id(refire_next_ms) = millis() + ${command_refire_interval_ms};
-                id(cl_active) = true;
-                id(cl_desired_cmd) = 0xBF;
-                id(cl_command_attempts) = 0;
-                id(cl_last_command_completed_ms) = 0;
-                id(cl_attempt_limit) = ${command_refire_count} + 1;
-                id(cl_query_due) = false;
-                id(cl_query_window) = false;
-                id(cl_query_count) = 0;
-                id(cl_candidate_state) = 0xFF;
-                id(cl_candidate_raw) = 0xFF;
-                id(cl_candidate_capability) = 0;
-                id(cl_candidate_total_count) = 0;
-                id(cl_candidate_exact_count) = 0;
-                id(cl_candidate_last_ms) = 0;
-                id(cl_report_ready) = false;
-                id(cl_report_confirmation) = false;
-                id(cl_query_response_complete) = true;
-                id(command_confirmation_status_sensor).publish_state("pending HIGH confirmation");
-            - script.execute:
-                id: tx_burst
-                cmd: 0xBF
+      - logger.log:
+          level: WARN
+          format: "=== TX request: HIGH (0xBF) - ID: %08lX ==="
+          args: [ "(unsigned long) id(learned_sender_id)" ]
+      - script.execute:
+          id: begin_transaction
+          cmd: 0xBF
+          refires: ${command_refire_count}
 
   - id: send_timer
     parameters:
@@ -1534,62 +1425,14 @@ script:
             speed_nibble = 0xB0;
           }
           id(timer_tx_command) = speed_nibble | duration_nibble;
-      - if:
-          condition:
-            lambda: |-
-              // Same join rule as the state wrappers: an equivalent
-              // speed+duration request while that exact timer command is
-              // already pending observes the active transaction instead of
-              // resetting its bounded budget or restarting anything.
-              return id(cl_active) &&
-                     (id(cl_desired_cmd) & 0x3F) ==
-                     (id(timer_tx_command) & 0x3F);
-          then:
-            - lambda: |-
-                // Observation only: no enqueue, no counter reset, no
-                // report/candidate clear, no status overwrite.
-                ESP_LOGW("CLOSED_LOOP",
-                         "Duplicate TIMER joined active transaction (%u/%u command(s), %d re-fires left)",
-                         (unsigned int) id(cl_command_attempts),
-                         (unsigned int) id(cl_attempt_limit),
-                         id(refire_left));
-          else:
-            - logger.log:
-                level: WARN
-                format: "=== TX: Timer command 0x%02X (speed-aware) ==="
-                args: [ "id(timer_tx_command)" ]
-            - lambda: |-
-                if (id(learned_sender_id) == 0) return;
-                id(fan_state_known) = false;
-                id(timer_state_known) = false;
-                id(fan_state_known_sensor).publish_state(false);
-                id(timer_state_known_sensor).publish_state(false);
-                id(fan_confirmed_off_sensor).publish_state(false);
-                id(refire_cmd) = id(timer_tx_command);
-                id(refire_left) = ${command_refire_count};
-                id(refire_next_ms) = millis() + ${command_refire_interval_ms};
-                id(cl_active) = true;
-                id(cl_desired_cmd) = id(timer_tx_command);
-                id(cl_command_attempts) = 0;
-                id(cl_last_command_completed_ms) = 0;
-                id(cl_attempt_limit) = ${command_refire_count} + 1;
-                id(cl_query_due) = false;
-                id(cl_query_window) = false;
-                id(cl_query_count) = 0;
-                id(cl_candidate_state) = 0xFF;
-                id(cl_candidate_raw) = 0xFF;
-                id(cl_candidate_capability) = 0;
-                id(cl_candidate_total_count) = 0;
-                id(cl_candidate_exact_count) = 0;
-                id(cl_candidate_last_ms) = 0;
-                id(cl_report_ready) = false;
-                id(cl_report_confirmation) = false;
-                id(cl_query_response_complete) = true;
-                id(command_confirmation_status_sensor).publish_state("pending TIMER confirmation");
-            - script.execute:
-                id: tx_burst
-                cmd: !lambda 'return id(timer_tx_command);'
-
+      - logger.log:
+          level: WARN
+          format: "=== TX: Timer command 0x%02X (speed-aware) ==="
+          args: [ "id(timer_tx_command)" ]
+      - script.execute:
+          id: begin_transaction
+          cmd: !lambda 'return id(timer_tx_command);'
+          refires: ${command_refire_count}
 # =============================================================================
 # Timer deadline housekeeping (never transmits)
 #
