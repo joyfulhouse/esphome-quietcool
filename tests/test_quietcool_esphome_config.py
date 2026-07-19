@@ -1206,12 +1206,21 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("fan.turn_on", radio)
         self.assertNotIn("fan.turn_off", radio)
 
-    def test_coordinator_uses_echo_guard_around_confirmed_publish(self) -> None:
+    def test_confirmed_publish_is_raw_mutation_inside_authoritative_branch(self) -> None:
+        # The old rf_echo_guard flag was removed as dead code: the
+        # confirmation-driven fan platform has no publish callback, so the
+        # echo protection is architectural. Pin the structure instead: the
+        # ONLY fan publish_state() sits inside the coordinator's
+        # state_authoritative branch, immediately after raw field mutation,
+        # and control() (pinned elsewhere) contains no publish at all.
         coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
-        guard_true = coordinator.index("id(rf_echo_guard) = true;")
-        publish = coordinator.index("id(quietcool_fan).publish_state();", guard_true)
-        guard_false = coordinator.index("id(rf_echo_guard) = false;", publish)
-        self.assertTrue(guard_true < publish < guard_false)
+        authoritative = coordinator.index("if (state_authoritative) {")
+        publish = coordinator.index("id(quietcool_fan).publish_state();")
+        self.assertGreater(publish, authoritative)
+        mutate = coordinator.index("id(quietcool_fan).state = actual_duration != 0;")
+        self.assertTrue(authoritative < mutate < publish)
+        self.assertEqual(self.text.count("id(quietcool_fan).publish_state();"), 1)
+        self.assertNotIn("rf_echo_guard", self.text)
 
     def test_diagnostics_entities_present(self) -> None:
         for name in ("TX Count", "RX Valid Count", "RX Rejected Count"):

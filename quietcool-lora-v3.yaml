@@ -64,7 +64,7 @@
 # a 2 s physical-remote exchange holdoff before any local query or state TX.
 # RX never executes a script or sends a packet. It only records consensus;
 # interval code compares that result with the already-armed desired state.
-# Home Assistant temperature sensors remain display-only. See rf_echo_guard.
+# Home Assistant temperature sensors remain display-only.
 
 substitutions:
   # Device identity. Follows the same substitution pattern as the
@@ -374,14 +374,6 @@ globals:
     # mode: queued guarantees one snapshot owns all three frames, so a
     # concurrent Forget/re-learn cannot mix sender bytes inside a burst.
 
-  - id: rf_echo_guard
-    type: bool
-    restore_value: false
-    initial_value: "false"
-    # Origin marker retained around every direct physical-state publication.
-    # The confirmation-driven fan platform has no publish callback and cannot
-    # echo these updates; keeping the marker makes that boundary explicit for
-    # future automation changes and regression tests.
 
   - id: fan_state_known
     type: bool
@@ -802,8 +794,8 @@ sx126x:
     # 0 to 42 bytes with no CRC to reject them automatically, so every field
     # below is checked before it can contribute to bounded response consensus.
     # Passive frames remain diagnostics-only. Only the interval coordinator
-    # publishes query-correlated authoritative state, by raw mutation behind
-    # rf_echo_guard; RX never calls a control path and can never transmit.
+    # publishes query-correlated authoritative state by raw field mutation;
+    # RX never calls a control path and can never transmit.
     - lambda: |-
         std::string hex;
         for (uint8_t b : x) {
@@ -1810,13 +1802,15 @@ interval:
               id(timer_state_known_sensor).publish_state(false);
               id(fan_confirmed_off_sensor).publish_state(false);
             } else {
-              // Raw field mutation bypasses FanCall/control(), so confirmed
-              // publication can never start another RF transaction.
-              id(rf_echo_guard) = true;
+              // Raw field mutation bypasses FanCall/control(), and the
+              // confirmation-driven fan platform has no publish callback,
+              // so confirmed publication is STRUCTURALLY incapable of
+              // starting another RF transaction. (The old rf-echo guard
+              // flag was removed as dead code once on_state ceased to
+              // exist; the protection is architectural, not a flag.)
               if (actual_speed != 0) id(quietcool_fan).speed = actual_speed;
               id(quietcool_fan).state = actual_duration != 0;
               id(quietcool_fan).publish_state();
-              id(rf_echo_guard) = false;
               id(fan_confirmed_off_sensor).publish_state(actual_duration == 0);
             }
 
