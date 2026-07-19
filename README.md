@@ -21,8 +21,10 @@ clean-room implementation of what that analysis found.
   [Learn mode](#learn-mode--porting-to-your-own-fan).
 - **Home Assistant native API** — a proper `fan` entity plus diagnostics
   (TX/RX counters, last command, learned sender ID, battery voltage/level).
-- **Observed-state receive** — strictly validates and mirrors OEM-remote presses
-  into the HA entity **without ever re-transmitting** (no RF echo).
+- **Bi-directional** — the controller also *listens*: press the OEM remote and
+  the Home Assistant entity updates to match within a second. Received frames
+  are strictly validated and mirrored into the entity **without ever
+  re-transmitting** (no RF echo, no feedback loop).
 - **On-device OLED** — animated fan icon, HH:MM:SS timer countdown, three
   HA-relayed temperatures (indoor / outdoor / attic) with semantic icons, and a
   WiFi / API / battery status row. Temperature sources are configurable from the
@@ -72,10 +74,13 @@ cp secrets.yaml.example secrets.yaml   # then edit
 ```
 
 Then adopt the device in Home Assistant (ESPHome integration) and teach it your
-fan via [Learn mode](#learn-mode--porting-to-your-own-fan).
+fan via [Learn mode](#learn-mode--porting-to-your-own-fan). The full
+step-by-step walkthrough — flashing, HA adoption, pairing, display setup,
+troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
 
 ## Documentation
 
+- [INSTALL.md](INSTALL.md) — step-by-step install, pairing, and troubleshooting
 - [docs/protocol.md](docs/protocol.md) — RF profile, frame format, command byte
 - [docs/firmware-analysis.md](docs/firmware-analysis.md) — the reverse-engineering:
   memory map, register config, command-byte disassembly, per-unit ID mechanism
@@ -86,6 +91,7 @@ fan via [Learn mode](#learn-mode--porting-to-your-own-fan).
 ## Repository layout
 
 ```
+INSTALL.md                       # step-by-step setup guide
 quietcool-lora32.yaml            # TTGO LoRa32 V2.1 / SX1278 — shared base config
 quietcool-lora-v3.yaml           # Heltec/HiLetgo ESP32-S3 / SX1262 port
 secrets.yaml.example             # copy to secrets.yaml (gitignored)
@@ -112,7 +118,7 @@ fan's ID from its OEM remote through the existing receive path.
 ### First-boot flow for another fan
 
 1. Before compiling, change the top-level substitution in
-   `quietcool_lora32_ccrome.yaml` to:
+   `quietcool-lora32.yaml` to:
 
    ```yaml
    substitutions:
