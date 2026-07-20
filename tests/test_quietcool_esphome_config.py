@@ -893,7 +893,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("sx127x.send_packet", learn_block)
 
     def test_learn_window_timeout_and_auto_rearm_are_rx_storage_only(self) -> None:
-        learn_interval = interval_item_containing(self.text, "id(learn_active)")
+        learn_interval = interval_item_containing(self.text, "uint32_t learn_elapsed")
         self.assertIn("120000UL", learn_interval)
         self.assertIn("id(learn_auto_mode)", learn_interval)
         self.assertIn("id(learn_candidate_id) = 0;", learn_interval)
@@ -2500,6 +2500,70 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         ):
             with self.subTest(rejected_glyph=rejected_glyph):
                 self.assertNotIn(rejected_glyph, battery_block)
+
+    def test_oem_activity_arms_one_shot_requery_from_rx_flags_only(self) -> None:
+        # All three OEM-evidence RX sites (heard 66 query, accepted OEM
+        # command, other validated passive frame) arm the one-shot re-query
+        # by setting flags only; the RX path still never executes a script.
+        for name, text in (("lora32", self.text), ("v3", self.v3_text)):
+            with self.subTest(config=name):
+                self.assertEqual(text.count("id(oem_requery_pending) = true;"), 3)
+                self.assertEqual(text.count("id(oem_activity_ms) = now;"), 3)
+                # Learn commit, manual-learn arm, Forget, the fire site, and
+                # the housekeeping drop all clear the one-shot request: a
+                # stale flag can never cross a Learn/Forget boundary or
+                # outlive its OEM exchange.
+                self.assertEqual(
+                    text.count("id(oem_requery_pending) = false;"), 5
+                )
+
+    def test_auto_requery_fires_one_bounded_query_after_quiet_window(self) -> None:
+        for name, text in (("lora32", self.text), ("v3", self.v3_text)):
+            with self.subTest(config=name):
+                item = interval_item_containing(
+                    text, "auto refresh after OEM remote activity"
+                )
+                condition = item[: item.index("id(oem_requery_pending) = false;")]
+                self.assertIn("if (!id(oem_requery_pending)) return false;", condition)
+                self.assertIn("since >= 3000UL && since <= 30000UL", condition)
+                self.assertIn("!id(fan_state_known)", condition)
+                self.assertIn("!id(cl_active) && id(refire_left) == 0", condition)
+                self.assertIn(
+                    "!id(cl_query_epoch) && !id(cl_report_ready)", condition
+                )
+                self.assertIn("!id(tx_burst).is_running()", condition)
+                self.assertIn(
+                    "!id(learn_active) && id(learned_sender_id) != 0", condition
+                )
+                body = item[item.index("id(oem_requery_pending) = false;") :]
+                self.assertIn("cmd: 0x66", body)
+                self.assertEqual(body.count("script.execute"), 1)
+
+    def test_auto_requery_request_expires_and_yields_to_restored_authority(self) -> None:
+        for name, text in (("lora32", self.text), ("v3", self.v3_text)):
+            with self.subTest(config=name):
+                housekeeping = interval_item_containing(
+                    text, "id(oem_query_seen) = false;"
+                )
+                drop = housekeeping[
+                    housekeeping.index("id(oem_requery_pending) &&") :
+                ]
+                self.assertIn("id(fan_state_known) ||", drop)
+                self.assertIn("(millis() - id(oem_activity_ms)) > 30000UL", drop)
+                self.assertIn("id(oem_requery_pending) = false;", drop)
+
+    def test_display_state_word_marks_lost_authority(self) -> None:
+        for name, text in (("lora32", self.text), ("v3", self.v3_text)):
+            with self.subTest(config=name):
+                display = top_level_block(text, "display")
+                self.assertIn("KEEP IN SYNC: STATE_UNKNOWN", display)
+                self.assertIn('id(fan_state_known) ? "" : "?"', display)
+                # The embedded state font must actually contain the '?'
+                # glyph, or the panel draws a missing-codepoint box.
+                self.assertIn('glyphs: "OFLWMEDHIG?"', text)
+        renderer = (ROOT / "tools" / "render_display.py").read_text()
+        self.assertIn("KEEP IN SYNC: STATE_UNKNOWN", renderer)
+        self.assertIn('("" if state.state_known else "?")', renderer)
 
 
 if __name__ == "__main__":

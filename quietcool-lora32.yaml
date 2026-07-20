@@ -486,6 +486,21 @@ globals:
     restore_value: false
     initial_value: "0"
 
+  # One-shot auto re-query after a physical OEM exchange. RX only raises the
+  # flag and stamps the activity time; the 250 ms interval below sends a
+  # single observation-only 66 query once the exchange has been quiet for
+  # 3 s, restoring HA authority without waiting for a manual Refresh. The
+  # request expires (30 s) or is dropped when consensus already restored
+  # authority, so the flag can never cause a TX unrelated to OEM activity.
+  - id: oem_requery_pending
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: oem_activity_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
   - id: fan_anim_frame
     type: int
     restore_value: false
@@ -695,6 +710,11 @@ sx127x:
             id(learn_candidate_id) = 0;
             id(learn_candidate_first_time) = 0;
             id(learn_confirm_until) = now + 5000UL;
+            // A requery armed before Learn opened is stale context: the
+            // learn presses were consumed by this branch and never stamped
+            // oem_activity_ms, so firing on the old timestamp could break
+            // the 3 s quiet promise ~700 ms after a remote press.
+            id(oem_requery_pending) = false;
 
             char sender_text[12];
             snprintf(sender_text, sizeof(sender_text), "%02X %02X %02X %02X",
@@ -749,6 +769,8 @@ sx127x:
           id(fan_confirmed_off_sensor).publish_state(false);
           id(oem_query_seen) = true;
           id(oem_query_seen_ms) = now;
+          id(oem_requery_pending) = true;
+          id(oem_activity_ms) = now;
           id(refire_left) = 0;
           id(cl_active) = false;
           id(cl_query_due) = false;
@@ -1009,6 +1031,8 @@ sx127x:
           id(fan_state_known_sensor).publish_state(false);
           id(timer_state_known_sensor).publish_state(false);
           id(fan_confirmed_off_sensor).publish_state(false);
+          id(oem_requery_pending) = true;
+          id(oem_activity_ms) = now;
           id(refire_left) = 0;
           id(cl_active) = false;
           id(cl_query_due) = false;
@@ -1039,6 +1063,10 @@ sx127x:
         id(fan_state_known_sensor).publish_state(false);
         id(timer_state_known_sensor).publish_state(false);
         id(fan_confirmed_off_sensor).publish_state(false);
+        // Passive frames (e.g. the fan replying to an OEM remote's query)
+        // also mark the exchange for the one-shot auto re-query.
+        id(oem_requery_pending) = true;
+        id(oem_activity_ms) = now;
 
         // Our own TX cannot self-receive (the SX1278 is half-duplex), so a
         // frame here while TX is active is concurrent external traffic. It is
@@ -1381,6 +1409,7 @@ script:
           id(cl_query_epoch) = false;
           id(cl_query_epoch_confirmation) = false;
           id(cl_report_ready) = false;
+          id(oem_requery_pending) = false;
           id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
           id(learn_active) = true;
           id(learn_auto_mode) = false;
@@ -1486,6 +1515,14 @@ interval:
       - lambda: |-
           if (id(oem_query_seen) && (millis() - id(oem_query_seen_ms)) >= 2000UL) {
             id(oem_query_seen) = false;
+          }
+          if (id(oem_requery_pending) &&
+              (id(fan_state_known) ||
+               (millis() - id(oem_activity_ms)) > 30000UL)) {
+            // Authority already restored (e.g. an interlock transaction
+            // confirmed) or the request went stale: never carry the flag
+            // beyond the wake of the OEM exchange that raised it.
+            id(oem_requery_pending) = false;
           }
           if (id(cl_query_epoch) && !id(cl_query_epoch_confirmation) &&
               !id(cl_query_response_complete) &&
@@ -1825,6 +1862,37 @@ interval:
                          id(cl_command_attempts) > 0 ? "Re-sent" : "Sent deferred initial",
                          id(refire_cmd), id(refire_left));
 
+  # One-shot auto re-query: after a physical OEM exchange has been quiet
+  # for 3 s and no local transaction is running or pending, send a single
+  # observation-only 66 query so HA authority recovers without a manual
+  # Refresh. The request expires after 30 s (100 ms housekeeping above)
+  # and is dropped if consensus already restored authority, so it can
+  # never transmit outside the immediate wake of real OEM activity. The
+  # learn_active guard matters: tx_burst treats any executed command as a
+  # deliberate user action and would silently cancel an open learn window.
+  - interval: 250ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              if (!id(oem_requery_pending)) return false;
+              uint32_t since = millis() - id(oem_activity_ms);
+              return since >= 3000UL && since <= 30000UL &&
+                     !id(fan_state_known) &&
+                     !id(cl_active) && id(refire_left) == 0 &&
+                     !id(cl_query_epoch) && !id(cl_report_ready) &&
+                     !id(tx_burst).is_running() &&
+                     !id(learn_active) && id(learned_sender_id) != 0;
+          then:
+            - lambda: |-
+                id(oem_requery_pending) = false;
+                id(command_confirmation_status_sensor).publish_state(
+                    "auto refresh after OEM remote activity");
+                ESP_LOGI("CL", "OEM exchange quiet for 3 s; sending one auto status query");
+            - script.execute:
+                id: tx_burst
+                cmd: 0x66
+
   - interval: 20s
     then:
       - lambda: |-
@@ -2075,6 +2143,7 @@ button:
           id(cl_query_epoch) = false;
           id(cl_query_epoch_confirmation) = false;
           id(cl_report_ready) = false;
+          id(oem_requery_pending) = false;
           id(command_confirmation_status_sensor).publish_state("idle (remote ID forgotten)");
           id(learned_sender_id) = 0;
           learned_sender_id->update();
@@ -2210,7 +2279,8 @@ font:
   - file: "gfonts://Roboto"
     id: font_state
     size: 11
-    glyphs: "OFLWMEDHIG"
+    # '?' is the lost-authority suffix (KEEP IN SYNC: STATE_UNKNOWN).
+    glyphs: "OFLWMEDHIG?"
   - file: "gfonts://Roboto"
     id: font_timer
     size: 11
@@ -2380,7 +2450,14 @@ display:
       bool running = id(quietcool_fan).state;
       int speed = id(quietcool_fan).speed;
       int idx = (speed >= 1 && speed <= 3) ? speed : 0;
-      const char *state_str = running ? speed_names[idx] : "OFF";
+      // ---- KEEP IN SYNC: STATE_UNKNOWN (tools/render_display.py) ----
+      // The fan entity retains the last query-confirmed state; when that
+      // authority has been lost (fan_state_known false), suffix '?' so the
+      // panel never asserts a stale word as current physical fact.
+      char state_str[8];
+      snprintf(state_str, sizeof(state_str), "%s%s",
+               running ? speed_names[idx] : "OFF",
+               id(fan_state_known) ? "" : "?");
 
       // ---- KEEP IN SYNC: FAN_ANIM (tools/render_display.py: FAN_ANIM) ----
       // Real `mdi:fan` glyph (U+F0210), pre-rendered at build time into

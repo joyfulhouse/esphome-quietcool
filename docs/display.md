@@ -14,11 +14,13 @@
 
 The display renders the fan entity's latest query-confirmed state (or its raw
 boot default before authority exists). Passive OEM traffic does not update this
-safety-facing state. The OLED does **not** indicate whether authority is current;
-closed-loop results are published as Home Assistant diagnostics (`Last
-Confirmed Fan State`, `Command Confirmation Status`, `Fan Speed Capability`,
-`Fan State Known`, and atomic `Fan Confirmed Off`). Do not read the displayed
-state word alone as an RF acknowledgement.
+safety-facing state. When that authority has been lost (`Fan State Known`
+false — after boot, OEM remote activity, or an unconfirmed command), the state
+word gains a `?` suffix (`HIGH?`, `OFF?`) so the panel never asserts a stale
+word as current physical fact. Full closed-loop results are still published as
+Home Assistant diagnostics (`Last Confirmed Fan State`, `Command Confirmation
+Status`, `Fan Speed Capability`, `Fan State Known`, and atomic `Fan Confirmed
+Off`). Do not read the displayed state word alone as an RF acknowledgement.
 
 ## Icon source
 
