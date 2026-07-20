@@ -12,13 +12,13 @@
 - **Bottom-left** — a status row of icons: WiFi signal strength, Home Assistant
   API connectivity, and battery.
 
-The display renders the template's local/mirrored fan entity state. It does
-**not** currently indicate whether the last command was confirmed by a queried
-fan — the closed-loop confirmation and capability results are published as
-Home Assistant diagnostic sensors (`Last Confirmed Fan State`,
-`Command Confirmation Status`, `Fan Speed Capability`), not drawn on the OLED
-or in the preview renderer. Do not read the displayed state word alone as an
-RF acknowledgement; check `Command Confirmation Status` for that.
+The display renders the fan entity's latest query-confirmed state (or its raw
+boot default before authority exists). Passive OEM traffic does not update this
+safety-facing state. The OLED does **not** indicate whether authority is current;
+closed-loop results are published as Home Assistant diagnostics (`Last
+Confirmed Fan State`, `Command Confirmation Status`, `Fan Speed Capability`,
+`Fan State Known`, and atomic `Fan Confirmed Off`). Do not read the displayed
+state word alone as an RF acknowledgement.
 
 ## Icon source
 
