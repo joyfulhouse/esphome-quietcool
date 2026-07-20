@@ -391,18 +391,151 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
     def test_yield_policy_requires_a_running_state_report(self) -> None:
         # A fan that missed our ON command reports its off state (90/A0/B0
         # - valid command encodings), so an off report on an ON transaction
-        # must re-fire, not yield.
-        coord = interval_item_containing(self.text, "id(cl_report_ready)")
-        ambiguity_start = coord.index("bool report_ambiguous_for_authority")
-        ambiguity = coord[ambiguity_start : coord.index(";", ambiguity_start)]
-        self.assertIn("report_for_transaction", ambiguity)
-        self.assertIn("!state_matches", ambiguity)
-        self.assertIn("report_could_be_command", ambiguity)
-        yield_start = coord.index("bool should_yield", ambiguity_start)
-        yield_expression = coord[yield_start : coord.index(";", yield_start)]
-        self.assertIn("report_ambiguous_for_authority", yield_expression)
-        self.assertIn("!desired_is_off", yield_expression)
-        self.assertIn("actual_duration != 0", yield_expression)
+        # must re-fire, not yield. A running report must also differ from the
+        # state that was authoritative when the transaction began.
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            coord = interval_item_containing(text, "id(cl_report_ready)")
+            ambiguity_start = coord.index("bool report_ambiguous_for_authority")
+            ambiguity = coord[ambiguity_start : coord.index(";", ambiguity_start)]
+            yield_start = coord.index("bool should_yield", ambiguity_start)
+            yield_expression = coord[yield_start : coord.index(";", yield_start)]
+            with self.subTest(config=config_name):
+                self.assertIn("report_for_transaction", ambiguity)
+                self.assertIn("!state_matches", ambiguity)
+                self.assertIn("report_could_be_command", ambiguity)
+                self.assertIn("report_ambiguous_for_authority", yield_expression)
+                self.assertIn("!desired_is_off", yield_expression)
+                self.assertIn("actual_duration != 0", yield_expression)
+                self.assertIn("actual != id(cl_prior_confirmed_state)", yield_expression)
+
+    def test_speed_change_does_not_yield_to_prior_confirmed_state(self) -> None:
+        # A speed->speed query can echo the exact canonical state that was
+        # authoritative before the command. Preserve that state across the
+        # transaction invalidation and exclude it from the OEM-yield policy.
+        for config_name, text, radio_key in (
+            ("SX1278", self.text, "sx127x"),
+            ("SX1262", self.v3_text, "sx126x"),
+        ):
+            globals_block = top_level_block(text, "globals")
+            prior = globals_block[globals_block.index("- id: cl_prior_confirmed_state") :]
+            begin = script_blocks(text)["begin_transaction"]
+            coord = interval_item_containing(text, "id(cl_report_ready)")
+            yield_start = coord.index("bool should_yield")
+            yield_expression = coord[yield_start : coord.index(";", yield_start)]
+            promotion = coord.index("id(cl_prior_confirmed_state) = actual;")
+            authority = coord.rindex("if (state_authoritative) {", 0, promotion)
+            radio = top_level_block(text, radio_key)
+            with self.subTest(config=config_name):
+                self.assertIn('initial_value: "0xFF"', prior[:500])
+                self.assertNotIn("id(cl_prior_confirmed_state) = 0xFF;", begin)
+                self.assertIn("actual != id(cl_prior_confirmed_state)", yield_expression)
+                self.assertLess(authority, promotion)
+                # All promoted states are cmd & 0x3F, with OFF canonicalized
+                # further to zero, so the 0xFF unknown sentinel cannot collide.
+                self.assertIn("uint8_t canonical_state = cmd & 0x3F;", radio)
+                self.assertIn("if (duration_nibble == 0) canonical_state = 0;", radio)
+
+    def test_prior_confirmed_state_invalidation_tracks_authority_loss_reason(self) -> None:
+        for config_name, text, radio_key in (
+            ("SX1278", self.text, "sx127x"),
+            ("SX1262", self.v3_text, "sx126x"),
+        ):
+            scripts = script_blocks(text)
+            radio = top_level_block(text, radio_key)
+            coordinator = interval_item_containing(text, "id(cl_report_ready)")
+            invalidate = "id(cl_prior_confirmed_state) = 0xFF;"
+
+            # Our own arm and serialized command/re-fire invalidate current
+            # authority but retain the pre-command belief across command bursts.
+            begin = scripts["begin_transaction"]
+            tx = scripts["tx_burst"]
+            self_command_start = tx.index("if (cmd != 0x66) {")
+            self_command_end = tx.index("id(tx_burst_sender_id)", self_command_start)
+            with self.subTest(config=config_name, site="self-owned invalidation"):
+                self.assertNotIn(invalidate, begin)
+                self.assertNotIn(invalidate, tx[self_command_start:self_command_end])
+                self.assertIn("Self-command invalidation preserves", begin)
+                self.assertIn("Self-command execution preserves", tx)
+
+            # Every external-traffic authority loss discards the belief.
+            external_sites = (
+                radio[
+                    radio.index("if (exact_frame && cmd == 0x66 &&") :
+                    radio.index(
+                        "\n          return;",
+                        radio.index("if (exact_frame && cmd == 0x66 &&"),
+                    )
+                ],
+                radio[
+                    radio.index("if (id(cl_query_response_complete) &&") :
+                    radio.index("Passive response repeat", radio.index("if (id(cl_query_response_complete) &&"))
+                ],
+                radio[
+                    radio.index("if (remote_command_ok) {") :
+                    radio.index(
+                        "\n          return;", radio.index("if (remote_command_ok) {")
+                    )
+                ],
+                radio[radio.index("// Any other strictly validated passive state observation") :],
+            )
+            for site_index, site in enumerate(external_sites):
+                with self.subTest(config=config_name, external_site=site_index):
+                    self.assertIn(invalidate, site)
+
+            # Explicit revalidation/reset/expiry paths also discard stale
+            # beliefs rather than carrying them into a later transaction.
+            explicit_sites = (
+                tx[tx.index("if (!id(cl_query_epoch_confirmation))") :],
+                scripts["arm_manual_learn"],
+                interval_item_containing(text, "Estimated timer deadline reached"),
+                list_item_containing(text, "button", 'name: "Refresh Fan State"'),
+                list_item_containing(text, "button", 'name: "Query Fan State (probe)"'),
+                list_item_containing(text, "button", 'name: "Forget Remote ID"'),
+            )
+            for site_index, site in enumerate(explicit_sites):
+                with self.subTest(config=config_name, explicit_site=site_index):
+                    self.assertIn(invalidate, site)
+
+            # Manual timeout, suspected OEM yield, and terminal FAILED
+            # outcomes must poison the belief before a future transaction.
+            manual_timeout_start = coordinator.index(
+                "if (id(cl_query_epoch) && !id(cl_query_epoch_confirmation)"
+            )
+            manual_timeout_end = coordinator.index(
+                "if (id(cl_query_epoch) &&", manual_timeout_start + 1
+            )
+            yield_start = coordinator.index("if (should_yield) {")
+            yield_end = coordinator.index("} else {", yield_start)
+            terminal_mismatch = coordinator[
+                coordinator.rindex("} else {", 0, coordinator.index("FAILED after bounded attempts")) :
+                coordinator.index(
+                    "id(command_confirmation_status_sensor).publish_state(status);",
+                    coordinator.index("FAILED after bounded attempts"),
+                )
+            ]
+            for site_name, site in (
+                ("manual timeout", coordinator[manual_timeout_start:manual_timeout_end]),
+                ("OEM yield", coordinator[yield_start:yield_end]),
+                ("terminal mismatch", terminal_mismatch),
+            ):
+                with self.subTest(config=config_name, failure_site=site_name):
+                    self.assertIn(invalidate, site)
+
+            # A command-query timeout is asymmetric: silence while a bounded
+            # re-fire remains preserves the prior-state discriminator, but the
+            # final no-consensus outcome invalidates it. Slice at the inner
+            # else so a common pre-branch wipe cannot satisfy this structure.
+            timeout_start = coordinator.index("// Query timeout does not consume")
+            timeout_end = coordinator.index("      - if:", timeout_start)
+            query_timeout = coordinator[timeout_start:timeout_end]
+            pending_start = query_timeout.index("if (id(refire_left) > 0) {")
+            terminal_start = query_timeout.index("} else {", pending_start)
+            refire_pending_timeout = query_timeout[:terminal_start]
+            terminal_timeout = query_timeout[terminal_start:]
+            with self.subTest(config=config_name, failure_site="pending timeout"):
+                self.assertNotIn(invalidate, refire_pending_timeout)
+            with self.subTest(config=config_name, failure_site="terminal timeout"):
+                self.assertIn(invalidate, terminal_timeout)
 
     def test_no_script_uses_a_literal_data_array(self) -> None:
         # Post-refactor, the only payload construction lives in tx_burst's
@@ -593,16 +726,20 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
     def test_confirmed_zero_duration_always_clears_timer_metadata(self) -> None:
         # Every confirmed report atomically replaces timer metadata. A timer
         # request is never pre-armed, and OFF/continuous always clears it.
-        coord = interval_item_containing(self.text, "id(cl_report_ready)")
-        reconcile_start = coord.index("uint32_t actual_timer_hours")
-        authority_guard = coord.index("if (report_authoritative) {", reconcile_start)
-        timer_known = coord.index("id(timer_state_known) = true;", authority_guard)
-        clear_index = coord.index("id(timer_active) = false;", timer_known)
-        reconcile = coord[reconcile_start:clear_index]
-        self.assertIn("if (actual_timer_hours > 0)", reconcile)
-        self.assertIn("} else {", reconcile)
-        self.assertNotIn("if (!state_matches)", reconcile)
-        self.assertTrue(authority_guard < timer_known < clear_index)
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            coord = interval_item_containing(text, "id(cl_report_ready)")
+            reconcile_start = coord.index("uint32_t actual_timer_hours")
+            timer_known = coord.index(
+                "id(timer_state_known) = timer_authoritative;", reconcile_start
+            )
+            authority_guard = coord.index("if (timer_authoritative) {", timer_known)
+            clear_index = coord.index("id(timer_active) = false;", authority_guard)
+            reconcile = coord[reconcile_start:clear_index]
+            with self.subTest(config=config_name):
+                self.assertIn("if (actual_timer_hours > 0)", reconcile)
+                self.assertIn("} else {", reconcile)
+                self.assertNotIn("if (!state_matches)", reconcile)
+                self.assertTrue(timer_known < authority_guard < clear_index)
 
     def test_mismatch_yield_policy_never_yields_off(self) -> None:
         coord = interval_item_containing(self.text, "id(cl_report_ready)")
@@ -672,22 +809,28 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     self.assertIn(required, fresh)
 
     def test_ambiguous_oem_yield_never_promotes_physical_or_timer_authority(self) -> None:
-        coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
-        ambiguity = coordinator.index("bool report_ambiguous_for_authority")
-        fan_authority = coordinator.index(
-            "id(fan_state_known) = state_authoritative;", ambiguity
-        )
-        timer_guard = coordinator.index("if (state_authoritative) {", fan_authority)
-        yield_branch = coordinator.index("if (should_yield) {", timer_guard)
-        self.assertTrue(ambiguity < fan_authority < timer_guard < yield_branch)
-        self.assertIn(
-            "bool report_authoritative = !report_ambiguous_for_authority;",
-            coordinator,
-        )
-        untrusted = coordinator[fan_authority:timer_guard]
-        self.assertIn("id(timer_state_known) = false;", untrusted)
-        self.assertIn("id(fan_state_known_sensor).publish_state(false);", untrusted)
-        self.assertIn("id(timer_state_known_sensor).publish_state(false);", untrusted)
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            coordinator = interval_item_containing(text, "id(cl_report_ready)")
+            ambiguity = coordinator.index("bool report_ambiguous_for_authority")
+            fan_authority = coordinator.index(
+                "id(fan_state_known) = state_authoritative;", ambiguity
+            )
+            timer_authority = coordinator.index(
+                "id(timer_state_known) = timer_authoritative;", fan_authority
+            )
+            timer_guard = coordinator.index("if (timer_authoritative) {", timer_authority)
+            yield_branch = coordinator.index("if (should_yield) {", timer_guard)
+            untrusted = coordinator[fan_authority:yield_branch]
+            with self.subTest(config=config_name):
+                self.assertTrue(
+                    ambiguity < fan_authority < timer_authority < timer_guard < yield_branch
+                )
+                self.assertIn(
+                    "bool report_authoritative = !report_ambiguous_for_authority;",
+                    coordinator,
+                )
+                self.assertIn("id(fan_state_known_sensor).publish_state(false);", untrusted)
+                self.assertIn("id(timer_state_known_sensor).publish_state(false);", untrusted)
 
     def test_pending_energizing_retry_cannot_publish_confirmed_off(self) -> None:
         # A non-command-shaped OFF report can be valid fan state, but while an
@@ -1348,46 +1491,58 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertNotIn("id(quietcool_fan).state = true;", timer)
 
     def test_closed_loop_is_bounded_and_layered_on_spaced_refire(self) -> None:
-        substitutions = top_level_block(self.text, "substitutions")
-        self.assertIn('command_refire_count: "3"', substitutions)
-        self.assertIn('off_refire_count: "5"', substitutions)
-        self.assertIn('command_refire_interval_ms: "1000"', substitutions)
-        self.assertIn("closed_loop_query_delay_ms", substitutions)
-        self.assertIn("closed_loop_response_window_ms", substitutions)
-        self.assertIn("closed_loop_response_min_ms", substitutions)
-
-        tx_burst = script_blocks(self.text)["tx_burst"]
-        self.assertIn("cmd != 0x66", tx_burst)
-        self.assertIn("cmd == id(cl_desired_cmd)", tx_burst)
-        self.assertIn("id(cl_command_attempts) = id(cl_command_attempts) + 1;", tx_burst)
-        self.assertIn("id(cl_query_due) = true;", tx_burst)
-        self.assertIn("id(cl_command_attempts) >= id(cl_attempt_limit)", tx_burst)
-        self.assertIn("id(refire_left) = 0;", tx_burst)
-        self.assertIn("id(refire_next_ms) = millis() + ${command_refire_interval_ms};", tx_burst)
-
-        query_interval = interval_item_containing(self.text, "id(cl_report_ready)")
-        self.assertIn("interval: 100ms", query_interval)
-        self.assertIn("id(cl_query_window) = true;", query_interval)
-        self.assertIn("id: tx_burst", query_interval)
-        self.assertRegex(query_interval, r"(?m)^\s+cmd: 0x66\s*$")
-        self.assertIn("id(cl_query_count) = id(cl_query_count) + 1;", query_interval)
-        self.assertIn("id(cl_active) = false;", query_interval)
-        self.assertIn("id(refire_left) = 0;", query_interval)
-
-        refire_interval = interval_item_containing(self.text, 'ESP_LOGD("REFIRE"')
-        self.assertIn("interval: 250ms", refire_interval)
-        self.assertIn("id: tx_burst", refire_interval)
-        self.assertIn("id(refire_left) = id(refire_left) - 1;", refire_interval)
-        self.assertIn("id(cl_command_attempts) < id(cl_attempt_limit)", refire_interval)
-        self.assertIn("!id(cl_query_window)", refire_interval)
-        # A classification-tail quarantine may delay the next query, but it
-        # must not suppress the pre-existing one-second spaced re-fire while
-        # that query is merely pending.
-        refire_condition = refire_interval[
-            refire_interval.index("return id(refire_left)") :
-            refire_interval.index("then:", refire_interval.index("return id(refire_left)"))
-        ]
-        self.assertNotIn("!id(cl_query_due)", refire_condition)
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            substitutions = top_level_block(text, "substitutions")
+            tx_burst = script_blocks(text)["tx_burst"]
+            query_interval = interval_item_containing(text, "id(cl_report_ready)")
+            refire_interval = interval_item_containing(text, 'ESP_LOGD("REFIRE"')
+            refire_condition = refire_interval[
+                refire_interval.index("return id(refire_left)") :
+                refire_interval.index(
+                    "then:", refire_interval.index("return id(refire_left)")
+                )
+            ]
+            with self.subTest(config=config_name):
+                self.assertIn('command_refire_count: "3"', substitutions)
+                self.assertIn('off_refire_count: "5"', substitutions)
+                self.assertIn('command_refire_interval_ms: "1000"', substitutions)
+                self.assertIn('closed_loop_query_delay_ms: "1500"', substitutions)
+                self.assertIn("closed_loop_response_window_ms", substitutions)
+                self.assertIn("closed_loop_response_min_ms", substitutions)
+                self.assertIn("cmd != 0x66", tx_burst)
+                self.assertIn("cmd == id(cl_desired_cmd)", tx_burst)
+                self.assertIn(
+                    "id(cl_command_attempts) = id(cl_command_attempts) + 1;",
+                    tx_burst,
+                )
+                self.assertIn("id(cl_query_due) = true;", tx_burst)
+                self.assertIn("id(cl_command_attempts) >= id(cl_attempt_limit)", tx_burst)
+                self.assertIn("id(refire_left) = 0;", tx_burst)
+                self.assertIn(
+                    "id(refire_next_ms) = millis() + ${command_refire_interval_ms};",
+                    tx_burst,
+                )
+                self.assertIn("interval: 100ms", query_interval)
+                self.assertIn("id(cl_query_window) = true;", query_interval)
+                self.assertIn("id: tx_burst", query_interval)
+                self.assertRegex(query_interval, r"(?m)^\s+cmd: 0x66\s*$")
+                self.assertIn(
+                    "id(cl_query_count) = id(cl_query_count) + 1;", query_interval
+                )
+                self.assertIn("id(cl_active) = false;", query_interval)
+                self.assertIn("id(refire_left) = 0;", query_interval)
+                self.assertIn("interval: 250ms", refire_interval)
+                self.assertIn("id: tx_burst", refire_interval)
+                self.assertIn(
+                    "id(refire_left) = id(refire_left) - 1;", refire_interval
+                )
+                self.assertIn(
+                    "id(cl_command_attempts) < id(cl_attempt_limit)", refire_interval
+                )
+                self.assertIn("!id(cl_query_window)", refire_interval)
+                # The 1.5 s query must get on air before the one-second
+                # re-fire can reset its deadline; timeout/mismatch releases it.
+                self.assertIn("!id(cl_query_due)", refire_condition)
 
     def test_all_active_off_variants_join_but_other_or_terminal_requests_do_not(self) -> None:
         # Structural, not model-based: the YAML lambda itself is the source
@@ -1448,8 +1603,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_next_query_window_starts_after_previous_tail_quarantine(self) -> None:
         # Response trains have been observed through +1.65 s. A later command
-        # can be sent on the original one-second cadence, but its accepted
-        # response window must not open until the previous 2.5 s tail ended.
+        # may be sent after a mismatch/timeout, but its accepted response
+        # window must not open until the previous 2.5 s tail ended.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             tx = script_blocks(text)["tx_burst"]
             completion = tx[tx.index("id(cl_command_attempts) =") :]
@@ -1467,7 +1622,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     refire.index("return id(refire_left)") :
                     refire.index("then:", refire.index("return id(refire_left)"))
                 ]
-                self.assertNotIn("!id(cl_query_due)", condition)
+                self.assertIn("!id(cl_query_due)", condition)
                 self.assertIn("!id(cl_query_window)", condition)
 
     def test_manual_refresh_uses_consensus_and_tail_is_classification_only(self) -> None:
@@ -1619,30 +1774,39 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         )
 
     def test_confirmation_diagnostics_and_capability_are_published(self) -> None:
-        for name, sensor_id in (
-            ("Last Confirmed Fan State", "confirmed_fan_state_sensor"),
-            ("Command Confirmation Status", "command_confirmation_status_sensor"),
-            ("Fan Speed Capability", "fan_capability_sensor"),
-        ):
-            with self.subTest(name=name):
-                item = list_item_containing(self.text, "text_sensor", f'name: "{name}"')
-                self.assertIn(f"id: {sensor_id}", item)
-                self.assertIn("update_interval: never", item)
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            with self.subTest(config=config_name):
+                for name, sensor_id in (
+                    ("Last Confirmed Fan State", "confirmed_fan_state_sensor"),
+                    ("Command Confirmation Status", "command_confirmation_status_sensor"),
+                    ("Fan Speed Capability", "fan_capability_sensor"),
+                ):
+                    item = list_item_containing(
+                        text, "text_sensor", f'name: "{name}"'
+                    )
+                    self.assertIn(f"id: {sensor_id}", item)
+                    self.assertIn("update_interval: never", item)
 
-        query_interval = interval_item_containing(self.text, "id(cl_report_ready)")
-        self.assertIn("id(confirmed_fan_state_sensor).publish_state", query_interval)
-        self.assertIn("id(command_confirmation_status_sensor).publish_state", query_interval)
-        self.assertIn("id(fan_capability_sensor).publish_state", query_interval)
-        # "Last Confirmed" must use the same strict authority boundary as the
-        # safety fan entity. A manual response carrying an unknown-age active
-        # timer is correlated RF, but not confirmed current state.
-        confirmed_publish = query_interval.index(
-            "id(confirmed_fan_state_sensor).publish_state"
-        )
-        authority_guard = query_interval.rindex(
-            "if (state_authoritative) {", 0, confirmed_publish
-        )
-        self.assertLess(authority_guard, confirmed_publish)
+                query_interval = interval_item_containing(text, "id(cl_report_ready)")
+                self.assertIn(
+                    "id(confirmed_fan_state_sensor).publish_state", query_interval
+                )
+                self.assertIn(
+                    "id(command_confirmation_status_sensor).publish_state",
+                    query_interval,
+                )
+                self.assertIn(
+                    "id(fan_capability_sensor).publish_state", query_interval
+                )
+                # "Last Confirmed" uses physical-state authority; countdown
+                # authority is independently stricter for active timers.
+                confirmed_publish = query_interval.index(
+                    "id(confirmed_fan_state_sensor).publish_state"
+                )
+                authority_guard = query_interval.rindex(
+                    "if (state_authoritative) {", 0, confirmed_publish
+                )
+                self.assertLess(authority_guard, confirmed_publish)
 
     def test_explicit_state_known_diagnostics_bound_native_fan_boot_guess(self) -> None:
         # ESPHome's native Fan API has no missing-state bit and exposes its raw
@@ -1669,12 +1833,13 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 )
                 publish_index = coordinator.index("id(quietcool_fan).publish_state();")
                 timer_known = coordinator.index(
-                    "id(timer_state_known) = true;", publish_index
+                    "id(timer_state_known) = timer_authoritative;", publish_index
                 )
                 known_sensor = coordinator.index(
-                    "id(fan_state_known_sensor).publish_state(true);", timer_known
+                    "id(fan_state_known_sensor).publish_state(true);", publish_index
                 )
-                self.assertTrue(unknown_sensor < publish_index < timer_known < known_sensor)
+                self.assertTrue(unknown_sensor < publish_index < timer_known)
+                self.assertTrue(publish_index < known_sensor)
 
     def test_homeassistant_display_temperature_aliases_present(self) -> None:
         substitutions = top_level_block(self.text, "substitutions")
@@ -2242,25 +2407,99 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                         self.assertNotIn(optimistic_mutation, block)
 
     def test_timer_countdown_requires_matching_local_command_confirmation(self) -> None:
-        radio = top_level_block(self.text, "sx127x")
-        self.assertNotIn("id(timer_expiry_millis) =", radio)
-        coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
-        for nibble, hours in (("0x1", "1"), ("0x2", "2"), ("0x4", "4"), ("0x8", "8"), ("0xC", "12")):
-            with self.subTest(nibble=nibble):
+        for config_name, text, radio_key in (
+            ("SX1278", self.text, "sx127x"),
+            ("SX1262", self.v3_text, "sx126x"),
+        ):
+            radio = top_level_block(text, radio_key)
+            coordinator = interval_item_containing(text, "id(cl_report_ready)")
+            anchor_start = coordinator.index("bool locally_anchored_timer")
+            anchor = coordinator[anchor_start : coordinator.index(";", anchor_start)]
+            timer_authority_start = coordinator.index("bool timer_authoritative")
+            timer_authority = coordinator[
+                timer_authority_start : coordinator.index(";", timer_authority_start)
+            ]
+            with self.subTest(config=config_name):
+                self.assertNotIn("id(timer_expiry_millis) =", radio)
+                for nibble, hours in (
+                    ("0x1", "1"),
+                    ("0x2", "2"),
+                    ("0x4", "4"),
+                    ("0x8", "8"),
+                    ("0xC", "12"),
+                ):
+                    self.assertIn(
+                        f"if (actual_duration == {nibble}) actual_timer_hours = {hours};",
+                        coordinator.replace("else if", "if"),
+                    )
+                self.assertIn("report_for_transaction", anchor)
+                self.assertIn("state_matches", anchor)
+                self.assertIn("id(cl_last_command_completed_ms) != 0", anchor)
+                self.assertIn("state_authoritative", timer_authority)
                 self.assertIn(
-                    f"if (actual_duration == {nibble}) actual_timer_hours = {hours};",
-                    coordinator.replace("else if", "if"),
+                    "actual_timer_hours == 0 || locally_anchored_timer",
+                    timer_authority,
                 )
-        anchor_start = coordinator.index("bool locally_anchored_timer")
-        anchor = coordinator[anchor_start : coordinator.index(";", anchor_start)]
-        self.assertIn("report_for_transaction", anchor)
-        self.assertIn("state_matches", anchor)
-        self.assertIn("id(cl_last_command_completed_ms) != 0", anchor)
-        self.assertIn("actual_timer_hours == 0 || locally_anchored_timer", coordinator)
-        self.assertIn(
-            "id(cl_last_command_completed_ms) + actual_timer_hours * 3600000UL",
-            coordinator,
-        )
+                self.assertIn(
+                    "id(cl_last_command_completed_ms) + actual_timer_hours * 3600000UL",
+                    coordinator,
+                )
+
+    def test_unanchored_active_timer_promotes_fan_but_not_timer_state(self) -> None:
+        # A correlated active-timer report fully determines running/speed even
+        # when it cannot supply a remaining-time anchor. Fan authority must be
+        # independent; timer authority stays false and clears stale countdown.
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            coordinator = interval_item_containing(text, "id(cl_report_ready)")
+            state_start = coordinator.index("bool state_authoritative")
+            state_authority = coordinator[
+                state_start : coordinator.index(";", state_start)
+            ]
+            timer_start = coordinator.index("bool timer_authoritative", state_start)
+            timer_authority = coordinator[
+                timer_start : coordinator.index(";", timer_start)
+            ]
+            fan_assignment = coordinator.index(
+                "id(fan_state_known) = state_authoritative;", timer_start
+            )
+            fan_publish = coordinator.index(
+                "id(quietcool_fan).publish_state();", fan_assignment
+            )
+            timer_assignment = coordinator.index(
+                "id(timer_state_known) = timer_authoritative;", fan_publish
+            )
+            fan_branch = coordinator[fan_assignment:timer_assignment]
+            timer_guard = coordinator.index(
+                "if (timer_authoritative) {", timer_assignment
+            )
+            timer_reconcile = coordinator[
+                timer_guard : coordinator.index("id(cl_candidate_state)", timer_guard)
+            ]
+            with self.subTest(config=config_name):
+                self.assertIn("report_authoritative", state_authority)
+                self.assertIn("!future_energizing_work", state_authority)
+                self.assertNotIn("locally_anchored_timer", state_authority)
+                self.assertNotIn("actual_timer_hours", state_authority)
+                self.assertIn("state_authoritative", timer_authority)
+                self.assertIn(
+                    "actual_timer_hours == 0 || locally_anchored_timer",
+                    timer_authority,
+                )
+                self.assertTrue(fan_assignment < fan_publish < timer_assignment)
+                # Every active timer has nonzero duration, so this atomic
+                # interlock remains false even when fan state is promoted.
+                self.assertIn(
+                    "id(fan_confirmed_off_sensor).publish_state(actual_duration == 0);",
+                    fan_branch,
+                )
+                self.assertIn("id(timer_active) = false;", timer_reconcile)
+                self.assertIn(
+                    "id(timer_remaining_sensor).publish_state(NAN);", timer_reconcile
+                )
+                self.assertIn(
+                    "id(timer_state_known_sensor).publish_state(false);",
+                    timer_reconcile,
+                )
 
     def test_timer_expiry_interval_never_transmits(self) -> None:
         interval_block = interval_item_containing(self.text, "Estimated timer deadline reached")

@@ -98,16 +98,16 @@ substitutions:
   off_refire_count: "5"               # OFF re-fires more (safety)
   command_refire_interval_ms: "1000"  # spacing, comfortably past the ~0.5 s busy window
 
-  # Firmware's retry tick is ~562.5 ms. Direct-query fan replies arrived
-  # 417-648 ms after query start; a query immediately following a dropped
-  # command produced its first clean report at about 805 ms from actual query
-  # TX start. Wait 200 ms after a command burst, ignore implausibly-early
-  # callbacks, and retain a conservative consensus window through scheduler/
-  # radio jitter. Raw live capture also found a second exact response triple
-  # at about +1.44/+1.54/+1.65 s. Keep a longer classification-only tail so
-  # those repeats cannot masquerade as OEM commands after confirmation; it
-  # does not extend the consensus timeout or delay the 1 s safety re-fire.
-  closed_loop_query_delay_ms: "200"
+  # Direct-query fan replies arrive 417-648 ms after query start. Live command
+  # capture showed that a query only 200 ms after a speed command returns the
+  # pre-command state in that first train; the post-command state first appears
+  # about 2.0 s after the command burst began. Wait 1.5 s so the first response
+  # train samples after actuation. Because this exceeds the nominal 1 s re-fire
+  # spacing, the re-fire driver holds while the post-command query is pending
+  # or listening; a mismatch/timeout releases the still-bounded retry budget.
+  # Keep the longer classification-only tail so late repeats (observed around
+  # +1.44/+1.54/+1.65 s from an early query) cannot masquerade as OEM commands.
+  closed_loop_query_delay_ms: "1500"
   closed_loop_response_min_ms: "300"
   closed_loop_response_window_ms: "1100"
   closed_loop_response_tail_ms: "2500"
@@ -488,6 +488,16 @@ globals:
     type: uint8_t
     restore_value: false
     initial_value: "0x00"
+  - id: cl_prior_confirmed_state
+    type: uint8_t
+    restore_value: false
+    initial_value: "0xFF"
+    # Exact canonical state from the latest authoritative promotion. Our own
+    # command arm/execution retains it as the state that transaction left;
+    # external traffic, explicit authority resets, and consensus failures
+    # poison it. 0xFF cannot be canonical (real states are 0x00..0x3F). This
+    # prevents a stale first response train from impersonating an OEM override,
+    # including timer states whose duration the Fan API loses.
   - id: cl_command_attempts
     type: uint8_t
     restore_value: false
@@ -996,6 +1006,9 @@ sx126x:
         // cannot be its own query. It is an OEM remote taking physical
         // control; cancel pending automatic work before that remote's command.
         if (exact_frame && cmd == 0x66 && sender_id == id(learned_sender_id)) {
+          // External OEM traffic invalidates the prior physical belief too;
+          // it must not suppress a later genuine OEM-yield decision.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(fan_state_known_sensor).publish_state(false);
@@ -1086,6 +1099,13 @@ sx126x:
           // reach remote_command_ok and cancel/overwrite the transaction.
           if (!correlated_response || id(cl_report_ready)) {
             uint8_t passive_state = duration_nibble == 0 ? 0 : canonical_state;
+            // Keep prior-belief invalidation separate from the deliberately
+            // unchanged contradictory-tail handler below. A contradiction is
+            // external/failure authority loss, so the old belief cannot carry.
+            if (id(cl_query_response_complete) &&
+                passive_state != id(cl_report_state)) {
+              id(cl_prior_confirmed_state) = 0xFF;
+            }
             if (id(cl_query_response_complete) &&
                 passive_state != id(cl_report_state)) {
               // A contradictory exact/recoverable frame in the classification
@@ -1260,6 +1280,7 @@ sx126x:
           // A heard OEM command is authorized external control, but not proof
           // that the fan received it. Invalidate before any TX-in-flight early
           // return; a later locally correlated response may promote it again.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(fan_state_known_sensor).publish_state(false);
@@ -1291,6 +1312,7 @@ sx126x:
         // Any other strictly validated passive state observation is still
         // evidence that our last confirmation may be stale. Fail authority
         // closed without mutating the safety fan entity or transmitting.
+        id(cl_prior_confirmed_state) = 0xFF;
         id(fan_state_known) = false;
         id(timer_state_known) = false;
         id(timer_active) = false;
@@ -1419,6 +1441,9 @@ script:
                 // every automatic re-fire can change the fan just as the
                 // initial user burst can. Queries are observation-only.
                 if (cmd != 0x66) {
+                  // Self-command execution preserves cl_prior_confirmed_state:
+                  // it still identifies the physical state this transaction
+                  // left and filters the fan's delayed pre-command echo.
                   id(fan_state_known) = false;
                   id(timer_state_known) = false;
                   id(fan_state_known_sensor).publish_state(false);
@@ -1468,7 +1493,10 @@ script:
                   if (!id(cl_query_epoch_confirmation)) {
                     // A manual Refresh requests fresh authority. Preserve the
                     // last-confirmed text for diagnosis, but mark control state
-                    // unknown until this query reaches response consensus.
+                    // unknown until this query reaches response consensus. An
+                    // explicit revalidation cannot lend its stale prior belief
+                    // to a command started while the query remains unresolved.
+                    id(cl_prior_confirmed_state) = 0xFF;
                     id(fan_state_known) = false;
                     id(timer_state_known) = false;
                     id(timer_active) = false;
@@ -1518,8 +1546,8 @@ script:
                     // 2.5 s classification tail. Do not let those old frames
                     // enter the NEXT query's accepted window: schedule its TX
                     // so the 300 ms minimum turnaround ends no earlier than
-                    // the prior tail. Spaced command re-fires remain eligible
-                    // while this query is merely pending.
+                    // the prior tail. A command re-fire waits until the query
+                    // reaches consensus or times out, then remains eligible.
                     uint32_t prior_tail_safe_query_start =
                         id(cl_query_started_ms) +
                         ${closed_loop_response_tail_ms} -
@@ -1529,8 +1557,9 @@ script:
                     }
                   }
                   id(cl_query_due_ms) = next_query_due;
-                  // Preserve the original one-second safety spacing, measured
-                  // from the actual end of this serialized burst.
+                  // Preserve at least the original one-second safety spacing,
+                  // measured from the end of this serialized burst. The query
+                  // pending/window guards may hold the re-fire longer.
                   if (id(refire_left) > 0 && cmd == id(refire_cmd)) {
                     id(refire_next_ms) = millis() + ${command_refire_interval_ms};
                   }
@@ -1587,6 +1616,10 @@ script:
                 // prior state/timer knowledge is no longer authoritative:
                 // this command may change both.
                 if (id(learned_sender_id) == 0) return;
+                // Self-command invalidation preserves the prior canonical
+                // belief even when a preceding transaction already marked
+                // fan_state_known false. Rapid genuinely different commands
+                // still need the last physical belief to filter stale echoes.
                 id(fan_state_known) = false;
                 id(timer_state_known) = false;
                 id(fan_state_known_sensor).publish_state(false);
@@ -1633,6 +1666,9 @@ script:
           // learn window. Deliberately does NOT touch learn_auto_armed_at -
           // manual windows are bounded and never re-arm themselves.
           id(tx_burst).stop();
+          // Re-pairing is an explicit authority reset, not self-command
+          // arming; discard any belief tied to the old remote identity.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(fan_state_known_sensor).publish_state(false);
@@ -1763,6 +1799,9 @@ interval:
           if (id(cl_query_epoch) && !id(cl_query_epoch_confirmation) &&
               !id(cl_query_response_complete) &&
               (millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}) {
+            // Manual consensus timeout leaves no current physical authority;
+            // do not carry the earlier belief into a later command.
+            id(cl_prior_confirmed_state) = 0xFF;
             id(cl_query_response_complete) = true;
             id(command_confirmation_status_sensor).publish_state(
                 "manual refresh FAILED: no response consensus");
@@ -1802,13 +1841,15 @@ interval:
             // commands share the same six-byte form. Any command-shaped
             // MISMATCH during a command query is unsafe as physical proof.
             // Yield is a separate policy: ON requests yield only to a
-            // conflicting running command, while OFF always keeps retrying.
+            // conflicting running command that differs from the state this
+            // transaction just left, while OFF always keeps retrying.
             bool report_ambiguous_for_authority =
                 report_for_transaction && !state_matches &&
                 report_could_be_command;
             bool should_yield =
                 report_ambiguous_for_authority &&
-                !desired_is_off && actual_duration != 0;
+                !desired_is_off && actual_duration != 0 &&
+                actual != id(cl_prior_confirmed_state);
             bool report_authoritative = !report_ambiguous_for_authority;
             // Even an otherwise valid OFF observation is unsafe to promote
             // while this transaction still intends to send an energizing
@@ -1830,11 +1871,13 @@ interval:
                 desired_duration == actual_duration &&
                 id(cl_last_command_completed_ms) != 0;
             // A query reports the programmed whole-hour duration, never the
-            // remaining time. An active timer is safe to expose as current
-            // state only when it matches our just-completed local command.
+            // remaining time. That limits countdown authority, not the fan
+            // speed/running state that the same response fully determines.
             bool state_authoritative =
                 report_authoritative &&
-                !future_energizing_work &&
+                !future_energizing_work;
+            bool timer_authoritative =
+                state_authoritative &&
                 (actual_timer_hours == 0 || locally_anchored_timer);
 
             const char *speed_name = "UNKNOWN";
@@ -1866,14 +1909,16 @@ interval:
             }
 
             // Publish only authoritative physical state, never a passive or
-            // direction-ambiguous observation. This is deliberately stricter
-            // than the RF diagnostics and prevents HA from treating an OEM
-            // command or unknown-age timer report as fan actuation.
+            // direction-ambiguous observation. An unknown-age active timer is
+            // still authoritative for speed/running; only its countdown stays
+            // unknown.
             id(fan_state_known) = state_authoritative;
             if (!state_authoritative) {
-              id(timer_state_known) = false;
+              // A prior-matching ambiguous response during an active retry is
+              // the stale-echo case itself, so this non-promotion deliberately
+              // retains cl_prior_confirmed_state. Terminal failure/OEM-yield
+              // paths below poison it once that distinction is no longer safe.
               id(fan_state_known_sensor).publish_state(false);
-              id(timer_state_known_sensor).publish_state(false);
               id(fan_confirmed_off_sensor).publish_state(false);
             } else {
               // Raw field mutation bypasses FanCall/control(), and the
@@ -1885,16 +1930,20 @@ interval:
               if (actual_speed != 0) id(quietcool_fan).speed = actual_speed;
               id(quietcool_fan).state = actual_duration != 0;
               id(quietcool_fan).publish_state();
+              id(cl_prior_confirmed_state) = actual;
+              // Every active timer has nonzero duration, so this atomic
+              // interlock remains false for an unknown-age running timer.
               id(fan_confirmed_off_sensor).publish_state(actual_duration == 0);
+              id(fan_state_known_sensor).publish_state(true);
             }
 
-            // Reconcile timer metadata only from this confirmed state. Local
-            // timer requests deliberately do not start a countdown at button
-            // time: a failed request must never manufacture a later OFF.
-            // The response reports programmed whole hours, not remaining
-            // time, so the local mirror is anchored at confirmation.
-            if (state_authoritative) {
-              id(timer_state_known) = true;
+            // Reconcile timer metadata only with separate timer authority.
+            // Local timer requests deliberately do not start a countdown at
+            // button time: a failed request must never manufacture a later
+            // OFF. Active timers require the local command-completion anchor;
+            // OFF/continuous reports need no countdown anchor.
+            id(timer_state_known) = timer_authoritative;
+            if (timer_authoritative) {
               if (actual_timer_hours > 0) {
                 id(timer_active) = true;
                 id(timer_armed_hours) = (uint8_t) actual_timer_hours;
@@ -1908,15 +1957,13 @@ interval:
                 id(timer_active) = false;
                 id(timer_remaining_sensor).publish_state(0);
               }
+              id(timer_state_known_sensor).publish_state(true);
             } else {
               // Never retain an older countdown after an unknown-age or
               // ambiguous report; it could later manufacture a false expiry.
               id(timer_active) = false;
-            }
-            if (state_authoritative) {
-              // Promote authority only after fan and timer data are coherent.
-              id(fan_state_known_sensor).publish_state(true);
-              id(timer_state_known_sensor).publish_state(true);
+              id(timer_remaining_sensor).publish_state(NAN);
+              id(timer_state_known_sensor).publish_state(false);
             }
 
             id(cl_candidate_state) = 0xFF;
@@ -1928,11 +1975,14 @@ interval:
 
             char status[160];
             if (!report_for_transaction) {
-              if (state_authoritative) {
+              if (state_authoritative && timer_authoritative) {
                 snprintf(status, sizeof(status), "refreshed %s from response consensus", confirmed);
+              } else if (state_authoritative) {
+                snprintf(status, sizeof(status),
+                         "refreshed %s; timer remaining unknown", confirmed);
               } else {
                 snprintf(status, sizeof(status),
-                         "observed %s; timer remaining unknown (state not promoted)", confirmed);
+                         "observed %s (state not promoted)", confirmed);
               }
               ESP_LOGW("CLOSED_LOOP", "%s", status);
             } else if (state_matches) {
@@ -1964,8 +2014,14 @@ interval:
               // transaction is overwhelmingly a dropped command, not a
               // user press, and must keep its re-fires (live 2026-07-19:
               // a post-boot LOW wrongly yielded to the fan's own
-              // still-off 90 reply).
+              // still-off 90 reply). Likewise, a running report identical
+              // to the transaction's prior authoritative state is the stale
+              // echo observed on every speed-to-speed command, not sufficient
+              // evidence of an OEM override.
               if (should_yield) {
+                // Suspected OEM control owns this authority loss; a future
+                // transaction must not treat our older belief as current.
+                id(cl_prior_confirmed_state) = 0xFF;
                 id(refire_left) = 0;
                 id(cl_active) = false;
                 id(cl_query_due) = false;
@@ -1995,6 +2051,9 @@ interval:
                 ESP_LOGW("CLOSED_LOOP", "%s", status);
               }
             } else {
+              // Bounded-attempt failure is a terminal consensus failure;
+              // discard the belief before any later transaction can arm.
+              id(cl_prior_confirmed_state) = 0xFF;
               id(cl_active) = false;
               id(cl_query_due) = false;
               id(cl_query_window) = false;
@@ -2009,6 +2068,10 @@ interval:
           // command's final query, the transaction terminates explicitly.
           if (id(cl_active) && id(cl_query_window) &&
               (millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}) {
+            // A no-response timeout is absence of evidence: preserve the last
+            // confirmed physical belief while a bounded re-fire remains, so a
+            // later prior-matching response still identifies a dropped command.
+            // The terminal FAILED branch below invalidates after exhaustion.
             id(cl_query_window) = false;
             if (id(refire_left) > 0) {
               char status[128];
@@ -2016,6 +2079,7 @@ interval:
                        id(refire_left));
               id(command_confirmation_status_sensor).publish_state(status);
             } else {
+              id(cl_prior_confirmed_state) = 0xFF;
               id(cl_active) = false;
               char status[128];
               snprintf(status, sizeof(status), "FAILED: no consensus after %u command(s), %u query(s)",
@@ -2059,8 +2123,10 @@ interval:
   # backstop for the fan's post-command dead-time: at least one of the spaced
   # re-sends lands while the fan is listening. tx_burst still refuses when
   # unprovisioned, and a heard OEM-remote command zeroes refire_left (in
-  # on_packet) so this can never fight a physical press. Rollover-safe signed
-  # compare, exactly like the timer arithmetic.
+  # on_packet) so this can never fight a physical press. A pending or open
+  # post-command query takes precedence; mismatch/timeout clears those guards
+  # and releases the retry. Rollover-safe signed compare, exactly like the
+  # timer arithmetic.
   - interval: 250ms
     then:
       - if:
@@ -2072,7 +2138,8 @@ interval:
                      (!id(cl_active) ||
                       id(cl_command_attempts) < id(cl_attempt_limit)) &&
                      (!id(cl_active) ||
-                      (!id(cl_query_window) && !id(cl_report_ready))) &&
+                      (!id(cl_query_due) && !id(cl_query_window) &&
+                       !id(cl_report_ready))) &&
                      (!id(oem_query_seen) ||
                       (millis() - id(oem_query_seen_ms)) >= 2000UL) &&
                      (int32_t)(millis() - id(refire_next_ms)) >= 0;
@@ -2144,6 +2211,9 @@ interval:
           }
           ESP_LOGW("TIMER", "Estimated timer deadline reached; state unknown until Refresh (no TX)");
           id(timer_active) = false;
+          // Estimated expiry is a timeout, not physical confirmation; discard
+          // the old belief before any subsequent transaction.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(fan_state_known_sensor).publish_state(false);
@@ -2261,8 +2331,9 @@ fan:
 #   - The 1 s sync interval below mirrors authoritative device-local timer
 #     state INTO the select with publish_state(), which never fires set_action.
 #     Only a matching locally initiated timer has a defensible countdown;
-#     unknown-age OEM timer reports and estimated expiry remain unknown until
-#     Refresh. Query-confirmed continuous/off appears as None without TX.
+#     unknown-age OEM timer reports keep timer state unknown while still
+#     promoting known fan speed/running. Query-confirmed continuous/off
+#     appears as None without TX.
 # =============================================================================
 select:
   - platform: template
@@ -2312,6 +2383,9 @@ button:
       - lambda: |-
           // Fail closed at enqueue time too: QueueingScript can reject an
           // over-capacity query before tx_burst's execution guard runs.
+          // Explicit revalidation discards the prior belief immediately, even
+          // if the query cannot be enqueued.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(timer_active) = false;
@@ -2335,6 +2409,8 @@ button:
     entity_category: diagnostic
     on_press:
       - lambda: |-
+          // A diagnostic revalidation also abandons stale physical authority.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(timer_active) = false;
@@ -2367,6 +2443,9 @@ button:
     on_press:
       - lambda: |-
           id(tx_burst).stop();
+          // Forgetting the remote is a complete authority reset; no belief
+          // from the old identity may survive it.
+          id(cl_prior_confirmed_state) = 0xFF;
           id(fan_state_known) = false;
           id(timer_state_known) = false;
           id(fan_state_known_sensor).publish_state(false);
