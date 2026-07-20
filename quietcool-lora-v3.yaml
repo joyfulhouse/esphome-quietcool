@@ -6,22 +6,21 @@
 # port report for what still needs bench confirmation.
 #
 # STRUCTURE: this is a deliberate standalone file, NOT a `packages:`
-# include of quietcool-lora32.yaml (contrast a second-device wrapper of the
-# SX1278 config, which CAN be a package include because it targets the
-# byte-identical TTGO LoRa32 V2.1/SX1278 hardware). quietcool-lora32.
-# yaml mixes radio-agnostic logic (fan entity, learn mode, timer mirror,
-# diagnostics, display) with board-specific config (esp32: board, spi:
-# pins, the sx127x: radio block, i2c: pins) in one 1680-line file with no
-# existing seam to `!include` around. That file is the live source of truth
-# for two physically-flashed, physically-installed whole-house-fan
-# controllers; retrofitting it into a shared radio-agnostic base + two
-# per-radio leaves right now would require restructuring code those two
-# units depend on, with no way to test the restructuring against a third
-# piece of hardware that doesn't exist yet. So: every radio-agnostic
-# section below (globals, fan entity, buttons, PRG button,
-# scripts, timer interval, display, sensors) is copied verbatim from
-# quietcool-lora32.yaml, and only the radio- and board-touching
-# sections differ. The SX1278 config is untouched by this file's existence.
+# include of quietcool-lora32.yaml. (A second SX1278 unit COULD be a thin
+# package wrapper, since it would target byte-identical hardware; no such
+# wrapper exists in this repository today.) The honest reason for the
+# duplication is narrow: a shared radio-agnostic core is structurally
+# feasible - the only seam buried inside shared logic is the
+# `sx127x.send_packet` vs `sx126x.send_packet` action inside tx_burst,
+# which a one-line per-board `radio_transmit` wrapper script would close -
+# but extracting it cannot be bench-verified until this V3 board is in
+# hand and flashed, and the SX1278 file is the live source of truth for
+# physically-installed whole-house-fan controllers. Until a V3 unit can
+# validate the extraction, every radio-agnostic section below (globals,
+# fan entity, buttons, PRG button, scripts, timer interval, display,
+# sensors) is copied verbatim from quietcool-lora32.yaml, and only the
+# radio- and board-touching sections differ. The SX1278 config is
+# untouched by this file's existence.
 #
 # RADIO DIFFERENCE: the SX1262 is a different Semtech packet engine from
 # the SX1278 (separate ESPHome `sx126x` component, not `sx127x`), but
@@ -293,8 +292,8 @@ switch:
 # =============================================================================
 # Global state - identical to quietcool-lora32.yaml. Every field here
 # is radio- and board-agnostic (learn-mode bookkeeping, TX/RX dedup state,
-# the RF echo guard, the device-local timer mirror, cosmetic display-only
-# animation/hysteresis state).
+# closed-loop transaction state, the device-local timer mirror, cosmetic
+# display-only animation/hysteresis state).
 # =============================================================================
 globals:
   - id: learned_sender_id
@@ -406,11 +405,11 @@ globals:
     type: uint8_t
     restore_value: false
     initial_value: "0x90"
-    # The speed-matched OFF variant for the current transaction (90/A0/B0,
-    # like the OEM remote's remembered speed). Computed by send_off from
-    # the entity's speed and re-aimed by the closed-loop coordinator when
-    # a mismatch reply reveals the fan's true speed. Never 0x80: the
-    # neutral form is decoded on RX but never transmitted.
+    # Fresh-request scratch: the speed-matched OFF variant (90/A0/B0, like
+    # the OEM remote's remembered speed) computed by send_off from the
+    # entity's speed on EVERY new request. A closed-loop mismatch re-aims
+    # only the live transaction (cl_desired_cmd/refire_cmd), never this.
+    # Never 0x80: the neutral form is decoded on RX but never transmitted.
 
   - id: timer_active
     type: bool
@@ -797,25 +796,37 @@ sx126x:
     # publishes query-correlated authoritative state by raw field mutation;
     # RX never calls a control path and can never transmit.
     - lambda: |-
-        std::string hex;
-        for (uint8_t b : x) {
-          char buf[4];
-          sprintf(buf, "%02X ", b);
-          hex += buf;
-        }
-        ESP_LOGV("RX", "Raw callback: %d bytes: %s", x.size(), hex.c_str());
-
         // Diagnostic probe window (see query_probe_started): after a
         // "Query Fan State" press, WARN-log every raw frame for 15 s so
         // the fan's 66 66 response can be isolated over OTA logs without
         // an SDR. Log-only - validation below is completely unaffected.
+        // The hex dump is built ONLY inside this window (or in a VERBOSE
+        // build): at the production DEBUG log level ESP_LOGV compiles out,
+        // and unconditionally formatting every noise callback was pure
+        // per-frame heap churn.
         {
           uint32_t probe_now = millis();
           uint32_t probe_started = id(query_probe_started);
-          if (probe_started != 0 && (probe_now - probe_started) < 15000UL) {
-            ESP_LOGW("PROBE", "+%4lu ms len=%2d: %s",
-                     (unsigned long) (probe_now - probe_started),
-                     (int) x.size(), hex.c_str());
+          bool probe_window =
+              probe_started != 0 && (probe_now - probe_started) < 15000UL;
+          #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+          const bool want_hex = true;
+          #else
+          const bool want_hex = probe_window;
+          #endif
+          if (want_hex) {
+            std::string hex;
+            for (uint8_t b : x) {
+              char buf[4];
+              sprintf(buf, "%02X ", b);
+              hex += buf;
+            }
+            ESP_LOGV("RX", "Raw callback: %d bytes: %s", x.size(), hex.c_str());
+            if (probe_window) {
+              ESP_LOGW("PROBE", "+%4lu ms len=%2d: %s",
+                       (unsigned long) (probe_now - probe_started),
+                       (int) x.size(), hex.c_str());
+            }
           }
         }
 
@@ -1585,6 +1596,36 @@ script:
                 id: tx_burst
                 cmd: !lambda 'return cmd;'
 
+  - id: arm_manual_learn
+    then:
+      - lambda: |-
+          // Shared by the Learn Remote ID button and the PRG very-long
+          // press: tear down all pending RF work, drop state authority (a
+          // re-pair invalidates everything), and open the 120 s manual
+          // learn window. Deliberately does NOT touch learn_auto_armed_at -
+          // manual windows are bounded and never re-arm themselves.
+          id(tx_burst).stop();
+          id(fan_state_known) = false;
+          id(timer_state_known) = false;
+          id(fan_state_known_sensor).publish_state(false);
+          id(timer_state_known_sensor).publish_state(false);
+          id(fan_confirmed_off_sensor).publish_state(false);
+          id(refire_left) = 0;
+          id(cl_active) = false;
+          id(cl_query_due) = false;
+          id(cl_query_window) = false;
+          id(cl_query_epoch) = false;
+          id(cl_query_epoch_confirmation) = false;
+          id(cl_report_ready) = false;
+          id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
+          id(learn_active) = true;
+          id(learn_auto_mode) = false;
+          id(learn_window_started) = millis();
+          id(learn_candidate_id) = 0;
+          id(learn_candidate_first_time) = 0;
+          id(learn_confirm_until) = 0;
+          ESP_LOGW("LEARN", "Manual learn armed for 120 seconds; press the OEM remote twice");
+
   - id: send_off
     then:
       - lambda: |-
@@ -1770,13 +1811,9 @@ interval:
             } else if (actual_duration == 0x0F) {
               snprintf(confirmed, sizeof(confirmed), "%s continuous (raw %02X)", speed_name, raw);
             } else {
-              unsigned int hours = 0;
-              if (actual_duration == 0x1) hours = 1;
-              else if (actual_duration == 0x2) hours = 2;
-              else if (actual_duration == 0x4) hours = 4;
-              else if (actual_duration == 0x8) hours = 8;
-              else if (actual_duration == 0xC) hours = 12;
-              snprintf(confirmed, sizeof(confirmed), "%s timer %uh (raw %02X)", speed_name, hours, raw);
+              // actual_timer_hours (above) already decoded this duration.
+              snprintf(confirmed, sizeof(confirmed), "%s timer %luh (raw %02X)",
+                       speed_name, (unsigned long) actual_timer_hours, raw);
             }
             if (state_authoritative) {
               id(confirmed_fan_state_sensor).publish_state(confirmed);
@@ -1910,7 +1947,6 @@ interval:
                   if (adapted_off != id(cl_desired_cmd)) {
                     id(cl_desired_cmd) = adapted_off;
                     id(refire_cmd) = adapted_off;
-                    id(off_tx_command) = adapted_off;
                     ESP_LOGW("CLOSED_LOOP",
                              "Re-aiming OFF at fan-reported speed: variant 0x%02X", adapted_off);
                   }
@@ -2251,28 +2287,7 @@ button:
     # entity from the device's Configuration section in HA when needed.
     disabled_by_default: true
     on_press:
-      - lambda: |-
-          id(tx_burst).stop();
-          id(fan_state_known) = false;
-          id(timer_state_known) = false;
-          id(fan_state_known_sensor).publish_state(false);
-          id(timer_state_known_sensor).publish_state(false);
-          id(fan_confirmed_off_sensor).publish_state(false);
-          id(refire_left) = 0;
-          id(cl_active) = false;
-          id(cl_query_due) = false;
-          id(cl_query_window) = false;
-          id(cl_query_epoch) = false;
-          id(cl_query_epoch_confirmation) = false;
-          id(cl_report_ready) = false;
-          id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
-          id(learn_active) = true;
-          id(learn_auto_mode) = false;
-          id(learn_window_started) = millis();
-          id(learn_candidate_id) = 0;
-          id(learn_candidate_first_time) = 0;
-          id(learn_confirm_until) = 0;
-          ESP_LOGW("LEARN", "Manual learn armed for 120 seconds; press the OEM remote twice");
+      - script.execute: arm_manual_learn
 
   - platform: template
     name: "Forget Remote ID"
@@ -2385,28 +2400,7 @@ binary_sensor:
           # Very long press: enter the same 120-second manual learn window
           # as the Home Assistant button. The 5000ms boundary does not
           # overlap the 1-4999ms unconditional-Off gesture above.
-          - lambda: |-
-              id(tx_burst).stop();
-              id(fan_state_known) = false;
-              id(timer_state_known) = false;
-              id(fan_state_known_sensor).publish_state(false);
-              id(timer_state_known_sensor).publish_state(false);
-              id(fan_confirmed_off_sensor).publish_state(false);
-              id(refire_left) = 0;
-              id(cl_active) = false;
-              id(cl_query_due) = false;
-              id(cl_query_window) = false;
-              id(cl_query_epoch) = false;
-              id(cl_query_epoch_confirmation) = false;
-              id(cl_report_ready) = false;
-              id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
-              id(learn_active) = true;
-              id(learn_auto_mode) = false;
-              id(learn_window_started) = millis();
-              id(learn_candidate_id) = 0;
-              id(learn_candidate_first_time) = 0;
-              id(learn_confirm_until) = 0;
-              ESP_LOGW("LEARN", "PRG very-long-press: manual learn armed for 120 seconds");
+          - script.execute: arm_manual_learn
 
 # =============================================================================
 # OLED Display - v3.3 (temperature icons + Home Assistant logo glyph)
@@ -2415,11 +2409,12 @@ binary_sensor:
 # pixel-accurate Python mirror of this whole block, used to generate the
 # preview PNGs in docs/display-previews/ - every section below is tagged
 # `KEEP IN SYNC: <NAME>` and the renderer carries the matching tag):
+# ---- KEEP IN SYNC: CANVAS / ZONES ----
 #   LEFT  zone (x   0-54): the real `mdi:fan` glyph (see tools/
 #                          generate_fan_frames.py - NOT a hand-drawn
 #                          triangle-blade icon; v3.1's version of that read
 #                          as illegible "blades" per operator review),
-#                          pre-rendered into six rotation frames and
+#                          pre-rendered into twelve rotation frames and
 #                          flipped between them (rotation speed proportional
 #                          to fan speed; a distinct static `fan-off` glyph
 #                          when off), with the state word (OFF/LOW/MED/HIGH)

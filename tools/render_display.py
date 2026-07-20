@@ -77,18 +77,18 @@ FAN_FRAME_STEP = {0: 0, 1: 1, 2: 2, 3: 3}  # speed idx -> frame-index step/refre
 
 # ---- KEEP IN SYNC: STATE_WORD ----
 LEFT_ZONE_CENTER_X = 27
-# y=32, moved up with the countdown's 43->41 shift so the two rows keep
-# their spacing (countdown ink was clipping the bottom status-icon row).
-STATE_WORD_POS = (LEFT_ZONE_CENTER_X, 32)  # TOP_CENTER
+# y=29/40 (originally 34/43): raised twice per on-hardware review - the
+# countdown's digit ink clipped the bottom status-icon row, and the state
+# word then needed 2px more air above the countdown.
+STATE_WORD_POS = (LEFT_ZONE_CENTER_X, 29)  # TOP_CENTER
 STATE_WORD_FONT_SIZE = 11
 SPEED_NAMES = ("OFF", "LOW", "MED", "HIGH")
 
 # ---- KEEP IN SYNC: COUNTDOWN ----
 # HH:MM:SS while a timer is active; blank while continuous-on (running,
 # no timer) or off - no infinity glyph (removed: illegible "OO" at 18px).
-# y=41, not the 43 the learn prompts use: the countdown font's taller digit
-# ink was clipping into the bottom status-icon row at 43 on real hardware.
-COUNTDOWN_POS = (LEFT_ZONE_CENTER_X, 41)  # TOP_CENTER
+# y=40, not the 43 the learn prompts use; see the state-word note above.
+COUNTDOWN_POS = (LEFT_ZONE_CENTER_X, 40)  # TOP_CENTER
 COUNTDOWN_FONT_SIZE = 11
 
 # ---- KEEP IN SYNC: LEARN_STATE ----
@@ -346,9 +346,10 @@ def render_frame(state: DisplayState) -> Canvas:
         c.register("learn_prompt", "LEFT", bbox)
     elif state.learn_confirm:
         font_learn = _font(ROBOTO_TTF, LEARN_FONT_SIZE)
+        font_learn_prompt = _font(ROBOTO_TTF, LEARN_PROMPT_FONT_SIZE)
         bbox = c.text_topcenter(*LEARN_TITLE_POS, font_learn, "LEARNED")
         c.register("learn_confirmation", "LEFT", bbox)
-        bbox = c.text_topcenter(*LEARN_PROMPT_POS, font_learn, "ID SAVED")
+        bbox = c.text_topcenter(*LEARN_PROMPT_POS, font_learn_prompt, "ID SAVED")
         c.register("learn_confirmation_detail", "LEFT", bbox)
     else:
         # ---- KEEP IN SYNC: STATE_WORD ----

@@ -66,23 +66,26 @@ def packet_bytes(script: str) -> list[int]:
     return payload
 
 
-def list_item_containing(text: str, section_name: str, marker: str) -> str:
+def _section_item_containing(
+    text: str, section_name: str, item_prefix: str, marker: str
+) -> str:
+    """Return the one `  - <item_prefix>:`-delimited item holding marker."""
     section = top_level_block(text, section_name)
-    for match in re.finditer(r"(?ms)^  - platform:.*?(?=^  - platform:|\Z)", section):
+    pattern = rf"(?ms)^  - {item_prefix}:.*?(?=^  - {item_prefix}:|\Z)"
+    for match in re.finditer(pattern, section):
         item = match.group(0)
         if marker in item:
             return item
     raise ValueError(f"No {section_name} item contains {marker!r}")
 
 
+def list_item_containing(text: str, section_name: str, marker: str) -> str:
+    return _section_item_containing(text, section_name, "platform", marker)
+
+
 def interval_item_containing(text: str, marker: str) -> str:
     """Return one top-level interval item instead of the aggregate block."""
-    section = top_level_block(text, "interval")
-    for match in re.finditer(r"(?ms)^  - interval:.*?(?=^  - interval:|\Z)", section):
-        item = match.group(0)
-        if marker in item:
-            return item
-    raise ValueError(f"No interval item contains {marker!r}")
+    return _section_item_containing(text, "interval", "interval", marker)
 
 
 def oem_state_matches(desired: int, reported: int) -> bool:
@@ -92,11 +95,6 @@ def oem_state_matches(desired: int, reported: int) -> bool:
     if (desired & 0x0F) == 0:
         return (reported_state & 0x0F) == 0
     return desired_state == reported_state
-
-
-def should_join_active_off(active: bool, desired_command: int) -> bool:
-    """Model the semantic duplicate guard: every duration-zero variant is Off."""
-    return active and (desired_command & 0x0F) == 0
 
 
 class QuietCoolESPHomeConfigTest(unittest.TestCase):
@@ -383,7 +381,12 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         coord = interval_item_containing(self.text, "id(cl_report_ready)")
         self.assertIn("desired_is_off && actual_speed >= 1 && actual_speed <= 3", coord)
         self.assertIn("(uint8_t) (0x80 | (actual_speed << 4))", coord)
-        self.assertIn("id(off_tx_command) = adapted_off;", coord)
+        # The re-aim retargets the live transaction (cl_desired_cmd +
+        # refire_cmd); off_tx_command is deliberately untouched because
+        # send_off recomputes it from entity speed on every fresh request.
+        self.assertIn("id(cl_desired_cmd) = adapted_off;", coord)
+        self.assertIn("id(refire_cmd) = adapted_off;", coord)
+        self.assertNotIn("id(off_tx_command) = adapted_off;", coord)
 
     def test_yield_policy_requires_a_running_state_report(self) -> None:
         # A fan that missed our ON command reports its off state (90/A0/B0
@@ -414,8 +417,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         scripts = script_blocks(self.text)
         self.assertEqual(
             set(scripts),
-            {"tx_burst", "begin_transaction", "send_off", "send_low",
-             "send_medium", "send_high", "send_timer"},
+            {"tx_burst", "begin_transaction", "arm_manual_learn", "send_off",
+             "send_low", "send_medium", "send_high", "send_timer"},
         )
 
     def test_timer_script_is_speed_aware(self) -> None:
@@ -441,12 +444,6 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("delay:", timer)
         self.assertNotIn("id(quietcool_fan).state = true;", timer)
         self.assertNotIn("id(quietcool_fan).speed = observed_speed;", timer)
-        self.assertNotIn("id(quietcool_fan).publish_state();", timer)
-
-    def test_timer_command_has_no_delayed_optimistic_publish(self) -> None:
-        scripts = script_blocks(self.text)
-        timer = scripts["send_timer"]
-        self.assertNotIn("delay:", timer)
         self.assertNotIn("id(quietcool_fan).publish_state();", timer)
 
     def test_timer_select_maps_every_duration_and_refuses_unsafe_none(self) -> None:
@@ -960,7 +957,8 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("learn_auto_armed_at", very_long)
 
     def test_forget_survives_reboot_via_seed_suppressed_flag(self) -> None:
-        # FIX 2: this unit compiles with a nonzero seed
+        # FIX 2: a unit MAY compile with a nonzero seed (the public
+        # template ships 0x00000000)
         # (quietcool_sender_id), and on_boot previously reseeded that
         # compiled default whenever learned_sender_id read 0 - which is
         # exactly what a fresh Forget leaves behind. Since ESPHome restores
@@ -1008,12 +1006,22 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertGreater(clear_index, accept_index)
 
     def test_manual_learn_and_forget_controls_present(self) -> None:
+        arm = script_blocks(self.text)["arm_manual_learn"]
+        self.assertIn("id(learn_active) = true;", arm)
+        self.assertIn("id(learn_auto_mode) = false;", arm)
+        self.assertIn("id(learn_window_started) = millis();", arm)
+        self.assertIn("id(tx_burst).stop();", arm)
+        self.assertIn("id(cl_query_epoch) = false;", arm)
+        self.assertIn("id(cl_query_epoch_confirmation) = false;", arm)
+        self.assertNotIn("sx127x.send_packet", arm)
+        # A comment may NAME learn_auto_armed_at (to say it's untouched);
+        # the assignment itself must not exist here.
+        self.assertNotIn("id(learn_auto_armed_at) =", arm)
+
         learn_button = list_item_containing(
             self.text, "button", 'name: "Learn Remote ID"'
         )
-        self.assertIn("id(learn_active) = true;", learn_button)
-        self.assertIn("id(learn_auto_mode) = false;", learn_button)
-        self.assertIn("id(learn_window_started) = millis();", learn_button)
+        self.assertIn("script.execute: arm_manual_learn", learn_button)
 
         forget_button = list_item_containing(
             self.text, "button", 'name: "Forget Remote ID"'
@@ -1024,31 +1032,36 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("id(learn_active) = true;", forget_button)
         self.assertIn("id(learn_auto_mode) = true;", forget_button)
         self.assertIn('publish_state("unset")', forget_button)
-
-        for item in (learn_button, forget_button):
-            self.assertIn("id(tx_burst).stop();", item)
-            self.assertIn("id(cl_query_epoch) = false;", item)
-            self.assertIn("id(cl_query_epoch_confirmation) = false;", item)
-            for banned in ("sx127x.send_packet", "script.execute", "fan.turn_on", "fan.turn_off"):
-                with self.subTest(banned=banned):
-                    self.assertNotIn(banned, item)
+        self.assertIn("id(tx_burst).stop();", forget_button)
+        self.assertIn("id(cl_query_epoch) = false;", forget_button)
+        self.assertIn("id(cl_query_epoch_confirmation) = false;", forget_button)
+        for banned in ("sx127x.send_packet", "script.execute", "fan.turn_on", "fan.turn_off"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, forget_button)
 
     def test_entering_learn_mode_invalidates_all_physical_state_knowledge(self) -> None:
+        # Learn button and PRG very-long press share arm_manual_learn (one
+        # teardown site); Forget keeps its own inline teardown because it
+        # also clears the sender and re-arms auto-learn.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             with self.subTest(config=config_name):
-                for button_name in ("Learn Remote ID", "Forget Remote ID"):
-                    item = list_item_containing(text, "button", f'name: "{button_name}"')
-                    self.assertIn("id(fan_state_known) = false;", item)
-                    self.assertIn("id(timer_state_known) = false;", item)
-                    self.assertIn("id(fan_state_known_sensor).publish_state(false);", item)
-                    self.assertIn("id(timer_state_known_sensor).publish_state(false);", item)
-
+                arm = script_blocks(text)["arm_manual_learn"]
+                for token in (
+                    "id(fan_state_known) = false;",
+                    "id(timer_state_known) = false;",
+                    "id(fan_state_known_sensor).publish_state(false);",
+                    "id(timer_state_known_sensor).publish_state(false);",
+                    "id(fan_confirmed_off_sensor).publish_state(false);",
+                ):
+                    self.assertIn(token, arm)
+                learn = list_item_containing(text, "button", 'name: "Learn Remote ID"')
+                self.assertIn("script.execute: arm_manual_learn", learn)
                 prg = list_item_containing(text, "binary_sensor", 'name: "PRG Button"')
                 very_long = prg[prg.index("min_length: 5000ms"):]
-                self.assertIn("id(fan_state_known) = false;", very_long)
-                self.assertIn("id(timer_state_known) = false;", very_long)
-                self.assertIn("id(fan_state_known_sensor).publish_state(false);", very_long)
-                self.assertIn("id(timer_state_known_sensor).publish_state(false);", very_long)
+                self.assertIn("script.execute: arm_manual_learn", very_long)
+                forget = list_item_containing(text, "button", 'name: "Forget Remote ID"')
+                self.assertIn("id(fan_state_known) = false;", forget)
+                self.assertIn("id(timer_state_known) = false;", forget)
 
     def test_prg_very_long_press_enters_manual_learn_without_collision(self) -> None:
         prg = list_item_containing(self.text, "binary_sensor", 'name: "PRG Button"')
@@ -1057,10 +1070,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("min_length: 5000ms", prg)
         self.assertIn("max_length: 10000ms", prg)
         very_long = prg[prg.index("min_length: 5000ms") :]
-        self.assertIn("id(learn_active) = true;", very_long)
-        self.assertIn("id(learn_auto_mode) = false;", very_long)
-        self.assertIn("id(tx_burst).stop();", very_long)
-        self.assertIn("id(cl_query_epoch) = false;", very_long)
+        self.assertIn("script.execute: arm_manual_learn", very_long)
         self.assertNotIn("fan.turn_off", very_long)
 
     def test_remote_sender_id_text_sensor_present(self) -> None:
@@ -1380,13 +1390,17 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertNotIn("!id(cl_query_due)", refire_condition)
 
     def test_all_active_off_variants_join_but_other_or_terminal_requests_do_not(self) -> None:
-        for command in (0x80, 0x90, 0xA0, 0xB0):
-            with self.subTest(command=command):
-                self.assertTrue(should_join_active_off(True, command))
-        self.assertFalse(should_join_active_off(False, 0xB0))
-        for running_command in (0x9F, 0xAF, 0xBF, 0xB1):
-            with self.subTest(running_command=running_command):
-                self.assertFalse(should_join_active_off(True, running_command))
+        # Structural, not model-based: the YAML lambda itself is the source
+        # of truth (a Python re-implementation was removed - it modelled
+        # neither the incoming cmd nor the non-Off same_state branch and
+        # could drift silently). both_off masks ONLY the duration nibble,
+        # so 80/90/A0/B0 all join an active duration-zero transaction and
+        # any running/timed command (nonzero duration) cannot.
+        begin = script_blocks(self.text)["begin_transaction"]
+        self.assertIn("bool both_off = ((cmd & 0x0F) == 0) &&", begin)
+        self.assertIn("((id(cl_desired_cmd) & 0x0F) == 0);", begin)
+        self.assertIn("(id(cl_desired_cmd) & 0x3F) == (cmd & 0x3F);", begin)
+        self.assertIn("return both_off || same_state;", begin)
 
     def test_oem_query_supersedes_closed_loop_without_rx_transmit(self) -> None:
         radio = top_level_block(self.text, "sx127x")
@@ -2117,19 +2131,48 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_display_lambda_never_actuates(self) -> None:
         # Display path is pure rendering: reads globals/sensors and draws,
-        # never reaches a script, a transmit, or a fan control call. This
-        # is the same invariant test_only_tx_burst_transmits enforces for
-        # the RF path, applied to the display block specifically.
+        # never reaches a script, a transmit, or a fan control call - on
+        # EITHER target (banning only sx127x.send_packet here would be
+        # blind to an SX1262-only regression).
+        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
+            with self.subTest(config=config_name):
+                display = top_level_block(text, "display")
+                for banned in (
+                    "script.execute",
+                    "sx127x.send_packet",
+                    "sx126x.send_packet",
+                    "turn_on(",
+                    "turn_off(",
+                    "make_call(",
+                ):
+                    with self.subTest(banned=banned):
+                        self.assertNotIn(banned, display)
+
+    def test_preview_renderer_mirrors_firmware_draw_positions(self) -> None:
+        # The Python preview renderer went stale once (32/41 vs the
+        # firmware's 29/40, and the wrong "ID SAVED" font). Pin its shared
+        # constants to the actual YAML draw calls so the mirror can't
+        # silently drift again.
+        renderer = (ROOT / "tools" / "render_display.py").read_text()
+
+        def renderer_y(name: str) -> int:
+            match = re.search(rf"{name} = \(LEFT_ZONE_CENTER_X, (\d+)\)", renderer)
+            self.assertIsNotNone(match, name)
+            return int(match.group(1))
+
         display = top_level_block(self.text, "display")
-        for banned in (
-            "script.execute",
-            "sx127x.send_packet",
-            "turn_on(",
-            "turn_off(",
-            "make_call(",
-        ):
-            with self.subTest(banned=banned):
-                self.assertNotIn(banned, display)
+        state_draw = re.search(
+            r"it\.print\(left_zone_center_x, (\d+), id\(font_state\)", display
+        )
+        self.assertEqual(renderer_y("STATE_WORD_POS"), int(state_draw.group(1)))
+        countdown_draw = re.search(
+            r"it\.printf\(left_zone_center_x, (\d+), id\(font_timer\)", display
+        )
+        self.assertEqual(renderer_y("COUNTDOWN_POS"), int(countdown_draw.group(1)))
+        self.assertIn(
+            'id(font_learn_prompt), TextAlign::TOP_CENTER, "ID SAVED"', display
+        )
+        self.assertIn('LEARN_PROMPT_POS, font_learn_prompt, "ID SAVED"', renderer)
 
     def test_render_display_tool_exists(self) -> None:
         renderer = ROOT / "tools" / "render_display.py"
@@ -2335,7 +2378,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                         self.assertNotIn(banned, item)
 
     def test_battery_icon_state_global_is_display_only(self) -> None:
-        # Purely cosmetic hysteresis state, exactly like fan_anim_angle:
+        # Purely cosmetic hysteresis state, exactly like fan_anim_frame:
         # must exist as a global, must only be touched inside the display
         # lambda, and must never reach any TX/RX/timer/actuation path.
         globals_block = top_level_block(self.text, "globals")
@@ -2405,19 +2448,6 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         # The 2.5V no-battery floor feeds tier 0 via the lowest RISE entry.
         self.assertIn("BATT_RISE[5] = {2.55f,", battery_block)
         self.assertIn("BATT_FALL[5] = {2.45f,", battery_block)
-
-    def test_battery_path_never_actuates(self) -> None:
-        # Same invariant test_display_lambda_never_actuates already proves
-        # for the whole display block, checked explicitly against just the
-        # battery-icon section for a direct, self-documenting regression
-        # guard on this specific addition.
-        display = top_level_block(self.text, "display")
-        battery_start = display.index("KEEP IN SYNC: BATTERY_ICON")
-        next_section = display.index("KEEP IN SYNC:", battery_start + 1)
-        battery_block = display[battery_start:next_section]
-        for banned in ("script.execute", "sx127x.send_packet", "turn_on(", "turn_off(", "make_call("):
-            with self.subTest(banned=banned):
-                self.assertNotIn(banned, battery_block)
 
     def test_battery_heuristic_is_documented_as_voltage_only(self) -> None:
         # Operator requirement: the TP4054's charge-status pin is not

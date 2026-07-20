@@ -62,7 +62,9 @@ extra.</sub>
   HA UI, not hard-coded.
 - **Safety-first** — never transmits at boot, after OTA, on API reconnect, from
   restored state, or from a received frame. Multi-model adversarially reviewed.
-- **Multi-board & multi-fan** — one shared config, thin per-device wrappers.
+- **Multi-board & multi-fan** — two board configs (SX1278 / SX1262) kept
+  behaviorally identical; a second fan on the same board type can be a thin
+  per-device wrapper overriding only the device-identity substitutions.
 
 ### How the closed loop works
 
