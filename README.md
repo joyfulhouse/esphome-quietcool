@@ -36,7 +36,11 @@ extra.</sub>
   `Fan State Known` records whether that entity state is physical evidence;
   the atomic `Fan Confirmed Off` diagnostic is the recommended HA interlock
   input. Every equivalent request joins its active transaction without
-  transmitting again or resetting its fixed, spaced attempt budget.
+  transmitting again or resetting its fixed, spaced attempt budget. After a
+  physical OEM remote is used, the controller waits 3 s for the exchange to
+  finish and then sends one automatic status query, so HA authority recovers
+  in seconds instead of waiting for a manual Refresh; while authority is lost
+  the OLED suffixes the state word with `?`.
 - **Direct RF fan control** — Off / Low / Medium / High (where supported by
   the fan model) on the fan entity, plus a speed-aware timer select covering
   the fan's full 1 / 2 / 4 / 8 / 12-hour range — more than the OEM remote's

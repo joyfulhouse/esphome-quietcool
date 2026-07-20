@@ -307,6 +307,7 @@ class DisplayState:
     battery_voltage: float | None = 3.83  # None => no battery attached (hidden icon)
     learn_active: bool = False
     learn_confirm: bool = False
+    state_known: bool = True  # fan_state_known; False suffixes '?' to the state word
 
 
 _FAN_FRAME_CACHE: dict[str, Image.Image] = {}
@@ -328,7 +329,8 @@ def render_frame(state: DisplayState) -> Canvas:
     c = Canvas.new()
     running = state.running
     idx = state.speed_idx if 1 <= state.speed_idx <= 3 else 0
-    state_str = SPEED_NAMES[idx] if running else "OFF"
+    # ---- KEEP IN SYNC: STATE_UNKNOWN (quietcool-lora32.yaml display lambda) ----
+    state_str = (SPEED_NAMES[idx] if running else "OFF") + ("" if state.state_known else "?")
 
     # ---- KEEP IN SYNC: FAN_ANIM ----
     frame_name = f"fan_frame_{state.frame_idx % ROTATION_FRAMES}" if running else "fan_off"
@@ -541,6 +543,11 @@ def build_preview_matrix() -> dict[str, DisplayState]:
             running=True, speed_idx=3, timer_active=True,
             remaining_ms=((11 * 3600 + 59 * 60 + 59) * 1000), frame_idx=9,
             wifi_up=True, rssi=-50, api_up=True, indoor=78.0, outdoor=95.0, attic=110.0,
+        ),
+        "high-state-unknown": DisplayState(
+            running=True, speed_idx=3, timer_active=False, remaining_ms=0, frame_idx=7,
+            wifi_up=True, rssi=-50, api_up=True, indoor=78.0, outdoor=95.0, attic=110.0,
+            state_known=False,
         ),
         "high-weak-wifi-1-bar": DisplayState(
             running=True, speed_idx=3, timer_active=False, remaining_ms=0, frame_idx=7,
