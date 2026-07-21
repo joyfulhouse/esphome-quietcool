@@ -1944,11 +1944,34 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         # password) alongside the shared wifi_ssid/wifi_password. Only the
         # key NAMES are asserted here - never a value - so this can't leak
         # a secret into test output.
-        api_block = top_level_block(self.text, "api")
-        self.assertIn("key: !secret quietcool_lora32_api_key", api_block)
+        #
+        # The API key and OTA password are deliberately NOT bare `!secret`
+        # references in api:/ota:. A second-unit wrapper overrides only
+        # `substitutions:`, so a hardcoded secret name there would silently
+        # give every unit built from this package the same credentials; the
+        # substitution indirection (api_key_secret / ota_password_secret) is
+        # what lets a wrapper point each unit at its own secrets.
+        for text, device in (
+            (self.text, "quietcool_lora32"),
+            (self.v3_text, "quietcool_lora_v3"),
+        ):
+            with self.subTest(device=device):
+                subs_block = top_level_block(text, "substitutions")
+                self.assertIn(
+                    f"api_key_secret: !secret {device}_api_key", subs_block
+                )
+                self.assertIn(
+                    f"ota_password_secret: !secret {device}_ota_password",
+                    subs_block,
+                )
 
-        ota_block = top_level_block(self.text, "ota")
-        self.assertIn("password: !secret quietcool_lora32_ota_password", ota_block)
+                api_block = top_level_block(text, "api")
+                self.assertIn("key: ${api_key_secret}", api_block)
+                self.assertNotIn("!secret", api_block)
+
+                ota_block = top_level_block(text, "ota")
+                self.assertIn("password: ${ota_password_secret}", ota_block)
+                self.assertNotIn("!secret", ota_block)
 
         wifi_block = top_level_block(self.text, "wifi")
         self.assertIn("ssid: !secret wifi_ssid", wifi_block)
