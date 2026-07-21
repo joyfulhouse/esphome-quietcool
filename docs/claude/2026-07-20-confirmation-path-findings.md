@@ -193,6 +193,52 @@ correlation the current design already relies on, not a new risk.
 
 ---
 
+## Postscript (2026-07-21) — defect D fix reverted; YAML track frozen
+
+The defect-D fix (`05c574b`) was implemented, adversarially reviewed by Grok 4.5
+and Gemini 3.1 Pro across three rounds (final round: both SHIP), and compiled —
+but a fourth, independent review returned **BLOCK** on a regression both had
+missed, and the commit was reverted before ever flashing. Deployed firmware
+remains `4a98b08`.
+
+**The regression.** The manual-query guard was written when
+`cl_query_window == true` meant "the coordinator's own query is in flight":
+
+```cpp
+bool scheduled_confirmation_query =
+    cmd == 0x66 && id(cl_active) && id(cl_query_window);
+```
+
+`05c574b` overloaded `cl_query_window = true` to *also* mean "passively
+listening for the fan's free report" for the entire +0..1600 ms window after
+every command burst — but the guard was not updated. A manual **Refresh press
+inside that window therefore classified as a scheduled confirmation query and
+executed**, transmitting a `66` before the fan actuates at ~1.2 s → stale
+pre-command reply → `should_yield` → defect A resurrected. Worse, the Refresh
+handler sets `cl_prior_confirmed_state = 0xFF` *before* the guard runs,
+destroying the stale-echo discriminator that would otherwise have caught it.
+The deployed build refuses that press (`cl_query_window` stays false at burst
+end there); the fix made it fire. A user-reachable regression — the panel shows
+`?` right after a command, which is exactly what trains a Refresh press.
+
+Two further findings from the same review: a coordinator stall ≥1.4 s converts
+a recoverable missed report into watchdog termination, destroying the OFF retry
+budget (Medium); and removing the prior-tail quarantine narrows the
+stale-repeat margin to ~250 ms (Low).
+
+**Why the track is frozen rather than patched.** This was the fourth
+consecutive round in which closing one hole opened another, and every one of
+the four had the same shape: a lambda changed the *meaning* of a shared boolean
+and a guard elsewhere in the 3100-line file silently kept the old meaning. The
+structural tests assert text patterns, not behaviour, so no test can catch
+semantic drift; there is no compiler over the lambdas' shared state; and
+adversarial review missed a shipping defect in three of four rounds. The
+decision (2026-07-21) is to stop iterating on the YAML state machine and
+reimplement it as a C++ ESPHome external component with an enum state machine,
+an injected clock, and host-side behavioural tests — where the Refresh-press
+regression would have been one line: *press Refresh at t=+800 ms after a
+command; assert no TX.*
+
 ## Process notes
 
 Three points worth carrying forward.
