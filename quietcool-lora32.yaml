@@ -38,10 +38,12 @@ substitutions:
   # wrapper YAML overrides only `substitutions:`, so a bare `!secret` name in
   # the api:/ota: blocks below would silently give every unit built from this
   # package the SAME API key and OTA password. With the indirection, a wrapper
-  # overrides these two entries to its own secret names and each unit answers
-  # only to its own credentials.
+  # overrides these entries to its own secret names and each unit answers
+  # only to its own credentials (API key, OTA password, fallback-AP
+  # password).
   api_key_secret: !secret quietcool_lora32_api_key
   ota_password_secret: !secret quietcool_lora32_ota_password
+  fallback_ap_password_secret: !secret quietcool_lora32_fallback_ap_password
 
   # Compile-time onboarding seed. Ships as 0x00000000 so a fresh flash boots
   # into learn mode and captures YOUR fan's four-byte sender ID from two OEM
@@ -177,7 +179,7 @@ wifi:
   password: !secret wifi_password
   ap:
     ssid: ${fallback_ap_ssid}
-    password: !secret quietcool_lora32_fallback_ap_password
+    password: ${fallback_ap_password_secret}
 
 captive_portal:
 
