@@ -1945,12 +1945,14 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         # key NAMES are asserted here - never a value - so this can't leak
         # a secret into test output.
         #
-        # The API key and OTA password are deliberately NOT bare `!secret`
-        # references in api:/ota:. A second-unit wrapper overrides only
+        # The per-device credentials (API key, OTA password, fallback-AP
+        # password) are deliberately NOT bare `!secret` references in their
+        # component blocks. A second-unit wrapper overrides only
         # `substitutions:`, so a hardcoded secret name there would silently
         # give every unit built from this package the same credentials; the
-        # substitution indirection (api_key_secret / ota_password_secret) is
-        # what lets a wrapper point each unit at its own secrets.
+        # substitution indirection (api_key_secret / ota_password_secret /
+        # fallback_ap_password_secret) is what lets a wrapper point each
+        # unit at its own secrets.
         for text, device in (
             (self.text, "quietcool_lora32"),
             (self.v3_text, "quietcool_lora_v3"),
@@ -1964,6 +1966,11 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     f"ota_password_secret: !secret {device}_ota_password",
                     subs_block,
                 )
+                self.assertIn(
+                    "fallback_ap_password_secret: !secret "
+                    f"{device}_fallback_ap_password",
+                    subs_block,
+                )
 
                 api_block = top_level_block(text, "api")
                 self.assertIn("key: ${api_key_secret}", api_block)
@@ -1973,12 +1980,15 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertIn("password: ${ota_password_secret}", ota_block)
                 self.assertNotIn("!secret", ota_block)
 
+                wifi_block = top_level_block(text, "wifi")
+                self.assertIn(
+                    "password: ${fallback_ap_password_secret}", wifi_block
+                )
+                self.assertNotIn(f"!secret {device}_fallback", wifi_block)
+
         wifi_block = top_level_block(self.text, "wifi")
         self.assertIn("ssid: !secret wifi_ssid", wifi_block)
         self.assertIn("password: !secret wifi_password", wifi_block)
-        self.assertIn(
-            "password: !secret quietcool_lora32_fallback_ap_password", wifi_block
-        )
 
         # The legacy shared/generic names must no longer appear anywhere in
         # the device config now that every per-device secret is renamed.
