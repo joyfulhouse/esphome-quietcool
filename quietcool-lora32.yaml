@@ -49,27 +49,38 @@ substitutions:
   display_attic_entity: "sensor.quietcool_display_attic"
 
   # Spaced command re-fire remains the no-RX safety backstop. Closed-loop
-  # verification now layers a query/listen window after every actual command
-  # burst and cancels the remaining re-fires only after repeated reports agree
-  # with the requested lower-six-bit state. If every reply is lost, all of the
-  # original bounded re-fires still occur. OFF retains the larger budget.
+  # verification first listens for the fan's free post-command report, then
+  # falls back to a query only after a miss. Remaining re-fires are cancelled
+  # only after repeated reports agree with the requested lower-six-bit state.
+  # If every reply is lost, every bounded re-fire remains. OFF keeps its larger
+  # safety budget.
   command_refire_count: "3"           # extra re-sends after the initial burst
   off_refire_count: "5"               # OFF re-fires more (safety)
   command_refire_interval_ms: "1000"  # spacing, comfortably past the ~0.5 s busy window
 
-  # Direct-query fan replies arrive 417-648 ms after query start. Live command
-  # capture showed that a query only 200 ms after a speed command returns the
-  # pre-command state in that first train; the post-command state first appears
-  # about 2.0 s after the command burst began. Wait 1.5 s so the first response
-  # train samples after actuation. Because this exceeds the nominal 1 s re-fire
-  # spacing, the re-fire driver holds while the post-command query is pending
-  # or listening; a mismatch/timeout releases the still-bounded retry budget.
-  # Keep the longer classification-only tail so late repeats (observed around
-  # +1.44/+1.54/+1.65 s from an early query) cannot masquerade as OEM commands.
-  closed_loop_query_delay_ms: "1500"
+  # Seven API-driven captures found the fan's unsolicited three-frame report
+  # +705..807 ms from the END of every command burst, including a no-op. The
+  # +400..1600 ms listen window therefore has 305 ms of early margin and
+  # 793 ms of late margin instead of fitting tightly to the observed spread.
+  # If that free report misses consensus, the existing 66 query is due as soon
+  # as this window closes. It needs no additional actuation delay: +1600 ms
+  # from burst end is already later than the measured ~1.2 s actuation from
+  # TX request, so zero means "next 100 ms coordinator opportunity."
+  post_command_response_min_ms: "400"
+  post_command_response_window_ms: "1600"
+  closed_loop_query_delay_ms: "0"
+
+  # Direct-query fan replies arrive 417-648 ms after query start, so manual
+  # Refresh and the missed-report fallback retain their existing acceptance
+  # bounds. Every live response epoch keeps the longer classification-only
+  # tail so late repeats (observed around +1.44/+1.54/+1.65 s) cannot
+  # masquerade as OEM commands.
   closed_loop_response_min_ms: "300"
   closed_loop_response_window_ms: "1100"
   closed_loop_response_tail_ms: "2500"
+  # Must exceed the 2.5 s healthy teardown threshold by more than one 100 ms
+  # coordinator tick, while still bounding a stranded classification epoch.
+  classification_ceiling_ms: "3000"
 
 esphome:
   name: ${device_name}
@@ -419,11 +430,24 @@ globals:
     type: bool
     restore_value: false
     initial_value: "false"
+  - id: cl_command_response_epoch
+    type: bool
+    restore_value: false
+    initial_value: "false"
+    # True only when cl_query_started_ms is anchored on a command-burst end.
+    # It selects the measured unsolicited-report bounds and lets a timeout
+    # schedule exactly one fallback query instead of recursively querying.
   - id: cl_query_epoch
     type: bool
     restore_value: false
     initial_value: "false"
   - id: cl_query_epoch_confirmation
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  # Captured from each queued 66 invocation at actual TX execution so a
+  # timeout can distinguish user Refresh from automatic OEM recovery.
+  - id: cl_query_auto_recovery
     type: bool
     restore_value: false
     initial_value: "false"
@@ -496,17 +520,25 @@ globals:
     restore_value: false
     initial_value: "0"
 
-  # One-shot auto re-query after a physical OEM exchange. RX only raises the
-  # flag and stamps the activity time; the 250 ms interval below sends a
-  # single observation-only 66 query once the exchange has been quiet for
-  # 3 s, restoring HA authority without waiting for a manual Refresh. The
-  # request expires (30 s) or is dropped when consensus already restored
-  # authority, so the flag can never cause a TX unrelated to OEM activity.
+  # Bounded auto re-query after a physical OEM exchange. RX only raises flags:
+  # the 250 ms interval sends one observation-only 66 query after 3 s quiet.
+  # If that query alone misses consensus, one retry may be scheduled after the
+  # existing response-tail quarantine plus bounded jitter. The request expires
+  # after 30 s or when authority returns, so this is at most two queries tied
+  # to one OEM exchange and can never become an unbounded RF retry loop.
   - id: oem_requery_pending
     type: bool
     restore_value: false
     initial_value: "false"
   - id: oem_activity_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: oem_requery_retry_left
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: oem_requery_due_ms
     type: uint32_t
     restore_value: false
     initial_value: "0"
@@ -725,6 +757,8 @@ sx127x:
             // oem_activity_ms, so firing on the old timestamp could break
             // the 3 s quiet promise ~700 ms after a remote press.
             id(oem_requery_pending) = false;
+            id(oem_requery_retry_left) = 0;
+            id(oem_requery_due_ms) = 0;
 
             char sender_text[12];
             snprintf(sender_text, sizeof(sender_text), "%02X %02X %02X %02X",
@@ -784,10 +818,13 @@ sx127x:
           id(oem_query_seen_ms) = now;
           id(oem_requery_pending) = true;
           id(oem_activity_ms) = now;
+          id(oem_requery_retry_left) = 1;
+          id(oem_requery_due_ms) = now + 3000UL;
           id(refire_left) = 0;
           id(cl_active) = false;
           id(cl_query_due) = false;
           id(cl_query_window) = false;
+          id(cl_command_response_epoch) = false;
           id(cl_query_epoch) = false;
           id(cl_query_epoch_confirmation) = false;
           id(cl_report_ready) = false;
@@ -800,29 +837,38 @@ sx127x:
           return;
         }
 
-        // Closed-loop response direction is established by this local query
-        // window, not by bit 7. The fan was captured returning both 1F (no
-        // metadata) and B0/90 (2-speed metadata), and the STM32 masks bits
+        // Closed-loop response direction is established by a local command or
+        // query epoch, not by bit 7. The fan was captured returning both 1F
+        // (no metadata) and B0/90 (2-speed metadata), and the STM32 masks bits
         // 7:6 before comparing state. Exact frames use OEM validation. A
         // separate confidence tier can recover a known one-bit header error
-        // or corrupted variable-length byte, but only inside this window.
+        // or corrupted variable-length byte, but only inside this epoch.
         uint32_t query_age = now - id(cl_query_started_ms);
-        // Keep the epoch independent of cl_active/cl_query_window. Consensus
-        // closes the accepting window immediately, but later repeats from the
-        // same fan response train (observed through about +1.65 s) must remain
-        // passive rather than falling through and masquerading as an OEM
-        // command. This longer tail is classification-only: correlated_response
-        // retains the shorter 1.1 s consensus bound. A real OEM 66 66 was
-        // handled above and always tears down this epoch before its command.
-        bool local_query_epoch =
+        bool command_response_epoch =
+            id(cl_query_epoch_confirmation) &&
+            id(cl_command_response_epoch);
+        uint32_t response_min_ms = command_response_epoch
+            ? ${post_command_response_min_ms}
+            : ${closed_loop_response_min_ms};
+        uint32_t response_window_ms = command_response_epoch
+            ? ${post_command_response_window_ms}
+            : ${closed_loop_response_window_ms};
+        // Acceptance and classification are deliberately separate. Only the
+        // per-epoch window below may build consensus.
+        // Invariant: classification must outlive teardown in the healthy case, and must expire in the stuck case.
+        // The ceiling therefore includes slack beyond the 2.5 s
+        // teardown tail, but cannot let a stranded epoch mask OEM commands
+        // forever. A real OEM 66 66 was handled above and tears down either
+        // epoch before its command.
+        bool local_response_epoch =
             id(cl_query_epoch) &&
-            query_age <= ${closed_loop_response_tail_ms};
-        bool observed_from_local_query =
-            local_query_epoch &&
-            query_age >= ${closed_loop_response_min_ms} &&
-            query_age <= ${closed_loop_response_window_ms};
+            query_age <= ${classification_ceiling_ms};
+        bool observed_from_local_response =
+            local_response_epoch &&
+            query_age >= response_min_ms &&
+            query_age <= response_window_ms;
         bool correlated_response =
-            observed_from_local_query && !id(cl_query_response_complete) &&
+            observed_from_local_response && !id(cl_query_response_complete) &&
             ((!id(cl_query_epoch_confirmation) && !id(cl_active)) ||
              (id(cl_query_epoch_confirmation) &&
               id(cl_active) && id(cl_query_window)));
@@ -852,15 +898,15 @@ sx127x:
             header_bit_errors <= 1 && header_bit_errors < ce_header_bit_errors;
         bool duplicate_state = x[4] == x[5];
         bool recovered_candidate =
-            local_query_epoch && header_recoverable && duplicate_state &&
+            local_response_epoch && header_recoverable && duplicate_state &&
             state_encoding_ok && (x.size() != 6 || header_bit_errors != 0);
         bool exact_candidate =
-            local_query_epoch && x.size() == 6 && header_bit_errors == 0 &&
+            local_response_epoch && x.size() == 6 && header_bit_errors == 0 &&
             duplicate_state && state_encoding_ok;
 
         if (exact_candidate || recovered_candidate) {
           // Before the minimum turnaround, or after this epoch already
-          // produced consensus, consume only as a passive local-query repeat.
+          // produced consensus, consume only as a passive local-response repeat.
           // In particular, never let a fan-originated 90/A0/B0-family report
           // reach remote_command_ok and cancel/overwrite the transaction.
           if (!correlated_response || id(cl_report_ready)) {
@@ -912,7 +958,7 @@ sx127x:
                        "Contradictory tail frame %02X invalidated confirmed authority",
                        cmd);
             }
-            ESP_LOGD("CLOSED_LOOP", "Passive response repeat at +%lu ms ignored after window close",
+            ESP_LOGD("CLOSED_LOOP", "Passive local-response repeat at +%lu ms ignored after window close",
                      (unsigned long) query_age);
             return;
           }
@@ -1041,7 +1087,7 @@ sx127x:
             id(oem_query_seen) && (now - id(oem_query_seen_ms)) < 2000UL;
         bool remote_command_ok =
             ((speed_ok && duration_ok) || off_neutral) &&
-            (!local_query_epoch || recent_oem_query);
+            (!local_response_epoch || recent_oem_query);
         if (remote_command_ok) {
           // A heard OEM command is authorized external control, but not proof
           // that the fan received it. Invalidate before any TX-in-flight early
@@ -1054,10 +1100,13 @@ sx127x:
           id(fan_confirmed_off_sensor).publish_state(false);
           id(oem_requery_pending) = true;
           id(oem_activity_ms) = now;
+          id(oem_requery_retry_left) = 1;
+          id(oem_requery_due_ms) = now + 3000UL;
           id(refire_left) = 0;
           id(cl_active) = false;
           id(cl_query_due) = false;
           id(cl_query_window) = false;
+          id(cl_command_response_epoch) = false;
           // Tear the query epoch down too, exactly like the 66 66 branch
           // above: an authoritative OEM command ends any local epoch, so
           // follow-up frames in what was the tail get processed normally
@@ -1086,9 +1135,11 @@ sx127x:
         id(timer_state_known_sensor).publish_state(false);
         id(fan_confirmed_off_sensor).publish_state(false);
         // Passive frames (e.g. the fan replying to an OEM remote's query)
-        // also mark the exchange for the one-shot auto re-query.
+        // also mark the exchange for bounded automatic recovery.
         id(oem_requery_pending) = true;
         id(oem_activity_ms) = now;
+        id(oem_requery_retry_left) = 1;
+        id(oem_requery_due_ms) = now + 3000UL;
 
         // Our own TX cannot self-receive (the SX1278 is half-duplex), so a
         // frame here while TX is active is concurrent external traffic. It is
@@ -1099,7 +1150,7 @@ sx127x:
         }
         // A validated passive frame is a command or observation, not proof
         // that the fan actuated it. Keep it in RF diagnostics only. The fan
-        // entity changes exclusively from bounded local-query consensus in
+        // entity changes exclusively from bounded local-response consensus in
         // the coordinator, eliminating optimistic/passive HA state flapping.
         ESP_LOGI("RX", "Passive state frame %02X retained as diagnostics; Refresh to confirm physical state", cmd);
 
@@ -1140,6 +1191,7 @@ script:
     max_runs: 5
     parameters:
       cmd: uint8_t
+      auto_recovery: bool
     then:
       - if:
           condition:
@@ -1242,7 +1294,11 @@ script:
                   // same bounded consensus but is granted authority only in
                   // the 300-1100 ms response window; the longer epoch tail is
                   // classification-only.
+                  // A transmitted 66 replaces any command-anchored epoch.
+                  // Its own direct-query bounds and tail now apply.
+                  id(cl_command_response_epoch) = false;
                   id(cl_query_epoch) = true;
+                  id(cl_query_auto_recovery) = auto_recovery;
                   id(cl_query_epoch_confirmation) =
                       id(cl_active) && id(cl_query_window);
                   id(cl_query_response_complete) = false;
@@ -1289,7 +1345,7 @@ script:
                   - delay: 45ms
             - lambda: |-
                 // Only a completed state-command burst belonging to the
-                // current user request may schedule a verification query.
+                // current user request may open this free-report window.
                 // Query bursts themselves and stale queued commands cannot.
                 if (cmd != 0x66 && id(cl_active) && cmd == id(cl_desired_cmd)) {
                   id(cl_command_attempts) = id(cl_command_attempts) + 1;
@@ -1301,34 +1357,34 @@ script:
                   if (id(cl_command_attempts) >= id(cl_attempt_limit)) {
                     id(refire_left) = 0;
                   }
-                  id(cl_query_window) = false;
-                  id(cl_query_due) = true;
-                  uint32_t next_query_due =
-                      millis() + ${closed_loop_query_delay_ms};
-                  if (id(cl_query_epoch)) {
-                    // The fan can repeat one query's response through the
-                    // 2.5 s classification tail. Do not let those old frames
-                    // enter the NEXT query's accepted window: schedule its TX
-                    // so the 300 ms minimum turnaround ends no earlier than
-                    // the prior tail. A command re-fire waits until the query
-                    // reaches consensus or times out, then remains eligible.
-                    uint32_t prior_tail_safe_query_start =
-                        id(cl_query_started_ms) +
-                        ${closed_loop_response_tail_ms} -
-                        ${closed_loop_response_min_ms} + 1UL;
-                    if ((int32_t) (prior_tail_safe_query_start - next_query_due) > 0) {
-                      next_query_due = prior_tail_safe_query_start;
-                    }
-                  }
-                  id(cl_query_due_ms) = next_query_due;
+                  // The fan reports +705..807 ms from this exact burst-end
+                  // anchor. Treat its +400..1600 ms frames exactly like a
+                  // confirmation-query response: same candidate counters,
+                  // consensus mailbox, and coordinator arbiter. No 66 query
+                  // is scheduled unless this entire window misses consensus.
+                  id(cl_command_response_epoch) = true;
+                  id(cl_query_epoch) = true;
+                  id(cl_query_epoch_confirmation) = true;
+                  id(cl_query_response_complete) = false;
+                  id(cl_query_started_ms) = id(cl_last_command_completed_ms);
+                  id(cl_query_window) = true;
+                  id(cl_query_due) = false;
+                  id(cl_candidate_state) = 0xFF;
+                  id(cl_candidate_raw) = 0xFF;
+                  id(cl_candidate_capability) = 0;
+                  id(cl_candidate_total_count) = 0;
+                  id(cl_candidate_exact_count) = 0;
+                  id(cl_candidate_last_ms) = 0;
+                  id(cl_report_ready) = false;
+                  id(cl_report_confirmation) = false;
                   // Preserve at least the original one-second safety spacing,
-                  // measured from the end of this serialized burst. The query
-                  // pending/window guards may hold the re-fire longer.
+                  // measured from the end of this serialized burst. The free
+                  // listen/fallback-query guards may hold the re-fire longer.
                   if (id(refire_left) > 0 && cmd == id(refire_cmd)) {
                     id(refire_next_ms) = millis() + ${command_refire_interval_ms};
                   }
                   char status[64];
-                  snprintf(status, sizeof(status), "pending response after command %u/%u",
+                  snprintf(status, sizeof(status), "listening for fan report after command %u/%u",
                            (unsigned int) id(cl_command_attempts),
                            (unsigned int) id(cl_attempt_limit));
                   id(command_confirmation_status_sensor).publish_state(status);
@@ -1399,6 +1455,7 @@ script:
                 id(cl_attempt_limit) = refires + 1;
                 id(cl_query_due) = false;
                 id(cl_query_window) = false;
+                id(cl_command_response_epoch) = false;
                 id(cl_query_count) = 0;
                 id(cl_candidate_state) = 0xFF;
                 id(cl_candidate_raw) = 0xFF;
@@ -1420,6 +1477,7 @@ script:
             - script.execute:
                 id: tx_burst
                 cmd: !lambda 'return cmd;'
+                auto_recovery: false
 
   - id: arm_manual_learn
     then:
@@ -1442,10 +1500,13 @@ script:
           id(cl_active) = false;
           id(cl_query_due) = false;
           id(cl_query_window) = false;
+          id(cl_command_response_epoch) = false;
           id(cl_query_epoch) = false;
           id(cl_query_epoch_confirmation) = false;
           id(cl_report_ready) = false;
           id(oem_requery_pending) = false;
+          id(oem_requery_retry_left) = 0;
+          id(oem_requery_due_ms) = 0;
           id(command_confirmation_status_sensor).publish_state("idle (learn mode)");
           id(learn_active) = true;
           id(learn_auto_mode) = false;
@@ -1552,13 +1613,15 @@ interval:
           if (id(oem_query_seen) && (millis() - id(oem_query_seen_ms)) >= 2000UL) {
             id(oem_query_seen) = false;
           }
-          if (id(oem_requery_pending) &&
+          if ((id(oem_requery_pending) || id(oem_requery_retry_left) > 0) &&
               (id(fan_state_known) ||
                (millis() - id(oem_activity_ms)) > 30000UL)) {
-            // Authority already restored (e.g. an interlock transaction
-            // confirmed) or the request went stale: never carry the flag
-            // beyond the wake of the OEM exchange that raised it.
+            // Authority already returned or the OEM recovery went stale:
+            // retire both the pending send and its single retry budget so
+            // neither can escape the exchange that originally armed them.
             id(oem_requery_pending) = false;
+            id(oem_requery_retry_left) = 0;
+            id(oem_requery_due_ms) = 0;
           }
           if (id(cl_query_epoch) && !id(cl_query_epoch_confirmation) &&
               !id(cl_query_response_complete) &&
@@ -1567,13 +1630,86 @@ interval:
             // do not carry the earlier belief into a later command.
             id(cl_prior_confirmed_state) = 0xFF;
             id(cl_query_response_complete) = true;
-            id(command_confirmation_status_sensor).publish_state(
-                "manual refresh FAILED: no response consensus");
+            bool bounded_oem_retry =
+                id(oem_requery_retry_left) > 0 &&
+                !id(fan_state_known) &&
+                (millis() - id(oem_activity_ms)) <= 30000UL;
+            if (bounded_oem_retry) {
+              // The initial OEM recovery is deliberately single-shot on a
+              // healthy link. After a miss, spend its only retry after the
+              // existing 2.5 s response tail plus 500..1000 ms of timestamp-
+              // derived jitter. This needs no RNG API and cannot repeat: the
+              // budget is decremented before the pending flag is raised.
+              id(oem_requery_retry_left)--;
+              id(oem_requery_pending) = true;
+              uint32_t retry_jitter =
+                  500UL + (id(oem_activity_ms) % 501UL);
+              id(oem_requery_due_ms) =
+                  id(cl_query_started_ms) +
+                  ${closed_loop_response_tail_ms} + retry_jitter;
+              id(command_confirmation_status_sensor).publish_state(
+                  id(cl_query_auto_recovery)
+                      ? "auto refresh missed; one bounded retry pending"
+                      : "manual refresh missed; bounded OEM-recovery retry pending");
+            } else {
+              id(command_confirmation_status_sensor).publish_state(
+                  id(cl_query_auto_recovery)
+                      ? "auto refresh FAILED: no response consensus"
+                      : "manual refresh FAILED: no response consensus");
+            }
           }
+          // The common path listens for the fan's unsolicited report instead
+          // of transmitting a query. Only a full +1600 ms miss schedules the
+          // existing query path; the zero fallback delay means the action
+          // below may send at this coordinator opportunity. Keeping query_due
+          // separate preserves every re-fire until that fallback reaches the
+          // unchanged consensus/mismatch/timeout arbiter.
+          if (id(cl_active) && id(cl_command_response_epoch) &&
+              !id(cl_query_response_complete) &&
+              id(cl_query_window) &&
+              (millis() - id(cl_query_started_ms)) >
+                  ${post_command_response_window_ms}) {
+            id(cl_query_response_complete) = true;
+            id(cl_query_window) = false;
+            id(cl_query_due) = true;
+            id(cl_query_due_ms) = millis() + ${closed_loop_query_delay_ms};
+            id(command_confirmation_status_sensor).publish_state(
+                "unsolicited report missed; fallback query pending");
+          }
+          // Classification watchdog: if the command-response epoch remains due
+          // or its fallback query remains armed without an executing 66 having
+          // replaced/re-anchored it, the TX path is stranded. Retire all queued
+          // work and authority instead of leaving either the transaction or OEM
+          // classification wedged. This path deliberately never transmits.
           if (id(cl_query_epoch) &&
-              (millis() - id(cl_query_started_ms)) > ${closed_loop_response_tail_ms}) {
+              (id(cl_query_due) ||
+               (id(cl_command_response_epoch) && id(cl_query_window))) &&
+              (millis() - id(cl_query_started_ms)) >
+                  ${classification_ceiling_ms}) {
+            id(tx_burst).stop();
+            id(refire_left) = 0;
+            id(cl_prior_confirmed_state) = 0xFF;
             id(cl_query_epoch) = false;
             id(cl_query_epoch_confirmation) = false;
+            id(cl_command_response_epoch) = false;
+            id(cl_query_window) = false;
+            id(cl_query_due) = false;
+            id(cl_active) = false;
+            const char *watchdog_status =
+                "FAILED: confirmation watchdog expired before fallback query TX; transaction terminated";
+            id(command_confirmation_status_sensor).publish_state(watchdog_status);
+            ESP_LOGE("CLOSED_LOOP", "%s", watchdog_status);
+          }
+          // End classification watchdog.
+          if (id(cl_query_epoch) && !id(cl_query_due) &&
+              !id(cl_query_window) &&
+              (millis() - id(cl_query_started_ms)) > ${closed_loop_response_tail_ms}) {
+            // Never tear down a pending/open fallback. tx_burst replaces the
+            // command epoch at actual query execution; completed response
+            // epochs remain quarantined only through their bounded tail.
+            id(cl_query_epoch) = false;
+            id(cl_query_epoch_confirmation) = false;
+            id(cl_command_response_epoch) = false;
           }
 
           if (id(cl_report_ready)) {
@@ -1603,7 +1739,7 @@ interval:
             bool desired_is_off = desired_duration == 0;
             // Direction is timing-derived because fan responses and OEM
             // commands share the same six-byte form. Any command-shaped
-            // MISMATCH during a command query is unsafe as physical proof.
+            // MISMATCH during command correlation is unsafe as physical proof.
             // Yield is a separate policy: ON requests yield only to a
             // conflicting running command that differs from the state this
             // transaction just left, while OFF always keeps retrying.
@@ -1830,7 +1966,8 @@ interval:
           // Query timeout does not consume or remove a re-fire. With retries
           // left, the unchanged spaced backstop proceeds; after the final
           // command's final query, the transaction terminates explicitly.
-          if (id(cl_active) && id(cl_query_window) &&
+          if (id(cl_active) && !id(cl_command_response_epoch) &&
+              id(cl_query_window) &&
               (millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}) {
             // A no-response timeout is absence of evidence: preserve the last
             // confirmed physical belief while a bounded re-fire remains, so a
@@ -1880,6 +2017,7 @@ interval:
             - script.execute:
                 id: tx_burst
                 cmd: 0x66
+                auto_recovery: false
 
   # Spaced command re-fire driver. When a command wrapper has armed a re-fire
   # (refire_left > 0), re-send refire_cmd through the single tx_burst path once
@@ -1888,9 +2026,9 @@ interval:
   # re-sends lands while the fan is listening. tx_burst still refuses when
   # unprovisioned, and a heard OEM-remote command zeroes refire_left (in
   # on_packet) so this can never fight a physical press. A pending or open
-  # post-command query takes precedence; mismatch/timeout clears those guards
-  # and releases the retry. Rollover-safe signed compare, exactly like the
-  # timer arithmetic.
+  # post-command listen/fallback query takes precedence; mismatch/timeout
+  # clears those guards and releases the retry. Rollover-safe signed compare,
+  # exactly like the timer arithmetic.
   - interval: 250ms
     then:
       - if:
@@ -1916,6 +2054,7 @@ interval:
             - script.execute:
                 id: tx_burst
                 cmd: !lambda 'return id(refire_cmd);'
+                auto_recovery: false
             - lambda: |-
                 // When an initial enqueue was refused (queue pressure or OEM
                 // holdoff), this interval supplies attempt #1 and must not
@@ -1929,12 +2068,10 @@ interval:
                          id(cl_command_attempts) > 0 ? "Re-sent" : "Sent deferred initial",
                          id(refire_cmd), id(refire_left));
 
-  # One-shot auto re-query: after a physical OEM exchange has been quiet
-  # for 3 s and no local transaction is running or pending, send a single
-  # observation-only 66 query so HA authority recovers without a manual
-  # Refresh. The request expires after 30 s (100 ms housekeeping above)
-  # and is dropped if consensus already restored authority, so it can
-  # never transmit outside the immediate wake of real OEM activity. The
+  # Bounded auto re-query: after a physical OEM exchange has been quiet for
+  # 3 s and no local transaction is running or pending, send one observation-
+  # only 66 query. A failed query may schedule one jittered retry after its
+  # response tail; success or the 30 s expiry clears the budget. The
   # learn_active guard matters: tx_burst treats any executed command as a
   # deliberate user action and would silently cancel an open learn window.
   - interval: 250ms
@@ -1944,7 +2081,8 @@ interval:
             lambda: |-
               if (!id(oem_requery_pending)) return false;
               uint32_t since = millis() - id(oem_activity_ms);
-              return since >= 3000UL && since <= 30000UL &&
+              return since <= 30000UL &&
+                     (int32_t)(millis() - id(oem_requery_due_ms)) >= 0 &&
                      !id(fan_state_known) &&
                      !id(cl_active) && id(refire_left) == 0 &&
                      !id(cl_query_epoch) && !id(cl_report_ready) &&
@@ -1952,13 +2090,18 @@ interval:
                      !id(learn_active) && id(learned_sender_id) != 0;
           then:
             - lambda: |-
+                bool is_retry = id(oem_requery_retry_left) == 0;
                 id(oem_requery_pending) = false;
                 id(command_confirmation_status_sensor).publish_state(
-                    "auto refresh after OEM remote activity");
-                ESP_LOGI("CL", "OEM exchange quiet for 3 s; sending one auto status query");
+                    is_retry
+                        ? "bounded auto-refresh retry after OEM activity"
+                        : "auto refresh after OEM remote activity");
+                ESP_LOGI("CL", "%s after OEM activity; sending status query",
+                         is_retry ? "Bounded retry due" : "Exchange quiet");
             - script.execute:
                 id: tx_burst
                 cmd: 0x66
+                auto_recovery: true
 
   - interval: 20s
     then:
@@ -2159,6 +2302,7 @@ button:
       - script.execute:
           id: tx_burst
           cmd: 0x66
+          auto_recovery: false
 
   # Diagnostic: transmit the OEM wake/status query (SENDER 66 66) and
   # raw-log every frame heard in the next 15 s (see query_probe_started).
@@ -2186,6 +2330,7 @@ button:
       - script.execute:
           id: tx_burst
           cmd: 0x66
+          auto_recovery: false
 
   - platform: template
     name: "Learn Remote ID"
@@ -2219,10 +2364,13 @@ button:
           id(cl_active) = false;
           id(cl_query_due) = false;
           id(cl_query_window) = false;
+          id(cl_command_response_epoch) = false;
           id(cl_query_epoch) = false;
           id(cl_query_epoch_confirmation) = false;
           id(cl_report_ready) = false;
           id(oem_requery_pending) = false;
+          id(oem_requery_retry_left) = 0;
+          id(oem_requery_due_ms) = 0;
           id(command_confirmation_status_sensor).publish_state("idle (remote ID forgotten)");
           id(learned_sender_id) = 0;
           learned_sender_id->update();
