@@ -76,6 +76,15 @@ substitutions:
   device_friendly_name: "QuietCool RF Controller (LoRa V3)"
   fallback_ap_ssid: "QuietCool-LoRa-V3"
 
+  # Per-device credentials, substitution-indirected on purpose. A second-unit
+  # wrapper YAML overrides only `substitutions:`, so a bare `!secret` name in
+  # the api:/ota: blocks below would silently give every unit built from this
+  # package the SAME API key and OTA password. With the indirection, a wrapper
+  # overrides these two entries to its own secret names and each unit answers
+  # only to its own credentials.
+  api_key_secret: !secret quietcool_lora_v3_api_key
+  ota_password_secret: !secret quietcool_lora_v3_ota_password
+
   # New board, no known sender ID yet: ships in auto-learn (see README
   # "Learn mode / porting to your own fan"). Do NOT set this to a nonzero
   # seed until this unit's own OEM remote ID is actually learned or known.
@@ -216,11 +225,11 @@ logger:
 
 api:
   encryption:
-    key: !secret quietcool_lora_v3_api_key
+    key: ${api_key_secret}
 
 ota:
   platform: esphome
-  password: !secret quietcool_lora_v3_ota_password
+  password: ${ota_password_secret}
 
 wifi:
   ssid: !secret wifi_ssid
