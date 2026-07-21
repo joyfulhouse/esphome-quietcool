@@ -468,7 +468,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 ],
                 radio[
                     radio.index("if (id(cl_query_response_complete) &&") :
-                    radio.index("Passive local-response repeat", radio.index("if (id(cl_query_response_complete) &&"))
+                    radio.index("Passive response repeat", radio.index("if (id(cl_query_response_complete) &&"))
                 ],
                 radio[
                     radio.index("if (remote_command_ok) {") :
@@ -934,17 +934,16 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("bool state_encoding_ok", radio)
         self.assertIn("duration_nibble == 0 || state_speed != 0", radio)
 
-        # Direction comes from our bounded local response epoch, never from
-        # bit 7: both command reports and direct-query replies, including live
-        # 1F and B0/90 forms, must reach the same decoder/consensus branch.
-        response_start = radio.index("bool local_response_epoch")
+        # Direction comes from our bounded query window, never from bit 7:
+        # both live 1F and B0/90 response forms must reach the same branch.
+        response_start = radio.index("bool local_query_epoch")
         response_end = radio.index("// Normal six-byte traffic", response_start)
         response = radio[response_start:response_end]
         self.assertNotIn("cmd & 0x80", response)
         self.assertNotIn("cmd < 0x80", response)
         self.assertIn("id(cl_query_window)", response)
-        self.assertIn("response_min_ms", response)
-        self.assertIn("response_window_ms", response)
+        self.assertIn("${closed_loop_response_min_ms}", response)
+        self.assertIn("${closed_loop_response_window_ms}", response)
 
     def test_correlated_recovery_never_weakens_normal_validation(self) -> None:
         radio = top_level_block(self.text, "sx127x")
@@ -1394,8 +1393,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         required = (
             "cl_active", "cl_desired_cmd", "cl_command_attempts",
             "cl_attempt_limit", "cl_query_due", "cl_query_due_ms",
-            "cl_query_window", "cl_command_response_epoch", "cl_query_epoch",
-            "cl_query_epoch_confirmation",
+            "cl_query_window", "cl_query_epoch", "cl_query_epoch_confirmation",
             "cl_query_started_ms", "cl_query_count",
             "cl_candidate_state", "cl_candidate_total_count",
             "cl_candidate_exact_count", "cl_report_ready",
@@ -1508,9 +1506,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 self.assertIn('command_refire_count: "3"', substitutions)
                 self.assertIn('off_refire_count: "5"', substitutions)
                 self.assertIn('command_refire_interval_ms: "1000"', substitutions)
-                self.assertIn('closed_loop_query_delay_ms: "0"', substitutions)
-                self.assertIn('post_command_response_min_ms: "400"', substitutions)
-                self.assertIn('post_command_response_window_ms: "1600"', substitutions)
+                self.assertIn('closed_loop_query_delay_ms: "1500"', substitutions)
                 self.assertIn("closed_loop_response_window_ms", substitutions)
                 self.assertIn("closed_loop_response_min_ms", substitutions)
                 self.assertIn("cmd != 0x66", tx_burst)
@@ -1519,8 +1515,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     "id(cl_command_attempts) = id(cl_command_attempts) + 1;",
                     tx_burst,
                 )
-                self.assertIn("id(cl_query_due) = false;", tx_burst)
-                self.assertNotIn("id(cl_query_due) = true;", tx_burst)
+                self.assertIn("id(cl_query_due) = true;", tx_burst)
                 self.assertIn("id(cl_command_attempts) >= id(cl_attempt_limit)", tx_burst)
                 self.assertIn("id(refire_left) = 0;", tx_burst)
                 self.assertIn(
@@ -1545,85 +1540,9 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     "id(cl_command_attempts) < id(cl_attempt_limit)", refire_interval
                 )
                 self.assertIn("!id(cl_query_window)", refire_interval)
-                # Both the free-report window and a due fallback query block
-                # the one-second re-fire; consensus/mismatch/timeout releases it.
+                # The 1.5 s query must get on air before the one-second
+                # re-fire can reset its deadline; timeout/mismatch releases it.
                 self.assertIn("!id(cl_query_due)", refire_condition)
-
-    def test_command_report_window_precedes_fallback_query_on_both_radios(self) -> None:
-        for config_name, text, radio_key in (
-            ("SX1278", self.text, "sx127x"),
-            ("SX1262", self.v3_text, "sx126x"),
-        ):
-            with self.subTest(config=config_name):
-                substitutions = top_level_block(text, "substitutions")
-                self.assertIn('post_command_response_min_ms: "400"', substitutions)
-                self.assertIn('post_command_response_window_ms: "1600"', substitutions)
-                self.assertIn('closed_loop_query_delay_ms: "0"', substitutions)
-
-                tx = script_blocks(text)["tx_burst"]
-                completion = tx[tx.index("id(cl_command_attempts) =") :]
-                self.assertIn("id(cl_last_command_completed_ms) = millis();", completion)
-                self.assertIn("id(cl_command_response_epoch) = true;", completion)
-                self.assertIn("id(cl_query_epoch) = true;", completion)
-                self.assertIn("id(cl_query_epoch_confirmation) = true;", completion)
-                self.assertIn("id(cl_query_response_complete) = false;", completion)
-                self.assertIn(
-                    "id(cl_query_started_ms) = id(cl_last_command_completed_ms);",
-                    completion,
-                )
-                self.assertIn("id(cl_query_window) = true;", completion)
-                self.assertIn("id(cl_query_due) = false;", completion)
-                self.assertNotIn("id(cl_query_due) = true;", completion)
-
-                radio = top_level_block(text, radio_key)
-                epoch = radio.index("bool command_response_epoch")
-                correlated = radio.index("bool correlated_response", epoch)
-                consensus = radio.index("if (exact_candidate || recovered_candidate)", correlated)
-                remote = radio.index("bool remote_command_ok", consensus)
-                self.assertTrue(epoch < correlated < consensus < remote)
-                response_bounds = radio[epoch:correlated]
-                self.assertIn("${post_command_response_min_ms}", response_bounds)
-                self.assertIn("${post_command_response_window_ms}", response_bounds)
-                self.assertIn("${closed_loop_response_min_ms}", response_bounds)
-                self.assertIn("${closed_loop_response_window_ms}", response_bounds)
-                consensus_branch = radio[consensus:remote]
-                self.assertIn("candidate_total_count >= 2", consensus_branch)
-                self.assertIn("candidate_exact_count >= 1", consensus_branch)
-                self.assertIn(
-                    "id(cl_report_confirmation) = id(cl_query_epoch_confirmation);",
-                    consensus_branch,
-                )
-                self.assertIn("!local_response_epoch || recent_oem_query", radio[remote:])
-
-                coordinator = interval_item_containing(text, "id(cl_report_ready)")
-                timeout = coordinator.index(
-                    "if (id(cl_active) && id(cl_command_response_epoch)"
-                )
-                fallback = coordinator[timeout:]
-                self.assertIn("${post_command_response_window_ms}", fallback)
-                self.assertIn("!id(cl_query_response_complete)", fallback)
-                self.assertIn("id(cl_query_window) = false;", fallback)
-                self.assertIn("id(cl_query_due) = true;", fallback)
-                self.assertIn(
-                    "id(cl_query_due_ms) = millis() + ${closed_loop_query_delay_ms};",
-                    fallback,
-                )
-                self.assertLess(
-                    fallback.index("id(cl_query_due) = true;"),
-                    fallback.index("cmd: 0x66"),
-                )
-
-                # The existing ambiguity and promotion policy remains the
-                # sole arbiter after either free-report or query consensus.
-                report = coordinator[coordinator.index("if (id(cl_report_ready))") :]
-                for token in (
-                    "bool state_matches",
-                    "bool should_yield",
-                    "actual != id(cl_prior_confirmed_state)",
-                    "bool state_authoritative",
-                    "bool timer_authoritative",
-                ):
-                    self.assertIn(token, report)
 
     def test_all_active_off_variants_join_but_other_or_terminal_requests_do_not(self) -> None:
         # Structural, not model-based: the YAML lambda itself is the source
@@ -1653,60 +1572,50 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         self.assertIn("id(tx_burst).stop();", branch)
         self.assertNotIn("script.execute", branch)
 
-    def test_response_epoch_consumes_post_consensus_repeats(self) -> None:
-        for config_name, text, radio_key in (
-            ("SX1278", self.text, "sx127x"),
-            ("SX1262", self.v3_text, "sx126x"),
-        ):
-            with self.subTest(config=config_name):
-                radio = top_level_block(text, radio_key)
-                epoch = radio.index("bool local_response_epoch")
-                passive = radio.index(
-                    "if (!correlated_response || id(cl_report_ready))", epoch
-                )
-                normal = radio.index("// Normal six-byte traffic", passive)
-                cancel = radio.index("bool remote_command_ok", normal)
-                self.assertTrue(epoch < passive < normal < cancel)
-                self.assertIn("id(cl_query_epoch)", radio[epoch:passive])
-                self.assertIn("return;", radio[passive:normal])
+    def test_query_epoch_consumes_post_consensus_repeats(self) -> None:
+        radio = top_level_block(self.text, "sx127x")
+        epoch = radio.index("bool local_query_epoch")
+        passive = radio.index("if (!correlated_response || id(cl_report_ready))", epoch)
+        normal = radio.index("// Normal six-byte traffic", passive)
+        cancel = radio.index("bool remote_command_ok", normal)
+        self.assertTrue(epoch < passive < normal < cancel)
+        self.assertIn("id(cl_query_epoch)", radio[epoch:passive])
+        self.assertIn("return;", radio[passive:normal])
 
-                tx_burst = script_blocks(text)["tx_burst"]
-                self.assertIn("if (cmd == 0x66)", tx_burst)
-                self.assertIn("id(cl_query_epoch) = true;", tx_burst)
-                self.assertIn("id(cl_query_epoch_confirmation)", tx_burst)
-                self.assertIn("id(cl_query_response_complete) = false;", tx_burst)
-                self.assertIn("id(cl_report_confirmation)", radio[passive:normal])
-                self.assertIn("id(cl_query_started_ms) = millis();", tx_burst)
+        tx_burst = script_blocks(self.text)["tx_burst"]
+        self.assertIn("if (cmd == 0x66)", tx_burst)
+        self.assertIn("id(cl_query_epoch) = true;", tx_burst)
+        self.assertIn("id(cl_query_epoch_confirmation)", tx_burst)
+        self.assertIn("id(cl_query_response_complete) = false;", tx_burst)
+        self.assertIn("id(cl_report_confirmation)", radio[passive:normal])
+        self.assertIn("id(cl_query_started_ms) = millis();", tx_burst)
 
-                remote_cancel = radio[normal:]
-                self.assertIn(
-                    "!local_response_epoch || recent_oem_query", remote_cancel
-                )
-                self.assertIn("id(tx_burst).stop();", remote_cancel)
-                self.assertIn("Physical controls always win", remote_cancel)
+        remote_cancel = radio[normal:]
+        self.assertIn("!local_query_epoch || recent_oem_query", remote_cancel)
+        self.assertIn("id(tx_burst).stop();", remote_cancel)
+        self.assertIn("Physical controls always win", remote_cancel)
 
-                coordinator = interval_item_containing(text, "id(cl_report_ready)")
-                self.assertIn(
-                    "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}",
-                    coordinator,
-                )
+        coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn(
+            "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}",
+            coordinator,
+        )
 
-    def test_command_epoch_reanchors_after_any_prior_query_tail(self) -> None:
-        # Each completed command replaces the prior response epoch at the
-        # command-burst-end anchor and applies the command-specific minimum;
-        # old query timing/candidates therefore cannot be inherited.
+    def test_next_query_window_starts_after_previous_tail_quarantine(self) -> None:
+        # Response trains have been observed through +1.65 s. A later command
+        # may be sent after a mismatch/timeout, but its accepted response
+        # window must not open until the previous 2.5 s tail ended.
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             tx = script_blocks(text)["tx_burst"]
             completion = tx[tx.index("id(cl_command_attempts) =") :]
             with self.subTest(config=config_name):
-                anchor = completion.index("id(cl_last_command_completed_ms) = millis();")
-                epoch = completion.index("id(cl_command_response_epoch) = true;")
-                started = completion.index(
-                    "id(cl_query_started_ms) = id(cl_last_command_completed_ms);"
-                )
-                candidates = completion.index("id(cl_candidate_total_count) = 0;")
-                self.assertTrue(anchor < epoch < started < candidates)
-                self.assertIn("id(cl_query_due) = false;", completion)
+                self.assertIn("uint32_t next_query_due", completion)
+                self.assertIn("id(cl_query_started_ms) +", completion)
+                self.assertIn("${closed_loop_response_tail_ms} -", completion)
+                self.assertIn("${closed_loop_response_min_ms}", completion)
+                self.assertIn("${closed_loop_response_min_ms} + 1UL", completion)
+                self.assertIn("if (id(cl_query_epoch)", completion)
+                self.assertIn("id(cl_query_due_ms) = next_query_due;", completion)
 
                 refire = interval_item_containing(text, 'ESP_LOGD("REFIRE"')
                 condition = refire[
@@ -1723,14 +1632,11 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         ):
             with self.subTest(config=config_name):
                 radio = top_level_block(text, radio_key)
-                observed = radio.index("bool observed_from_local_response")
+                observed = radio.index("bool observed_from_local_query")
                 correlated = radio.index("bool correlated_response", observed)
                 window = radio[observed:correlated]
-                self.assertIn("query_age >= response_min_ms", window)
-                self.assertIn("query_age <= response_window_ms", window)
-                bounds = radio[radio.index("uint32_t response_min_ms") : observed]
-                self.assertIn("${closed_loop_response_min_ms}", bounds)
-                self.assertIn("${closed_loop_response_window_ms}", bounds)
+                self.assertIn("query_age >= ${closed_loop_response_min_ms}", window)
+                self.assertIn("query_age <= ${closed_loop_response_window_ms}", window)
                 consensus_branch = radio[
                     radio.index("if (exact_candidate || recovered_candidate)") :
                     radio.index("// Normal six-byte traffic")
@@ -1835,180 +1741,37 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     coordinator,
                 )
 
-    def test_local_response_classification_is_bounded_and_outlives_teardown(self) -> None:
-        # Classification must survive the healthy coordinator's worst-case
-        # teardown latency, but a sticky raw epoch must eventually stop masking
-        # OEM commands. Pin both sides of that safety valve on both radios.
-        for config_name, text, radio_key in (
-            ("SX1278", self.text, "sx127x"),
-            ("SX1262", self.v3_text, "sx126x"),
-        ):
-            with self.subTest(config=config_name):
-                substitutions = top_level_block(text, "substitutions")
+    def test_late_fan_response_tail_is_quarantined_without_extending_consensus(self) -> None:
+        # Live raw logging showed a second exact fan-response burst at about
+        # +1.44/+1.54/+1.65 s after the local query.  That tail must remain
+        # attributable to our query after the 1.1 s consensus/no-response
+        # window closes, or its set-bit 90/A0/B0 state can masquerade as an
+        # OEM command and overwrite a successful confirmation diagnostic.
+        substitutions = top_level_block(self.text, "substitutions")
+        self.assertIn('closed_loop_response_tail_ms: "2500"', substitutions)
 
-                def milliseconds(name: str) -> int:
-                    match = re.search(rf'(?m)^  {name}: "(\d+)"$', substitutions)
-                    self.assertIsNotNone(match, name)
-                    return int(match.group(1))
-
-                command_min = milliseconds("post_command_response_min_ms")
-                command_window = milliseconds("post_command_response_window_ms")
-                query_min = milliseconds("closed_loop_response_min_ms")
-                query_window = milliseconds("closed_loop_response_window_ms")
-                classification_tail = milliseconds("closed_loop_response_tail_ms")
-                classification_ceiling = milliseconds("classification_ceiling_ms")
-                coordinator = interval_item_containing(text, "id(cl_report_ready)")
-                coordinator_tick_match = re.search(
-                    r"(?m)^  - interval: (\d+)ms$", coordinator
-                )
-                self.assertIsNotNone(coordinator_tick_match)
-                coordinator_tick = int(coordinator_tick_match.group(1))
-
-                self.assertEqual(classification_ceiling, 3000)
-                self.assertGreaterEqual(classification_tail, command_window)
-                self.assertGreaterEqual(classification_tail, query_window)
-                self.assertGreater(
-                    classification_ceiling,
-                    classification_tail + coordinator_tick,
-                )
-
-                radio = top_level_block(text, radio_key)
-                epoch_start = radio.index("bool command_response_epoch")
-                response_end = radio.index("auto bit_count", epoch_start)
-                response_preamble = radio[epoch_start:response_end]
-                self.assertRegex(
-                    response_preamble,
-                    r"bool local_response_epoch\s*=\s*"
-                    r"id\(cl_query_epoch\)\s*&&\s*"
-                    r"query_age <= \$\{classification_ceiling_ms\};",
-                )
-                self.assertIn("query_age <= response_window_ms", response_preamble)
-                self.assertIn(
-                    "classification must outlive teardown in the healthy case",
-                    response_preamble,
-                )
-                self.assertIn(
-                    "must expire in the stuck case",
-                    response_preamble,
-                )
-
-                teardown_start = coordinator.index(
-                    "if (id(cl_query_epoch) && !id(cl_query_due)"
-                )
-                teardown_end = coordinator.index("\n          }", teardown_start)
-                teardown = coordinator[teardown_start:teardown_end]
-                self.assertIn("!id(cl_query_window)", teardown)
-                self.assertIn(
-                    "> ${closed_loop_response_tail_ms}", teardown
-                )
-                self.assertIn("id(cl_query_epoch) = false;", teardown)
-
-                tx_burst = script_blocks(text)["tx_burst"]
-                query_anchor = tx_burst[
-                    tx_burst.index("if (cmd == 0x66)") :
-                ]
-                self.assertIn("id(cl_query_epoch) = true;", query_anchor)
-                self.assertIn("id(cl_query_started_ms) = millis();", query_anchor)
-
-                # Enumerate every millisecond for command/query epochs in both
-                # healthy and sticky-TX paths. A matching frame has exactly one
-                # disposition: accepted, passive-local, or outside the
-                # effective epoch and therefore eligible for OEM handling.
-                healthy_teardown_age = classification_tail + coordinator_tick
-                enumeration_end = classification_ceiling + coordinator_tick + 1
-                for epoch_kind, minimum, window in (
-                    ("command", command_min, command_window),
-                    ("query", query_min, query_window),
-                ):
-                    for path in ("healthy", "stuck-tx"):
-                        for query_age in range(enumeration_end + 1):
-                            raw_epoch_live = (
-                                query_age < healthy_teardown_age
-                                if path == "healthy"
-                                else True
-                            )
-                            effective_epoch_live = (
-                                raw_epoch_live
-                                and query_age <= classification_ceiling
-                            )
-                            accepted = (
-                                effective_epoch_live
-                                and minimum <= query_age <= window
-                            )
-                            passive = effective_epoch_live and not accepted
-                            outside = not effective_epoch_live
-                            dispositions = (accepted, passive, outside)
-                            self.assertEqual(
-                                sum(dispositions),
-                                1,
-                                (config_name, epoch_kind, path, query_age),
-                            )
-                            if raw_epoch_live and query_age <= classification_ceiling:
-                                self.assertTrue(
-                                    accepted or passive,
-                                    (config_name, epoch_kind, path, query_age),
-                                )
-                            if (
-                                path == "stuck-tx"
-                                and query_age == classification_ceiling + 1
-                            ):
-                                self.assertTrue(
-                                    outside,
-                                    (config_name, epoch_kind, path, query_age),
-                                )
-
-                        if path == "healthy":
-                            self.assertLess(
-                                healthy_teardown_age,
-                                classification_ceiling,
-                            )
-
-    def test_stuck_command_fallback_watchdog_terminates_without_transmitting(self) -> None:
-        required_clears = (
-            "id(cl_query_epoch) = false;",
-            "id(cl_query_epoch_confirmation) = false;",
-            "id(cl_command_response_epoch) = false;",
-            "id(cl_query_window) = false;",
-            "id(cl_query_due) = false;",
-            "id(cl_active) = false;",
+        radio = top_level_block(self.text, "sx127x")
+        epoch_start = radio.index("bool local_query_epoch")
+        response_end = radio.index("auto bit_count", epoch_start)
+        response_preamble = radio[epoch_start:response_end]
+        self.assertIn(
+            "query_age <= ${closed_loop_response_tail_ms}", response_preamble
         )
-        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
-            with self.subTest(config=config_name):
-                coordinator = interval_item_containing(text, "id(cl_report_ready)")
-                watchdog_start = coordinator.index("// Classification watchdog:")
-                watchdog_end = coordinator.index(
-                    "// End classification watchdog.", watchdog_start
-                )
-                watchdog = coordinator[watchdog_start:watchdog_end]
+        self.assertIn(
+            "query_age <= ${closed_loop_response_window_ms}", response_preamble
+        )
 
-                self.assertIn("id(cl_query_epoch)", watchdog)
-                self.assertIn("id(cl_query_due)", watchdog)
-                self.assertRegex(
-                    watchdog,
-                    r"id\(cl_command_response_epoch\)\s*&&\s*"
-                    r"id\(cl_query_window\)",
-                )
-                self.assertRegex(
-                    watchdog,
-                    r">\s*\$\{classification_ceiling_ms\}",
-                )
-                for clear in required_clears:
-                    self.assertIn(clear, watchdog)
-                self.assertIn("id(cl_prior_confirmed_state) = 0xFF;", watchdog)
-                self.assertIn("id(refire_left) = 0;", watchdog)
-                self.assertIn("id(tx_burst).stop();", watchdog)
-                self.assertIn(
-                    "id(command_confirmation_status_sensor).publish_state",
-                    watchdog,
-                )
-                self.assertRegex(watchdog, r'"FAILED:[^"]*watchdog[^"]*"')
-                self.assertIn('ESP_LOGE("CLOSED_LOOP"', watchdog)
-
-                # Cancellation is allowed; the watchdog must never enqueue or
-                # perform RF work of its own.
-                self.assertNotIn("send_packet", watchdog)
-                self.assertNotIn("script.execute", watchdog)
-                self.assertNotIn("id: tx_burst", watchdog)
+        coordinator = interval_item_containing(self.text, "id(cl_report_ready)")
+        self.assertIn(
+            "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_tail_ms}",
+            coordinator,
+        )
+        # The actual no-response decision remains on the shorter bound; the
+        # tail is classification-only and must never delay a safety re-fire.
+        self.assertIn(
+            "(millis() - id(cl_query_started_ms)) > ${closed_loop_response_window_ms}",
+            coordinator,
+        )
 
     def test_confirmation_diagnostics_and_capability_are_published(self) -> None:
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
@@ -2977,27 +2740,21 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
             with self.subTest(rejected_glyph=rejected_glyph):
                 self.assertNotIn(rejected_glyph, battery_block)
 
-    def test_oem_activity_arms_bounded_requery_from_rx_flags_only(self) -> None:
+    def test_oem_activity_arms_one_shot_requery_from_rx_flags_only(self) -> None:
         # All three OEM-evidence RX sites (heard 66 query, accepted OEM
-        # command, other validated passive frame) arm the initial query plus
-        # one retry by setting flags only; RX still never executes a script.
-        for name, text, radio_key in (
-            ("lora32", self.text, "sx127x"),
-            ("v3", self.v3_text, "sx126x"),
-        ):
+        # command, other validated passive frame) arm the one-shot re-query
+        # by setting flags only; the RX path still never executes a script.
+        for name, text in (("lora32", self.text), ("v3", self.v3_text)):
             with self.subTest(config=name):
-                radio = top_level_block(text, radio_key)
+                self.assertEqual(text.count("id(oem_requery_pending) = true;"), 3)
+                self.assertEqual(text.count("id(oem_activity_ms) = now;"), 3)
+                # Learn commit, manual-learn arm, Forget, the fire site, and
+                # the housekeeping drop all clear the one-shot request: a
+                # stale flag can never cross a Learn/Forget boundary or
+                # outlive its OEM exchange.
                 self.assertEqual(
-                    radio.count("id(oem_requery_pending) = true;"), 3
+                    text.count("id(oem_requery_pending) = false;"), 5
                 )
-                self.assertEqual(radio.count("id(oem_activity_ms) = now;"), 3)
-                self.assertEqual(
-                    radio.count("id(oem_requery_retry_left) = 1;"), 3
-                )
-                self.assertEqual(
-                    radio.count("id(oem_requery_due_ms) = now + 3000UL;"), 3
-                )
-                self.assertNotRegex(radio, r"(?m)^\s+- script\.execute:")
 
     def test_auto_requery_fires_one_bounded_query_after_quiet_window(self) -> None:
         for name, text in (("lora32", self.text), ("v3", self.v3_text)):
@@ -3007,11 +2764,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                 )
                 condition = item[: item.index("id(oem_requery_pending) = false;")]
                 self.assertIn("if (!id(oem_requery_pending)) return false;", condition)
-                self.assertIn("since <= 30000UL", condition)
-                self.assertIn(
-                    "(int32_t)(millis() - id(oem_requery_due_ms)) >= 0",
-                    condition,
-                )
+                self.assertIn("since >= 3000UL && since <= 30000UL", condition)
                 self.assertIn("!id(fan_state_known)", condition)
                 self.assertIn("!id(cl_active) && id(refire_left) == 0", condition)
                 self.assertIn(
@@ -3022,7 +2775,6 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     "!id(learn_active) && id(learned_sender_id) != 0", condition
                 )
                 body = item[item.index("id(oem_requery_pending) = false;") :]
-                self.assertIn("bool is_retry", item)
                 self.assertIn("cmd: 0x66", body)
                 self.assertEqual(body.count("script.execute"), 1)
 
@@ -3033,82 +2785,11 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
                     text, "id(oem_query_seen) = false;"
                 )
                 drop = housekeeping[
-                    housekeeping.index("id(oem_requery_pending) ||") :
+                    housekeeping.index("id(oem_requery_pending) &&") :
                 ]
                 self.assertIn("id(fan_state_known) ||", drop)
                 self.assertIn("(millis() - id(oem_activity_ms)) > 30000UL", drop)
                 self.assertIn("id(oem_requery_pending) = false;", drop)
-                self.assertIn("id(oem_requery_retry_left) = 0;", drop)
-                self.assertIn("id(oem_requery_due_ms) = 0;", drop)
-
-    def test_failed_oem_auto_refresh_gets_exactly_one_jittered_retry(self) -> None:
-        for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
-            with self.subTest(config=config_name):
-                globals_block = top_level_block(text, "globals")
-                self.assertIn("- id: oem_requery_retry_left", globals_block)
-                self.assertIn("- id: oem_requery_due_ms", globals_block)
-                self.assertIn("- id: cl_query_auto_recovery", globals_block)
-
-                # Every genuine OEM-evidence site renews one retry and a
-                # three-second quiet deadline. It still only raises flags in
-                # RX; no receive callback is allowed to transmit.
-                self.assertEqual(
-                    text.count("id(oem_requery_retry_left) = 1;"), 3
-                )
-                self.assertEqual(
-                    text.count("id(oem_requery_due_ms) = now + 3000UL;"), 3
-                )
-
-                coordinator = interval_item_containing(text, "id(cl_report_ready)")
-                manual_timeout = coordinator[
-                    coordinator.index(
-                        "if (id(cl_query_epoch) && !id(cl_query_epoch_confirmation)"
-                    ) : coordinator.index(
-                        "if (id(cl_query_epoch) &&", coordinator.index(
-                            "if (id(cl_query_epoch) && !id(cl_query_epoch_confirmation)"
-                        ) + 1
-                    )
-                ]
-                self.assertIn("id(oem_requery_retry_left) > 0", manual_timeout)
-                self.assertIn("<= 30000UL", manual_timeout)
-                self.assertIn("id(oem_requery_retry_left)--;", manual_timeout)
-                self.assertIn("id(oem_requery_pending) = true;", manual_timeout)
-                self.assertIn("${closed_loop_response_tail_ms}", manual_timeout)
-                self.assertIn("500UL + (id(oem_activity_ms) % 501UL)", manual_timeout)
-                self.assertIn("id(cl_query_auto_recovery)", manual_timeout)
-                self.assertIn(
-                    "manual refresh missed; bounded OEM-recovery retry pending",
-                    manual_timeout,
-                )
-                self.assertIn(
-                    "auto refresh missed; one bounded retry pending",
-                    manual_timeout,
-                )
-
-                tx_burst = script_blocks(text)["tx_burst"]
-                self.assertIn("auto_recovery: bool", tx_burst)
-                self.assertIn(
-                    "id(cl_query_auto_recovery) = auto_recovery;", tx_burst
-                )
-
-                auto_requery = interval_item_containing(
-                    text, "auto refresh after OEM remote activity"
-                )
-                action_start = auto_requery.index("          then:")
-                condition = auto_requery[:action_start]
-                self.assertIn(
-                    "(int32_t)(millis() - id(oem_requery_due_ms)) >= 0",
-                    condition,
-                )
-                body = auto_requery[action_start:]
-                self.assertEqual(body.count("script.execute"), 1)
-                self.assertEqual(body.count("cmd: 0x66"), 1)
-                self.assertEqual(body.count("auto_recovery: true"), 1)
-
-                refresh = list_item_containing(
-                    text, "button", 'name: "Refresh Fan State"'
-                )
-                self.assertIn("auto_recovery: false", refresh)
 
     def test_display_state_word_marks_lost_authority(self) -> None:
         for name, text in (("lora32", self.text), ("v3", self.v3_text)):
