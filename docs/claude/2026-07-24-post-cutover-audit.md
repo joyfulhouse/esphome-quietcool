@@ -26,6 +26,41 @@ The crash mechanism that bricked the controller twice is closed in the
 *deployed* firmware, and closed *structurally* rather than by tuning a margin.
 The gap is that nothing carries that guarantee forward to the next deployment.
 
+Three passes independently converged on that conclusion from different
+evidence:
+
+| Property | Evidence | Source |
+|---|---|---|
+| Reentrancy eliminated **within the core** | The former recursion (`apply_effect(RequestTxBurst)` → `Busy` → `on_tx_rejected` → recurse) is now deferred to the next `loop()` via `core_callbacks_`; `apply_effect` has no branch that calls `apply_effects` | adapter pass, verified independently on re-challenge; Codex concurs |
+| Stack depth bounded **by construction** | Target-frame objdump: `reduce` is a graph root never re-entered from its own subtree; `TrackCandidate` is `break` with a ≤2-iteration loop; no recursion/`alloca`/VLA in the namespace. Deepest chain ≈5.2 KB against 16 KB | hardening pass |
+| Drain queue cannot overflow | One reduction emits ≤4 effects (`CoreEffects::kCapacity=4`); queue is never re-enqueued mid-`drain()`. Depth **≤4 of 16** | adapter pass, derived independently |
+
+The 16 KB loop stack is genuine headroom, not a larger cushion under an
+unbounded path.
+
+**Scope correction, from the Codex cross-check.** "Structurally eliminated" is
+correct *inside the core* but overstated as a whole-system claim. `CoreEffectDrain`
+prevents a nested drain, but public component entry points call into `core_`
+**before** enqueueing their returned effects, and ESPHome's `publish_state()`
+callbacks are synchronous. So a user entity automation can enter core APIs
+while a prior effect batch is still draining
+(`quietcool_component.cpp:61,91`; `esp_event_sink.cpp:121`;
+`quietcool_fan.cpp:53`).
+
+Concrete scenario: a `command_status` `on_value` automation that requests
+Refresh whenever status becomes `"refused"`. Each refusal publishes
+synchronously, the automation issues another Refresh, the nested drain returns
+via its guard, and the outer drain consumes the newly enqueued refusal —
+looping until a watchdog reset, with queue occupancy never exceeding ~1 (so the
+overflow protection never trips).
+
+The shipped YAML contains no such automation, so this is **configuration-
+dependent, not presently reachable**. The accurate formulation is: reentrancy
+is eliminated *within the core*, and not yet structurally enforced *at the
+component boundary*. The invariant that is actually required — no new core
+input until every effect and publication from the previous input completes — is
+not enforced by construction.
+
 ---
 
 ## HIGH — the fix is deployed but not encoded; the repo will reproduce the crash
@@ -74,43 +109,6 @@ test target.
 
 This is the highest-value finding of the audit: the deployed firmware is safe,
 but the *repository* currently cannot keep it that way.
-
-Three passes independently converged on that conclusion from different
-evidence:
-
-| Property | Evidence | Source |
-|---|---|---|
-| Reentrancy eliminated **within the core** | The former recursion (`apply_effect(RequestTxBurst)` → `Busy` → `on_tx_rejected` → recurse) is now deferred to the next `loop()` via `core_callbacks_`; `apply_effect` has no branch that calls `apply_effects` | adapter pass, verified independently on re-challenge; Codex concurs |
-| Stack depth bounded **by construction** | Target-frame objdump: `reduce` is a graph root never re-entered from its own subtree; `TrackCandidate` is `break` with a ≤2-iteration loop; no recursion/`alloca`/VLA in the namespace. Deepest chain ≈5.2 KB against 16 KB | hardening pass |
-| Drain queue cannot overflow | One reduction emits ≤4 effects (`CoreEffects::kCapacity=4`); queue is never re-enqueued mid-`drain()`. Depth **≤4 of 16** | adapter pass, derived independently |
-
-The 16 KB loop stack is genuine headroom, not a larger cushion under an
-unbounded path.
-
-**Scope correction, from the Codex cross-check.** "Structurally eliminated" is
-correct *inside the core* but overstated as a whole-system claim. `CoreEffectDrain`
-prevents a nested drain, but public component entry points call into `core_`
-**before** enqueueing their returned effects, and ESPHome's `publish_state()`
-callbacks are synchronous. So a user entity automation can enter core APIs
-while a prior effect batch is still draining
-(`quietcool_component.cpp:61,91`; `esp_event_sink.cpp:121`;
-`quietcool_fan.cpp:53`).
-
-Concrete scenario: a `command_status` `on_value` automation that requests
-Refresh whenever status becomes `"refused"`. Each refusal publishes
-synchronously, the automation issues another Refresh, the nested drain returns
-via its guard, and the outer drain consumes the newly enqueued refusal —
-looping until a watchdog reset, with queue occupancy never exceeding ~1 (so the
-overflow protection never trips).
-
-The shipped YAML contains no such automation, so this is **configuration-
-dependent, not presently reachable**. The accurate formulation is: reentrancy
-is eliminated *within the core*, and not yet structurally enforced *at the
-component boundary*. The invariant that is actually required — no new core
-input until every effect and publication from the previous input completes — is
-not enforced by construction.
-
----
 
 ## The finding that matters most: a latent crash class
 
@@ -295,30 +293,33 @@ not a risk.
 
 ---
 
-## Test coverage: the gap is where the risk is
+## Test coverage: the gap is where the risk was
 
-`quietcool_component.cpp` — which holds the **adapter half of the crash fix** —
-has **zero host-test coverage**. The Makefile's `CORE_SOURCES` excludes all of
-`esphome/` and both radio adapters. Those files are verified only by
-`esphome compile` and live uptime.
+*As found.* `quietcool_component.cpp` — which holds the **adapter half of the
+crash fix** — had **zero host-test coverage**. The Makefile's `CORE_SOURCES`
+excluded all of `esphome/` and both radio adapters, so those files were
+verified only by `esphome compile` and live uptime.
 
-The core half is genuinely well tested: a `-finstrument-functions` recursion
-probe fails if the recursion is reintroduced; `CoreEffectDrain` reentrancy and
-queue-full behaviour have real unit tests.
+The core half was already well tested: a `-finstrument-functions` recursion
+probe fails if the reducer recursion is reintroduced, and `CoreEffectDrain`
+reentrancy and queue-full behaviour have real unit tests.
 
-Highest-value missing tests:
+Remaining highest-value tests, in priority order:
 
-1. `adapter_apply_effects_reentrancy_test` — feed `RequestTxBurst` while the
-   burst is Busy; assert `on_tx_rejected` is deferred to the *next* `loop()`
-   and never re-enters `apply_effects`.
-2. `adapter_queue_overflow_marks_failed_test` — force overflow; assert
-   `mark_failed()` + single `ESP_LOGE`, clean halt.
-3. `consensus_guard_policy_equivalence_test` — the 96-input enumeration above.
-4. `reducer_iterative_equivalence_test` — replay the REG + fuzz corpus through
+1. `reducer_iterative_equivalence_test` — replay the REG + fuzz corpus through
    both a reference recursive model and the iterative reducer; assert identical
-   traces. (The rewrite is currently backstopped only by unchanged tests.)
-5. `fuzz_recursion_probe` — extend the probe to the whole arbitrary-sequence
-   loop, not just REG-D, to cover the Refresh→query→consensus path of crash 2.
+   traces. The rewrite is currently backstopped only by unchanged tests plus
+   the recursion probe, so behaviour-preservation is inferred, not proven.
+2. `fuzz_recursion_probe` — extend the probe to the whole arbitrary-sequence
+   loop rather than only REG-D, covering the Refresh→query→consensus path that
+   produced the second crash.
+3. `adapter_queue_overflow_marks_failed_test` — the overflow path is now
+   reachable in the adapter suite but is not yet driven to overflow, because
+   forcing >16 queued effects requires a core state that emits repeatedly
+   without draining. Worth constructing deliberately.
+
+Closed since: the adapter deferral tests (`bdc2bb1`) and the guard/policy
+equivalence test (`e08a9f3`).
 
 ---
 
@@ -486,6 +487,7 @@ every change below takes effect at the next deliberate flash.
 | `CoreEffects` capacity comment rot | Fixed | `1352686` |
 | Toolchain version unpinned | Fixed — `min_version` in all three configs | `f697c00` |
 | Two duplicate bounded FIFOs | Fixed — shared `RingBuffer<T,N>` | `8c840ae` |
+| **Adapter half of the crash fix untested** | Fixed — 8 host tests, mutation-verified | `bdc2bb1` |
 | Restart button dropped from production YAML | Fixed — pending next flash | live copy |
 | "IP Address" entity silently dropped | Fixed — pending next flash | live copy |
 
@@ -508,24 +510,39 @@ twice, for different reasons. That is why the target-build coverage of the new
 `RingBuffer` was confirmed with a deliberate `static_assert(false)` probe
 rather than assumed from a successful compile.
 
+### The adapter gap, now closed
+
+The largest coverage gap — `quietcool_component.cpp`, holding the adapter half
+of the crash fix — is covered as of `bdc2bb1`. The scaffold turned out far
+smaller than feared, because the adapter really is thin: all four adapter
+translation units compile against seven mechanical stub headers under
+`-Wall -Wextra -Werror`, and the classes that carry the logic
+(`ConfirmationCore`, `BurstTransmitter`, `CoreEffectDrain`,
+`CoreCallbackQueue`) are the real ones, already host-compiled.
+
+The suite was mutation-verified rather than trusted: restoring the pre-fix
+inline `core_.on_radio_recovered()` call inside `apply_effect()` — the exact
+shape that corrupted the FreeRTOS ready lists — fails three of the eight tests.
+
+`quietcool_fan.cpp` and `quietcool_button.cpp` remain excluded. Stubbing
+`fan::Fan` and `button::Button` would be a reimplementation rather than a stub,
+and a stub large enough to be wrong is worse than no test. Both stay covered by
+`esphome compile`, and the publication gate they depend on is separately
+unit-tested.
+
 ### Deliberately not done
 
-- **Adapter host tests** (`apply_effects` reentrancy deferral; queue-overflow →
-  `mark_failed`). Still the largest coverage gap. Host-compiling
-  `quietcool_component.cpp` requires stubbing `esphome::Component`,
-  `fan::Fan`, preferences and the entity base classes — a scaffold big enough
-  that it could be wrong in ways that read as passing. Worth doing properly,
-  not worth improvising at the end of an audit.
 - **Publishing entities as unavailable on `mark_failed`.** The Restart button
-  restores recovery, but the wedge remains invisible in Home Assistant. This is
-  an adapter code change in exactly the untested file above, so it should land
-  together with those tests.
+  restores recovery, but the wedge is still invisible in Home Assistant. Doing
+  this properly means a new diagnostic entity kind — codegen, a new `kind:`
+  value, and a YAML change that alters the entity set on a live system. That is
+  a product decision rather than a defect fix, and it cannot be validated
+  without a flash, so it is left for the next deliberate deployment.
 - **`CoreEffects&` out-params** on `begin_transaction`/`defer_command`
   (~0.65–1.3 KB off the deepest frame) — unnecessary at 62% margin.
 - **`sram1_as_iram`** — IRAM, not DRAM; the build is not IRAM-constrained.
 - **Test-fixture deduplication** (~50 repeated definitions) — mechanical churn
   across 18 files with modest benefit; better as its own change.
-
 ---
 
 ## Recommended actions, in order
