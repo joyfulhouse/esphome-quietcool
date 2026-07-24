@@ -343,8 +343,34 @@ both, so the fully-qualified declaration is still required).
 Recommendation: **pin the ESPHome version explicitly** so a recompile cannot
 resolve to a toolchain that breaks the `image` platform.
 
-Mitigating: the **rollback config validates cleanly under installed 2025.11.5**,
-so emergency rollback is not broken.
+### Correction: the rollback path was broken, and worse than reported
+
+This document originally claimed the rollback config validated cleanly under the
+installed 2025.11.5, "so emergency rollback is not broken." **That was wrong.**
+The check behind it grepped command output for a specific error string rather
+than testing the exit status, and silently passed.
+
+Re-tested properly on 2026-07-24, every config — the live YAML build, the
+upstairs wrapper, *and* the rollback backup — **fails under 2025.11.5**. The
+`image: platform: file` syntax needs 2026.7.x. The version pin now added to all
+three configs turns that into a clear message instead of a schema error.
+
+Two further defects surfaced in the rollback rigging itself, both of which would
+only have appeared mid-emergency:
+
+1. `secrets.yaml` resolves relative to the **config file**, not the working
+   directory, so the backup directory could not read it.
+2. `external_components` pointed at a relative `components` directory that did
+   not exist inside the backup.
+
+Both are fixed with symlinks to the parent (no credentials duplicated), and the
+rollback config now validates. `backup-2026-07-24-pre-cpp/README.txt` records
+the working commands, the toolchain requirement, and the serial fallback that
+needs no ESPHome at all.
+
+The lesson matches the rest of this audit: **an untested recovery path is not a
+recovery path.** The rigging had been in place all day and had never been
+exercised beyond copying files into it.
 
 ---
 
@@ -590,6 +616,38 @@ insurance against the failure modes the audit could identify.
 **Still owed to the system, not the code:** the §20 bench gates
 (forced-miss, forced watchdog trip, >7-trial timing) and a first Refresh from
 the mounted position. No amount of static review substitutes for these.
+
+---
+
+## Receiver inventory (2026-07-24)
+
+Established while checking whether both units run the latest build. They are
+**not on the same track**, which matters before any "update everything" action.
+
+| | Downstairs | Upstairs |
+|---|---|---|
+| Address | `10.100.8.46` | `10.100.2.62` (mDNS resolves) |
+| Config | `quietcool-cpp-lora32.yaml` | `quietcool-lora32-upstairs.yaml` |
+| Track | **C++ component** | **YAML** — wraps `quietcool-lora32.yaml` as a package |
+| Sender ID | `0xCB004739` (provisioned) | `0x00000000` — learns from its own remote |
+| Running | ESPHome 2026.7.0, built 11:26:36 | not yet banner-checked |
+| Rollback rigging | yes, now verified | **none** |
+| API | open (healthy) | open (healthy) |
+
+Consequences worth stating plainly:
+
+- **"Latest" is ambiguous for upstairs.** It is a YAML-track device. Bringing it
+  to the latest *C++* build is a migration, not an update: it needs its own
+  wrapper over `quietcool-cpp-lora32.yaml`, and its unprovisioned seed means it
+  must re-learn from the upstairs remote after flashing. Its OTA password was
+  also rotated on 2026-07-20 with the documented compile-then-upload caveat.
+- **Upstairs has no rollback binary.** Downstairs got one before its cutover;
+  upstairs never did. Take one before changing it.
+- **Downstairs is behind the repository**, but only by changes made *after* its
+  11:26 flash — the consensus fail-safe, the reducer cleanup, the state-count
+  derivation and the `RingBuffer` refactor. Those are real firmware changes and
+  have not been through the adversarial-review gate that this project requires
+  before a production RF flash; the audit reviewed the pre-change code.
 
 ---
 
