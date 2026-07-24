@@ -3,6 +3,12 @@
 esphome:
   name: quietcool-cpp-example
   friendly_name: "QuietCool C++ Example"
+  # Toolchain floor, matching the version the shipped firmware was built with
+  # (2026.7.0). The production config resolved to an ephemeral ESPHome that was
+  # not the installed one, and older releases reject parts of that config with
+  # a confusing schema error rather than a version message. Pin the floor so a
+  # build cannot silently land on a toolchain that cannot express this config.
+  min_version: 2026.7.0
   # ESPHome 2025.11 does not recursively copy C++ files from an external
   # component. This official includes bridge preserves the contractual
   # core/ports/radio/esphome source tree in the generated build.
