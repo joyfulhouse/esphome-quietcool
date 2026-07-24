@@ -1,0 +1,48 @@
+# Round-2 stack diagnostic for the deployed TTGO LoRa32 V2.1 controller.
+#
+# This deliberately packages the read-only production configuration instead of
+# copying it, so radio settings, entities, display work, logger level, API
+# encryption, credentials, and the C++ component source remain identical.
+packages:
+  production: !include ../homeassistant-dev/quietcool/quietcool-cpp-lora32.yaml
+
+# Diagnostic changes versus production:
+#   1. Use ESP-IDF directly instead of the Arduino compatibility component.
+#   2. Double ESPHome's actual loopTask stack from 8 KiB to 16 KiB.
+#
+# CONFIG_ESP_MAIN_TASK_STACK_SIZE is not the controlling setting here:
+# ESPHome's esp32/core.cpp creates a separate static loopTask using
+# ESPHOME_LOOP_TASK_STACK_SIZE. The advanced option below emits that define and
+# therefore changes the stack that runs SX127x, QuietCool, API, and display
+# component loops. Changing only CONFIG_ESP_MAIN_TASK_STACK_SIZE would enlarge
+# app_main's short-lived IDF task but leave the audited loop stack at 8 KiB.
+esp32:
+  board: ttgo-lora32-v21
+  framework:
+    type: esp-idf
+    advanced:
+      loop_task_stack_size: 16384
+
+# Diagnostic-only high-water mark. ESP-IDF reports this value in bytes; it is
+# the smallest amount of free loop-task stack observed since task creation.
+# Sampling precedes this log call, so the log's own stack cost cannot make the
+# value optimistically larger. Do not add this interval to production unless a
+# later investigation specifically needs persistent instrumentation.
+interval:
+  - interval: 10s
+    startup_delay: 10s
+    then:
+      - lambda: |-
+          const UBaseType_t free_bytes =
+              uxTaskGetStackHighWaterMark(nullptr);
+          ESP_LOGI("quietcool.stack",
+                   "loopTask minimum free stack: %u bytes",
+                   static_cast<unsigned>(free_bytes));
+
+# Interpretation caveat:
+# A no-crash result with 16 KiB strongly supports residual stack exhaustion,
+# especially if the high-water value falls near/below the former 8 KiB limit.
+# It is not a perfectly single-variable experiment: removing Arduino can change
+# framework initialization, binary layout, driver paths, scheduling latency,
+# and timing. A crash with ample high-water margin excludes loop-stack size much
+# more strongly and should pivot the investigation to non-stack corruption.
