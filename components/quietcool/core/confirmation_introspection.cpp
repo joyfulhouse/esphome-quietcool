@@ -44,7 +44,26 @@ StateContext ConfirmationCore::context_for_test(CoordinatorState state) {
                                 std::nullopt,
                                 0,
                                 0};
-  default:
+  // Enumerated rather than defaulted: with a `default` label, a newly added
+  // state fell through to the query-family fallback below and was silently
+  // mapped to QueryPendingContext, so context_matches_state() would validate
+  // the wrong variant instead of failing. Listing them means -Wswitch
+  // -Werror rejects the build until the new state is classified here.
+  case CoordinatorState::BootQueryPending:
+  case CoordinatorState::BootQueryLeaseIssued:
+  case CoordinatorState::BootQueryTransmitting:
+  case CoordinatorState::BootResponseListening:
+  case CoordinatorState::ManualQueryPending:
+  case CoordinatorState::ManualQueryLeaseIssued:
+  case CoordinatorState::ManualQueryTransmitting:
+  case CoordinatorState::ManualResponseListening:
+  case CoordinatorState::FallbackQueryLeaseIssued:
+  case CoordinatorState::FallbackQueryTransmitting:
+  case CoordinatorState::FallbackResponseListening:
+  case CoordinatorState::RecoveryQueryPending:
+  case CoordinatorState::RecoveryQueryLeaseIssued:
+  case CoordinatorState::RecoveryQueryTransmitting:
+  case CoordinatorState::RecoveryResponseListening:
     break;
   }
   const bool lease = state == CoordinatorState::BootQueryLeaseIssued ||

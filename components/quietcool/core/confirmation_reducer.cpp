@@ -58,7 +58,6 @@ CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
   const ReducerInput* current = &input;
   std::optional<Consensus> reached_consensus;
   std::optional<ReducerInput> continuation;
-  std::optional<CoordinatorState> deferred_fixed_state;
   while (true) {
     const auto *rule = select_rule(*current);
     if (!rule) {
@@ -75,8 +74,6 @@ CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
       else if (current->kind == EventKind::ConsensusReached)
         effects.add(PublishCoreEvent{
             {CoreEventKind::InvalidInternalEvent, state_, {}, {}, {}}});
-      if (deferred_fixed_state)
-        state_ = *deferred_fixed_state;
       return effects;
     }
     if (rule->action == ActionId::TrackCandidate) {
@@ -90,7 +87,11 @@ CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
           state_ = *fixed;
         return {};
       }
-      deferred_fixed_state = fixed;
+      // Both TrackCandidate rules declare NextStateId::Computed, so `fixed` is
+      // necessarily empty here and the continuation's own rule owns the
+      // resulting state. Enforced at compile time by
+      // track_candidate_rules_are_computed() in transition_table.cpp, so no
+      // state needs carrying across the continuation.
       continuation.emplace(EventKind::ConsensusReached, current->now_ms);
       continuation->consensus = &*reached_consensus;
       current = &*continuation;
@@ -101,8 +102,6 @@ CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
         TransitionTable::fixed_next_state(rule->next, rule->state);
     if (fixed)
       state_ = *fixed;
-    if (deferred_fixed_state)
-      state_ = *deferred_fixed_state;
     return effects;
   }
 }

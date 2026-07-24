@@ -23,9 +23,13 @@ using CoreEffect = std::variant<RequestTxBurst, RevokeTxLease, PublishCoreEvent,
 
 class CoreEffects final {
  public:
-  // Production branches emit at most three effects in one reduction. Keep one
-  // spare slot without paying for the former eight-slot buffer in every frame
-  // that returns CoreEffects by value.
+  // Four is the exact production maximum, not a maximum plus slack: the
+  // supersession-with-pre-existing-deferred path emits RequestRadioReset,
+  // TransactionFinished, Superseded and RequestAccepted in one reduction.
+  // add() fails closed on the fifth, and callers ignore the return, so a new
+  // branch that emits five would silently drop one — raise this if that ever
+  // becomes possible. The buffer is deliberately small because CoreEffects is
+  // returned by value through the deepest frames on the target stack.
   static constexpr std::size_t kCapacity = 4;
 
   std::size_t size() const { return size_; }

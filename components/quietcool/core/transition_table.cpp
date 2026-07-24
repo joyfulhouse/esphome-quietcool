@@ -120,7 +120,7 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
   }
   add_consensus(rules, index, CoordinatorState::PostCommandListening);
   add_consensus(rules, index, CoordinatorState::FallbackResponseListening);
-  for (std::uint8_t value = 0; value < 31; ++value) {
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
     add_rule(rules, index, state, EventKind::ManualRefreshRequested, GuardId::Always,
              state == CoordinatorState::Idle ? ActionId::AcceptRefresh
@@ -129,7 +129,7 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
                                              : NextStateId::Same,
              1, TemplateOrigin::None);
   }
-  for (std::uint8_t value = 0; value < 31; ++value) {
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
     const bool learning = state == CoordinatorState::LearningAwaitingFirst ||
                           state == CoordinatorState::LearningAwaitingSecond;
@@ -144,7 +144,7 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
            EventKind::TailExpired, GuardId::TailOwnsTransaction,
            ActionId::CreateFallback, NextStateId::FallbackQueryPending, 1,
            TemplateOrigin::None);
-  for (std::uint8_t value = 0; value < 31; ++value) {
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
     // Restore depends on persisted validity, RadioReady on first-ready history, and
     // CommandRequested on transaction/window context, so their targets are computed.
@@ -160,7 +160,7 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
     add_rule(rules, index, state, EventKind::ForgetRequested, GuardId::Always,
              ActionId::HandleForget, NextStateId::Unprovisioned, 1, TemplateOrigin::None);
   }
-  for (std::uint8_t value = 0; value < 31; ++value) {
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
     const bool query_response = state == CoordinatorState::BootResponseListening ||
         state == CoordinatorState::ManualResponseListening ||
@@ -171,7 +171,7 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
                ActionId::HandleExternalState, NextStateId::OemHoldoff, 1,
                TemplateOrigin::None);
   }
-  for (std::uint8_t value = 0; value < 31; ++value)
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value)
     add_rule(rules, index, static_cast<CoordinatorState>(value),
              EventKind::TimerEstimateExpired, GuardId::Always,
              ActionId::HandleTimerExpiry, NextStateId::Computed, 1,
@@ -268,7 +268,7 @@ constexpr auto kRules = make_rules();
 constexpr bool valid_rules() {
   constexpr std::size_t kEventCount =
       static_cast<std::size_t>(EventKind::Poll) + 1U;
-  std::array<std::uint16_t, 31U * kEventCount> last_priority{};
+  std::array<std::uint16_t, kCoordinatorStateCount * kEventCount> last_priority{};
   for (std::size_t i = 0; i < kRules.size(); ++i) {
     const auto& rule = kRules[i];
     if (rule.rule_id != i + 1U) return false;
@@ -281,6 +281,19 @@ constexpr bool valid_rules() {
   return true;
 }
 static_assert(valid_rules(), "transition rules must have unique IDs and priorities");
+
+// The reducer relies on this: TrackCandidate returns to the loop and lets the
+// continuation's rule choose the state, so a fixed next-state on those rules
+// would be silently discarded.
+constexpr bool track_candidate_rules_are_computed() {
+  for (const auto& rule : kRules)
+    if (rule.action == ActionId::TrackCandidate &&
+        rule.next != NextStateId::Computed)
+      return false;
+  return true;
+}
+static_assert(track_candidate_rules_are_computed(),
+              "TrackCandidate rules must declare NextStateId::Computed");
 
 }  // namespace
 

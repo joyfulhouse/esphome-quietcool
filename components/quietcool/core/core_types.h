@@ -105,6 +105,12 @@ enum class CoordinatorState : std::uint8_t {
   LearningAwaitingFirst, LearningAwaitingSecond, RadioRecovery
 };
 
+// Derived from the enum rather than written down. The transition table's
+// universal-rule generators loop over every state; a hand-maintained count
+// would silently skip a newly added state, and nothing would fail.
+constexpr std::size_t kCoordinatorStateCount =
+    static_cast<std::size_t>(CoordinatorState::RadioRecovery) + 1U;
+
 enum class TxReason : std::uint8_t {
   BootQuery, ManualQuery, RecoveryQueryInitial, RecoveryQueryRetry,
   TimerExpiryRecoveryQuery, TransactionCommand, TransactionFallbackQuery
