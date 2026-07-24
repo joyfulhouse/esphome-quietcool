@@ -9,6 +9,13 @@ CORE_SOURCES := $(wildcard $(ROOT)/components/quietcool/core/*.cpp) \
 	$(wildcard $(ROOT)/components/quietcool/ports/*.cpp) \
 	$(ROOT)/components/quietcool/radio/burst_transmitter.cpp
 TEST_SOURCES := $(shell find . -name '*_test.cpp' -print) support/test_main.cpp
+# Headers MUST be prerequisites. Without them, editing a core header — where
+# the guard predicates, CoreEffects and the effect drain all live — left the
+# previous binary in place and the suite "passed" against stale object code.
+HEADERS := $(wildcard $(ROOT)/components/quietcool/core/*.h) \
+	$(wildcard $(ROOT)/components/quietcool/ports/*.h) \
+	$(ROOT)/components/quietcool/radio/burst_transmitter.h \
+	$(shell find . -name '*.h' -print)
 TARGET := $(BUILD)/quietcool_core_tests
 SANITIZED_TARGET := $(BUILD)/quietcool_core_tests_sanitized
 # -finstrument-functions is omitted here: the recursion probe is exercised by
@@ -25,11 +32,11 @@ PLATFORM_FREE_SOURCES := $(wildcard $(ROOT)/components/quietcool/core/*.h) \
 .PHONY: all test test-sanitized platform-include-check production-flags-check clean
 all: $(TARGET)
 
-$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES)
+$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(TEST_CXXFLAGS) $(INCLUDES) $(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
-$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES)
+$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(SANITIZE_FLAGS) $(INCLUDES) \
 		$(CORE_SOURCES) $(TEST_SOURCES) -o $@

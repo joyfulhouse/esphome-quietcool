@@ -110,8 +110,28 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
         std::holds_alternative<ExhaustAndPromoteObservedState>(decision);
   }
   if (!policy_matches) {
+    // The guard table and ObservationPolicy are two encodings of one decision.
+    // They agree over the whole input domain today (see the exhaustive
+    // equivalence test), so this branch is unreachable — but it must fail
+    // safe rather than fall through, because the consensus inputs that would
+    // select a diverging combination are attacker-controllable by RF
+    // injection during the listening window.
+    //
+    // Returning here without enter_tail() used to leave context_ on the
+    // previous alternative while the rule table still forced
+    // state_ = ResponseTailQuarantine. The next event's
+    // std::get<TailQuarantineContext> would then throw, and with
+    // -fno-exceptions on ESP-IDF that is std::terminate: a remotely
+    // triggerable reboot loop the moment the two encodings ever drift.
+    //
+    // Resynchronize instead: surrender authority (the observation cannot be
+    // trusted when the two encodings disagree about what it means), close the
+    // transaction, and enter the tail so state_ and context_ agree.
     effects.add(PublishCoreEvent{
         {CoreEventKind::InvalidInternalEvent, state_, {}, {}, {}}});
+    authority_.invalidate(AuthorityLossReason::ConsensusTimeout, now_ms);
+    finish_transaction(TransactionOutcome::Exhausted, effects);
+    enter_tail(ReturnIdle{}, value.state);
     return effects;
   }
   const auto promote = [&](bool local) {
