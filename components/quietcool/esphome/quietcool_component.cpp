@@ -31,6 +31,18 @@ void QuietCoolComponent::setup() {
 
 void QuietCoolComponent::loop() {
   const auto now_ms = clock_.now_ms();
+  if (const auto callback = core_callbacks_.pop(now_ms)) {
+    if (callback->kind == ::quietcool::CoreCallbackKind::TxRejected &&
+        callback->token) {
+      apply_effects(core_.on_tx_rejected(*callback->token, callback->now_ms),
+                    callback->now_ms);
+    } else if (callback->kind ==
+               ::quietcool::CoreCallbackKind::RadioRecovered) {
+      apply_effects(core_.on_radio_recovered(callback->now_ms),
+                    callback->now_ms);
+    }
+    return;
+  }
   if (const auto event = burst_.poll(now_ms)) {
     apply_burst_event(*event, now_ms);
     if (std::holds_alternative<::quietcool::BurstStarted>(*event)) {
@@ -79,20 +91,37 @@ void QuietCoolComponent::request_forget() {
 void QuietCoolComponent::apply_effects(
     const ::quietcool::CoreEffects& effects,
     ::quietcool::MonotonicMs now_ms) {
-  events_.set_now_ms(now_ms);
-  for (std::size_t index = 0; index < effects.size(); ++index)
-    apply_effect(effects[index], now_ms);
-  events_.publish_authority(core_.snapshot(now_ms).authority, now_ms);
+  if (!enqueue_effects(effects, now_ms)) return;
+  auto apply = [this](const ::quietcool::CoreEffect& effect,
+                      ::quietcool::MonotonicMs effect_ms) {
+    events_.set_now_ms(effect_ms);
+    apply_effect(effect);
+  };
+  auto publish = [this](::quietcool::MonotonicMs publish_ms) {
+    events_.publish_authority(core_.snapshot(publish_ms).authority, publish_ms);
+  };
+  effect_drain_.drain(apply, publish);
+}
+
+bool QuietCoolComponent::enqueue_effects(
+    const ::quietcool::CoreEffects& effects,
+    ::quietcool::MonotonicMs now_ms) {
+  if (effect_drain_.enqueue(effects, now_ms)) return true;
+  ESP_LOGE(kTag, "Core effect queue capacity exceeded");
+  mark_failed();
+  return false;
 }
 
 void QuietCoolComponent::apply_effect(
-    const ::quietcool::CoreEffect& effect,
-    ::quietcool::MonotonicMs now_ms) {
+    const ::quietcool::CoreEffect& effect) {
   if (const auto* request =
           std::get_if<::quietcool::RequestTxBurst>(&effect)) {
-    if (burst_.accept(request->request) == ::quietcool::TxAcceptResult::Busy)
-      apply_effects(core_.on_tx_rejected(request->request.token, now_ms),
-                    now_ms);
+    if (burst_.accept(request->request) == ::quietcool::TxAcceptResult::Busy &&
+        !core_callbacks_.enqueue(::quietcool::CoreCallbackKind::TxRejected,
+                                 request->request.token)) {
+      ESP_LOGE(kTag, "Core callback queue capacity exceeded");
+      mark_failed();
+    }
     return;
   }
   if (const auto* revoke = std::get_if<::quietcool::RevokeTxLease>(&effect)) {
@@ -116,8 +145,12 @@ void QuietCoolComponent::apply_effect(
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {
-    if (radio_.recover() == ::quietcool::RadioRecoveryResult::Recovered)
-      apply_effects(core_.on_radio_recovered(now_ms), now_ms);
+    if (radio_.recover() == ::quietcool::RadioRecoveryResult::Recovered &&
+        !core_callbacks_.enqueue(::quietcool::CoreCallbackKind::RadioRecovered,
+                                 std::nullopt)) {
+      ESP_LOGE(kTag, "Core callback queue capacity exceeded");
+      mark_failed();
+    }
     return;
   }
   if (const auto* refusal = std::get_if<::quietcool::RefusedInput>(&effect)) {

@@ -102,7 +102,7 @@ constexpr void add_consensus(std::array<TransitionRule, kRuleCount>& rules,
 }
 
 // Computed is reserved for handlers whose target depends on runtime evidence:
-// candidate tracking may recursively reach consensus; recovery misses and due
+// candidate tracking may iteratively continue to consensus; recovery misses and due
 // events consult scheduler state; restore, first-ready, command, and timer events
 // inspect persisted or live context; holdoff/tail exits inspect deferred work;
 // learning depends on observed frames or sender presence; and radio recovery

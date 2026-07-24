@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quietcool/core/confirmation_core.h"
+#include "quietcool/ports/core_callback_queue.h"
 #include "esp_event_sink.h"
 #include "esp_monotonic_clock.h"
 #include "preferences_adapter.h"
@@ -66,8 +67,9 @@ class QuietCoolComponent final : public Component {
  private:
   void apply_effects(const ::quietcool::CoreEffects& effects,
                      ::quietcool::MonotonicMs now_ms);
-  void apply_effect(const ::quietcool::CoreEffect& effect,
-                    ::quietcool::MonotonicMs now_ms);
+  bool enqueue_effects(const ::quietcool::CoreEffects& effects,
+                       ::quietcool::MonotonicMs now_ms);
+  void apply_effect(const ::quietcool::CoreEffect& effect);
   void apply_burst_event(const ::quietcool::BurstEvent& event,
                          ::quietcool::MonotonicMs now_ms);
 
@@ -77,6 +79,8 @@ class QuietCoolComponent final : public Component {
   EspHomePreferencesAdapter preferences_;
   ::quietcool::ConfirmationCore core_;
   ::quietcool::BurstTransmitter burst_;
+  ::quietcool::CoreEffectDrain effect_drain_;
+  ::quietcool::CoreCallbackQueue core_callbacks_;
   AuthorityPublisher* authority_publisher_{nullptr};
 };
 

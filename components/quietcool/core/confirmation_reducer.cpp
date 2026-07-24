@@ -55,28 +55,56 @@ bool ConfirmationCore::guard_matches(GuardId guard,
               transaction_->may_emit_another_command()});
 }
 CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
-  const auto *rule = select_rule(input);
-  if (!rule) {
-    CoreEffects effects;
-    const bool tx_event = input.kind == EventKind::TxBurstStarted ||
-                          input.kind == EventKind::TxBurstComplete ||
-                          input.kind == EventKind::TxBurstRejected ||
-                          input.kind == EventKind::TxBurstFault ||
-                          input.kind == EventKind::TxLeaseWatchdogFired ||
-                          input.kind == EventKind::TxBurstWatchdogFired;
-    if (tx_event)
-      effects.add(PublishCoreEvent{
-          {CoreEventKind::StaleTxCallback, state_, {}, {}, input.token}});
-    else if (input.kind == EventKind::ConsensusReached)
-      effects.add(PublishCoreEvent{
-          {CoreEventKind::InvalidInternalEvent, state_, {}, {}, {}}});
+  const ReducerInput* current = &input;
+  std::optional<Consensus> reached_consensus;
+  std::optional<ReducerInput> continuation;
+  std::optional<CoordinatorState> deferred_fixed_state;
+  while (true) {
+    const auto *rule = select_rule(*current);
+    if (!rule) {
+      CoreEffects effects;
+      const bool tx_event = current->kind == EventKind::TxBurstStarted ||
+                            current->kind == EventKind::TxBurstComplete ||
+                            current->kind == EventKind::TxBurstRejected ||
+                            current->kind == EventKind::TxBurstFault ||
+                            current->kind == EventKind::TxLeaseWatchdogFired ||
+                            current->kind == EventKind::TxBurstWatchdogFired;
+      if (tx_event)
+        effects.add(PublishCoreEvent{
+            {CoreEventKind::StaleTxCallback, state_, {}, {}, current->token}});
+      else if (current->kind == EventKind::ConsensusReached)
+        effects.add(PublishCoreEvent{
+            {CoreEventKind::InvalidInternalEvent, state_, {}, {}, {}}});
+      if (deferred_fixed_state)
+        state_ = *deferred_fixed_state;
+      return effects;
+    }
+    if (rule->action == ActionId::TrackCandidate) {
+      const auto &candidate =
+          std::get<LocalResponseCandidate>(*current->classified);
+      reached_consensus = consensus_.observe(candidate.response, current->now_ms);
+      const auto fixed =
+          TransitionTable::fixed_next_state(rule->next, rule->state);
+      if (!reached_consensus) {
+        if (fixed)
+          state_ = *fixed;
+        return {};
+      }
+      deferred_fixed_state = fixed;
+      continuation.emplace(EventKind::ConsensusReached, current->now_ms);
+      continuation->consensus = &*reached_consensus;
+      current = &*continuation;
+      continue;
+    }
+    auto effects = dispatch(rule->action, *current);
+    const auto fixed =
+        TransitionTable::fixed_next_state(rule->next, rule->state);
+    if (fixed)
+      state_ = *fixed;
+    if (deferred_fixed_state)
+      state_ = *deferred_fixed_state;
     return effects;
   }
-  auto effects = dispatch(rule->action, input);
-  const auto fixed = TransitionTable::fixed_next_state(rule->next, rule->state);
-  if (fixed)
-    state_ = *fixed;
-  return effects;
 }
 CoreEffects ConfirmationCore::dispatch(ActionId action,
                                        const ReducerInput &input) {
@@ -113,15 +141,8 @@ CoreEffects ConfirmationCore::dispatch(ActionId action,
     return handle_tx_complete(*input.token, input.now_ms);
   case ActionId::BeginRadioRecovery:
     return handle_radio_fault(input.kind, input.token, input.now_ms);
-  case ActionId::TrackCandidate: {
-    const auto &candidate = std::get<LocalResponseCandidate>(*input.classified);
-    const auto reached = consensus_.observe(candidate.response, input.now_ms);
-    if (!reached)
-      return {};
-    ReducerInput next{EventKind::ConsensusReached, input.now_ms};
-    next.consensus = &*reached;
-    return reduce(next);
-  }
+  case ActionId::TrackCandidate:
+    break;
   case ActionId::ApplyConsensus:
   case ActionId::ConfirmAndPromote:
   case ActionId::YieldToOem:

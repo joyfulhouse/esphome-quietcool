@@ -1,6 +1,6 @@
 CXX ?= c++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2
-TEST_CXXFLAGS := $(CXXFLAGS) -DQUIETCOOL_HOST_TEST
+TEST_CXXFLAGS := $(CXXFLAGS) -DQUIETCOOL_HOST_TEST -finstrument-functions
 ROOT := ../..
 INCLUDES := -I$(ROOT)/components -I.
 BUILD := build

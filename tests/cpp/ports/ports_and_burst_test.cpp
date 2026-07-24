@@ -1,13 +1,18 @@
 #include "quietcool/core/confirmation_core.h"
+#include "quietcool/ports/core_callback_queue.h"
 #include "quietcool/radio/burst_transmitter.h"
 #include "support/test.h"
 #include "support/test_doubles.h"
 
+#include <array>
 #include <optional>
 #include <variant>
 
 namespace quietcool {
 namespace {
+
+static_assert(sizeof(CoreEffects) <= 800,
+              "CoreEffects must remain small enough for the ESP32 loop stack");
 
 SenderId port_sender() {
   return SenderId::from_be_u32(0xCB004739U).value();
@@ -213,6 +218,120 @@ QC_TEST("ports", "mid-burst fault enters started-token radio recovery") {
   QC_CHECK_EQ(core.snapshot(2).state, CoordinatorState::RadioRecovery);
   QC_CHECK_EQ(core.snapshot(2).transaction->attempts_started, 1U);
   QC_CHECK(has_radio_reset(effects));
+
+  std::array<CoreEffects, 4> batches;
+  for (std::uint8_t attempt = 1; attempt <= 16; ++attempt)
+    QC_CHECK(batches[(attempt - 1U) / CoreEffects::kCapacity].add(
+        RequestRadioReset{attempt}));
+  CoreEffectQueue queue;
+  for (std::size_t batch = 0; batch < batches.size(); ++batch)
+    QC_CHECK(queue.enqueue(batches[batch], (batch + 1U) * 10U));
+  QC_CHECK_EQ(queue.size(), CoreEffectQueue::kCapacity);
+  CoreEffects overflow;
+  QC_CHECK(overflow.add(RequestRadioReset{17}));
+  QC_CHECK(!queue.enqueue(overflow, 50));
+  QC_CHECK_EQ(queue.size(), CoreEffectQueue::kCapacity);
+  for (std::uint8_t attempt = 1; attempt <= 16; ++attempt) {
+    const auto queued = queue.pop();
+    QC_CHECK(queued.has_value());
+    QC_CHECK_EQ(std::get<RequestRadioReset>(queued->effect).attempt, attempt);
+    QC_CHECK_EQ(queued->now_ms, ((attempt - 1U) / 4U + 1U) * 10U);
+  }
+  QC_CHECK(!queue.pop().has_value());
+
+  CoreEffects initial;
+  QC_CHECK(initial.add(RequestRadioReset{1}));
+  CoreEffectDrain drain;
+  QC_CHECK(drain.enqueue(initial, 100));
+  std::vector<std::uint8_t> applied_attempts;
+  std::vector<MonotonicMs> publication_times;
+  const auto apply = [&](const CoreEffect& effect, MonotonicMs effect_ms) {
+    QC_CHECK(drain.draining());
+    const auto attempt = std::get<RequestRadioReset>(effect).attempt;
+    applied_attempts.push_back(attempt);
+    if (attempt == 1) {
+      CoreEffects reentrant;
+      QC_CHECK(reentrant.add(RequestRadioReset{2}));
+      QC_CHECK(drain.enqueue(reentrant, effect_ms + 100));
+    }
+  };
+  const auto publish = [&](MonotonicMs publish_ms) {
+    publication_times.push_back(publish_ms);
+    if (publication_times.size() == 1) {
+      CoreEffects reentrant;
+      QC_CHECK(reentrant.add(RequestRadioReset{3}));
+      QC_CHECK(drain.enqueue(reentrant, publish_ms + 100));
+    } else if (publication_times.size() == 2) {
+      CoreEffects empty_reentrant;
+      QC_CHECK(drain.enqueue(empty_reentrant, publish_ms + 100));
+    }
+  };
+  drain.drain(apply, publish);
+  QC_CHECK_EQ(applied_attempts,
+              (std::vector<std::uint8_t>{1, 2, 3}));
+  QC_CHECK_EQ(publication_times,
+              (std::vector<MonotonicMs>{200, 300, 400}));
+  QC_CHECK(!drain.draining());
+  QC_CHECK(drain.empty());
+
+  CoreEffects empty;
+  QC_CHECK(drain.enqueue(empty, 500));
+  drain.drain(apply, publish);
+  QC_CHECK_EQ(publication_times,
+              (std::vector<MonotonicMs>{200, 300, 400, 500}));
+  QC_CHECK(drain.empty());
+
+  CoreEffects timestamp_batch;
+  QC_CHECK(timestamp_batch.add(RequestRadioReset{4}));
+  QC_CHECK(timestamp_batch.add(RequestRadioReset{5}));
+  CoreEffectDrain timestamp_drain;
+  QC_CHECK(timestamp_drain.enqueue(timestamp_batch, 600));
+  std::vector<MonotonicMs> timestamp_publications;
+  const auto apply_with_empty_reentry =
+      [&](const CoreEffect& effect, MonotonicMs) {
+        if (std::get<RequestRadioReset>(effect).attempt == 4) {
+          CoreEffects empty_reentrant;
+          QC_CHECK(timestamp_drain.enqueue(empty_reentrant, 700));
+        }
+      };
+  const auto record_timestamp = [&](MonotonicMs publish_ms) {
+    timestamp_publications.push_back(publish_ms);
+  };
+  timestamp_drain.drain(apply_with_empty_reentry, record_timestamp);
+  QC_CHECK_EQ(timestamp_publications, (std::vector<MonotonicMs>{700}));
+
+  CoreCallbackQueue callbacks;
+  QC_CHECK(callbacks.enqueue(CoreCallbackKind::TxRejected, TxToken(41)));
+  QC_CHECK(callbacks.enqueue(CoreCallbackKind::RadioRecovered, std::nullopt));
+  const auto rejected_callback = callbacks.pop(900);
+  QC_CHECK(rejected_callback.has_value());
+  QC_CHECK_EQ(rejected_callback->kind, CoreCallbackKind::TxRejected);
+  QC_CHECK_EQ(rejected_callback->token, TxToken(41));
+  QC_CHECK_EQ(rejected_callback->now_ms, 900U);
+  const auto recovered_callback = callbacks.pop(1000);
+  QC_CHECK(recovered_callback.has_value());
+  QC_CHECK_EQ(recovered_callback->kind, CoreCallbackKind::RadioRecovered);
+  QC_CHECK(!recovered_callback->token.has_value());
+  QC_CHECK_EQ(recovered_callback->now_ms, 1000U);
+  QC_CHECK(!callbacks.pop(1100).has_value());
+  for (std::uint64_t token = 1; token <= CoreCallbackQueue::kCapacity; ++token)
+    QC_CHECK(callbacks.enqueue(CoreCallbackKind::TxRejected, TxToken(token)));
+  QC_CHECK(!callbacks.enqueue(CoreCallbackKind::TxRejected, TxToken(9)));
+  for (std::uint64_t token = 1; token <= CoreCallbackQueue::kCapacity; ++token) {
+    const auto callback = callbacks.pop(1100 + token);
+    QC_CHECK(callback.has_value());
+    QC_CHECK_EQ(callback->token, TxToken(token));
+    QC_CHECK_EQ(callback->now_ms, 1100U + token);
+  }
+  QC_CHECK(!callbacks.pop(1200).has_value());
+}
+
+QC_TEST("ports", "core effect batches retain one slot beyond production peak") {
+  CoreEffects effects;
+  for (std::uint8_t attempt = 1; attempt <= 4; ++attempt)
+    QC_CHECK(effects.add(RequestRadioReset{attempt}));
+  QC_CHECK(!effects.add(RequestRadioReset{5}));
+  QC_CHECK_EQ(effects.size(), 4U);
 }
 
 QC_TEST("ports", "fake preferences carries learn and forget across reboot") {

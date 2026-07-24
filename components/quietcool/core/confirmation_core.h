@@ -23,6 +23,11 @@ using CoreEffect = std::variant<RequestTxBurst, RevokeTxLease, PublishCoreEvent,
 
 class CoreEffects final {
  public:
+  // Production branches emit at most three effects in one reduction. Keep one
+  // spare slot without paying for the former eight-slot buffer in every frame
+  // that returns CoreEffects by value.
+  static constexpr std::size_t kCapacity = 4;
+
   std::size_t size() const { return size_; }
   const CoreEffect& operator[](std::size_t index) const { return effects_[index].value(); }
   bool add(CoreEffect effect) {
@@ -31,8 +36,78 @@ class CoreEffects final {
     return true;
   }
  private:
-  std::array<std::optional<CoreEffect>, 8> effects_{};
+  std::array<std::optional<CoreEffect>, kCapacity> effects_{};
   std::size_t size_{0};
+};
+
+struct QueuedCoreEffect final {
+  CoreEffect effect;
+  MonotonicMs now_ms;
+};
+
+class CoreEffectQueue final {
+ public:
+  static constexpr std::size_t kCapacity = 16;
+
+  std::size_t size() const { return size_; }
+  bool enqueue(const CoreEffects& effects, MonotonicMs now_ms) {
+    if (effects.size() > kCapacity - size_) return false;
+    for (std::size_t index = 0; index < effects.size(); ++index) {
+      effects_[tail_] = QueuedCoreEffect{effects[index], now_ms};
+      tail_ = (tail_ + 1U) % kCapacity;
+      ++size_;
+    }
+    return true;
+  }
+  std::optional<QueuedCoreEffect> pop() {
+    if (size_ == 0) return std::nullopt;
+    auto effect = std::move(effects_[head_]);
+    effects_[head_].reset();
+    head_ = (head_ + 1U) % kCapacity;
+    --size_;
+    return effect;
+  }
+
+ private:
+  std::array<std::optional<QueuedCoreEffect>, kCapacity> effects_{};
+  std::size_t head_{0};
+  std::size_t tail_{0};
+  std::size_t size_{0};
+};
+
+class CoreEffectDrain final {
+ public:
+  bool enqueue(const CoreEffects& effects, MonotonicMs now_ms) {
+    if (!queue_.enqueue(effects, now_ms)) return false;
+    latest_ms_ = now_ms;
+    publication_pending_ = true;
+    return true;
+  }
+
+  template <typename Apply, typename Publish>
+  void drain(Apply& apply, Publish& publish) {
+    if (draining_) return;
+    draining_ = true;
+    while (publication_pending_ || queue_.size() != 0) {
+      while (const auto queued = queue_.pop()) {
+        apply(queued->effect, queued->now_ms);
+      }
+      publication_pending_ = false;
+      publish(latest_ms_);
+    }
+    draining_ = false;
+  }
+
+  bool draining() const { return draining_; }
+  bool empty() const {
+    return queue_.size() == 0 && !publication_pending_;
+  }
+
+ private:
+  CoreEffectQueue queue_;
+  MonotonicMs latest_ms_{0};
+  bool publication_pending_{false};
+  bool draining_{false};
 };
 
 struct UnprovisionedContext final {};

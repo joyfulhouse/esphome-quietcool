@@ -1,4 +1,5 @@
 #include "quietcool/core/confirmation_core.h"
+#include "support/recursion_probe.h"
 #include "support/test.h"
 
 #include <array>
@@ -83,7 +84,10 @@ QC_TEST("REG-D", "unsolicited report confirms with no query") {
   QC_CHECK_EQ(command.reason, TxReason::TransactionCommand);
   core.on_tx_complete(command.token, 400);
   QC_CHECK_EQ(core.snapshot(400).state, CoordinatorState::PostCommandListening);
+  test::start_recursion_probe();
   consensus(core, 0xDF, 1105);
+  const bool recursive_consensus_path = test::stop_recursion_probe();
+  QC_CHECK(!recursive_consensus_path);
   const auto snapshot = core.snapshot(1165);
   QC_CHECK_EQ(snapshot.state, CoordinatorState::ResponseTailQuarantine);
   QC_CHECK_EQ(snapshot.last_transaction_outcome.value(),

@@ -184,7 +184,7 @@ QC_TEST("generated", "arbitrary public event sequences preserve core invariants"
       }
 
       const auto after = core.snapshot(now_ms);
-      QC_CHECK(effects.size() <= 8U);
+      QC_CHECK(effects.size() <= 3U);
       QC_CHECK(ConfirmationCore::context_matches_state(after.state,
                                                        after.context));
       QC_CHECK(legal_authority(after.authority));
