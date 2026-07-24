@@ -4,6 +4,7 @@
 #include "learn_machine.h"
 #include "observation_policy.h"
 #include "recovery_scheduler.h"
+#include "ring_buffer.h"
 #include "response_classifier.h"
 #include "transition_table.h"
 
@@ -53,30 +54,20 @@ class CoreEffectQueue final {
  public:
   static constexpr std::size_t kCapacity = 16;
 
-  std::size_t size() const { return size_; }
+  std::size_t size() const { return ring_.size(); }
+
+  // All-or-nothing: a partially admitted batch would apply some of a
+  // reduction's effects and drop the rest, which is worse than refusing it.
   bool enqueue(const CoreEffects& effects, MonotonicMs now_ms) {
-    if (effects.size() > kCapacity - size_) return false;
-    for (std::size_t index = 0; index < effects.size(); ++index) {
-      effects_[tail_] = QueuedCoreEffect{effects[index], now_ms};
-      tail_ = (tail_ + 1U) % kCapacity;
-      ++size_;
-    }
+    if (effects.size() > ring_.available()) return false;
+    for (std::size_t index = 0; index < effects.size(); ++index)
+      ring_.push(QueuedCoreEffect{effects[index], now_ms});
     return true;
   }
-  std::optional<QueuedCoreEffect> pop() {
-    if (size_ == 0) return std::nullopt;
-    auto effect = std::move(effects_[head_]);
-    effects_[head_].reset();
-    head_ = (head_ + 1U) % kCapacity;
-    --size_;
-    return effect;
-  }
+  std::optional<QueuedCoreEffect> pop() { return ring_.pop(); }
 
  private:
-  std::array<std::optional<QueuedCoreEffect>, kCapacity> effects_{};
-  std::size_t head_{0};
-  std::size_t tail_{0};
-  std::size_t size_{0};
+  RingBuffer<QueuedCoreEffect, kCapacity> ring_;
 };
 
 class CoreEffectDrain final {

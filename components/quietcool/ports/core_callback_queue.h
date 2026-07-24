@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quietcool/core/core_types.h"
+#include "quietcool/core/ring_buffer.h"
 
 #include <array>
 #include <optional>
@@ -23,21 +24,19 @@ class CoreCallbackQueue final {
   static constexpr std::size_t kCapacity = 8;
 
   bool enqueue(CoreCallbackKind kind, std::optional<TxToken> token) {
-    if (size_ == kCapacity) return false;
-    callbacks_[tail_] = StoredCoreCallback{kind, token};
-    tail_ = (tail_ + 1U) % kCapacity;
-    ++size_;
-    return true;
+    return ring_.push(StoredCoreCallback{kind, token});
   }
 
+  // Timestamped at pop rather than at enqueue: a deferred callback is applied
+  // in the loop iteration that drains it, and the core must see that
+  // iteration's clock, not the one that queued the work.
   std::optional<CoreCallback> pop(MonotonicMs now_ms) {
-    if (size_ == 0) return std::nullopt;
-    const auto callback = callbacks_[head_];
-    callbacks_[head_].reset();
-    head_ = (head_ + 1U) % kCapacity;
-    --size_;
-    return CoreCallback{callback->kind, callback->token, now_ms};
+    const auto stored = ring_.pop();
+    if (!stored) return std::nullopt;
+    return CoreCallback{stored->kind, stored->token, now_ms};
   }
+
+  std::size_t size() const { return ring_.size(); }
 
  private:
   struct StoredCoreCallback final {
@@ -45,10 +44,7 @@ class CoreCallbackQueue final {
     std::optional<TxToken> token;
   };
 
-  std::array<std::optional<StoredCoreCallback>, kCapacity> callbacks_{};
-  std::size_t head_{0};
-  std::size_t tail_{0};
-  std::size_t size_{0};
+  RingBuffer<StoredCoreCallback, kCapacity> ring_;
 };
 
 }  // namespace quietcool
