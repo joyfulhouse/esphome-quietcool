@@ -14,8 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `test` also runs the adapter suite; it is named separately here so a
+      # failure is attributable at a glance in the checks list.
       - name: Host test suite
         run: make -C tests/cpp test
+      - name: Adapter suite (ESPHome wiring against stubs)
+        run: make -C tests/cpp test-adapter
       - name: Host test suite under ASan/UBSan
         run: make -C tests/cpp test-sanitized
 
