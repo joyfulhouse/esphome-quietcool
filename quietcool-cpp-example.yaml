@@ -11,8 +11,22 @@ esphome:
 
 esp32:
   board: ttgo-lora32-v21
+  # REQUIRED: ESP-IDF with a 16 KB loop-task stack.
+  #
+  # This is not a preference. Worst-case target stack for the command path is
+  # ~6.3 KB (measured peak 6,304 B on hardware; deepest chain
+  # loop -> reduce -> dispatch -> handle_command_request -> begin_transaction).
+  # ESPHome's default Arduino loop stack is 8,192 B, which leaves ~1.9 KB —
+  # and that configuration demonstrably overran into the FreeRTOS ready lists
+  # and crash-looped a production controller twice. See
+  # docs/claude/2026-07-24-post-cutover-audit.md.
+  #
+  # The component enforces this at codegen time; an Arduino build or a stack
+  # below quietcool.MIN_LOOP_TASK_STACK_SIZE is rejected with an explanation.
   framework:
-    type: arduino
+    type: esp-idf
+    advanced:
+      loop_task_stack_size: 16384
 
 logger:
   level: DEBUG

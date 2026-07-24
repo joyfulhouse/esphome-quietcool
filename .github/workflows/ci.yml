@@ -5,7 +5,40 @@ on:
   pull_request:
 
 jobs:
-  validate:
+  # The C++ confirmation core is the deployed implementation; these gates must
+  # run on every change. Previously CI validated only the frozen YAML targets,
+  # so reintroducing the reducer recursion that crash-looped a production
+  # controller would have left CI green.
+  core:
+    name: C++ core (host tests + sanitizers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host test suite
+        run: make -C tests/cpp test
+      - name: Host test suite under ASan/UBSan
+        run: make -C tests/cpp test-sanitized
+
+  component:
+    name: C++ component (config + compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install esphome
+      - name: esphome config (C++ / SX127x)
+        run: esphome config quietcool-cpp-example.yaml
+      - name: esphome config (C++ / SX126x)
+        run: esphome config quietcool-cpp-example-sx126x.yaml
+      - name: Compile (C++ / SX127x)
+        run: esphome compile quietcool-cpp-example.yaml
+      - name: Compile (C++ / SX126x)
+        run: esphome compile quietcool-cpp-example-sx126x.yaml
+
+  legacy-yaml:
+    name: Frozen YAML targets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

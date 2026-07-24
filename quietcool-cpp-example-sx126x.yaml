@@ -12,8 +12,14 @@ esphome:
 
 esp32:
   board: heltec_wifi_lora_32_V3
+  # REQUIRED: ESP-IDF with a 16 KB loop-task stack. See the note in
+  # quietcool-cpp-example.yaml — worst-case target stack is ~6.3 KB and the
+  # 8,192 B Arduino default crash-looped a production controller twice.
+  # Enforced at codegen time by quietcool.MIN_LOOP_TASK_STACK_SIZE.
   framework:
-    type: arduino
+    type: esp-idf
+    advanced:
+      loop_task_stack_size: 16384
 
 logger:
   level: DEBUG
