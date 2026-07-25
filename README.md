@@ -48,10 +48,10 @@ extra.</sub>
   State Known` gates the select and countdown: they are not initialized to a
   guessed `None`, and an unresolved command cannot present stale timer metadata
   as confirmed.
-- **Learn mode** — capture your fan's 4-byte sender ID by pressing its OEM remote
-  twice. No packet sniffing or firmware extraction needed to onboard; the ID is
-  persisted in NVS and survives reboots and OTA. See
-  [Learn mode](#learn-mode--porting-to-your-own-fan).
+- **Learn mode** — capture your fan's 4-byte sender ID from its OEM remote (two
+  presses on the YAML build, three on the C++ core build). No packet sniffing or
+  firmware extraction needed to onboard; the ID is persisted in NVS and survives
+  reboots and OTA. See [Learn mode](#learn-mode--porting-to-your-own-fan).
 - **Home Assistant native API** — a proper `fan` entity plus diagnostics
   (TX/RX counters, last command, learned sender ID, battery voltage/level).
 - **Bi-directional diagnostics, query-confirmed state** — the controller also
@@ -280,7 +280,16 @@ Every QuietCool OEM sender ID is four bytes beginning with `CB`; the RF
 profile and command format are universal. This firmware can therefore learn a
 fan's ID from its OEM remote through the existing receive path.
 
-### First-boot flow for another fan
+> **Which build are you running?** The procedures immediately below describe the
+> **YAML build** (`quietcool-lora32.yaml`) — the configuration this repository
+> flashes and the one verified on real fans. The separate **C++ core build**
+> (`components/quietcool/`) pairs differently: it needs **three** remote presses
+> rather than two, aborts if it hears a second fan, and shows no OLED learn
+> prompt. If you are running it, follow
+> [Pairing on the C++ core build](#pairing-on-the-c-core-build) instead. Match
+> the section to the firmware you actually flashed.
+
+### First-boot flow (YAML build)
 
 1. Before compiling, change the top-level substitution in
    `quietcool-lora32.yaml` to:
@@ -325,7 +334,7 @@ from completing a candidate started by another sender. Learn frames are
 consumed by the RX and storage path and never publish fan state or reach any
 TX action.
 
-### Manual re-learn and forget
+### Manual re-learn and forget (YAML build)
 
 - Press the Home Assistant `Learn Remote ID` button (in the device's
   Configuration section, disabled by default — enable the entity first), or
@@ -356,6 +365,36 @@ neighbor's fan on the shared band can't provision your controller. While a learn
 window is armed the OLED shows `LEARN / REMOTE X2`, then briefly `LEARNED / ID
 SAVED` on success (previewed in `docs/display-previews/learn-active.png` and
 `docs/display-previews/learn-confirmed.png`).
+
+### Pairing on the C++ core build
+
+The C++ core (`components/quietcool/`) is a from-scratch reimplementation of the
+learn logic. Its deployment configuration is maintained outside this repository,
+so there is no C++ build config to flash from here — but if you are running it,
+its pairing procedure differs from the YAML build above in four ways:
+
+- **Three independent sightings, not two.** The controller binds a remote only
+  after it has heard the *same* `CB`-prefixed command frame three separate
+  times, each sighting at least 600 ms after the previous one it counted, all
+  within a 60-second window. A single OEM transmission is a burst of repeated
+  frames a few milliseconds apart, and that whole burst counts as **one**
+  sighting no matter how many frames it carries. In practice, **press the target
+  fan's remote about three times, roughly a second apart** — pressing twice is
+  not enough, and leaves the controller waiting with nothing saved and no error.
+- **A second remote aborts the attempt.** If a different `CB` sender is heard
+  during the window — a neighbor's fan, or the other unit in your own house —
+  the controller abandons the entire window and keeps whatever ID was already
+  bound, rather than risk binding the wrong fan. Silence the other unit and
+  retry.
+- **No OLED learn prompt.** This build renders no `LEARN` / `REMOTE X2` screen.
+  Watch pairing progress in the device logs and on the `Learn Remote ID` button
+  entity instead.
+- **Trigger the intended fan while learning.** Start Learn and then operate the
+  target fan's own remote, so that fan is guaranteed to be among the senders
+  heard — its ~1.2 s status self-reports then help reach the three-sighting bar.
+  If you do not, and a lone foreign fan on the shared band is the only sender
+  heard, the abort-on-second-sender guard has nothing to disambiguate against
+  and cannot protect you.
 
 
 ## Provenance & license
