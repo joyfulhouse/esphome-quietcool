@@ -33,6 +33,9 @@ std::optional<Consensus> ConsensusTracker::observe(
   group_->has_exact = group_->has_exact || candidate.quality == RecoveryQuality::Exact;
   const std::uint8_t required = group_->has_exact ? 2 : 3;
   if (group_->count < required) return std::nullopt;
+  // ExactBackedConsensus denotes observational corroboration (repeated
+  // consistent frames), not authenticity; the OEM protocol is unauthenticated.
+  // See SECURITY.md.
   return Consensus{group_->state, group_->capability, group_->count,
                    group_->has_exact ? EvidenceConfidence::ExactBackedConsensus
                                      : EvidenceConfidence::RecoveredOnlyConsensus};
