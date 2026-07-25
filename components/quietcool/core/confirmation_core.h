@@ -89,20 +89,40 @@ class CoreEffectDrain final {
   // CoreEffectQueue::kCapacity works; 32 is headroom.
   static constexpr std::size_t kMaxAppliesPerDrain = 32;
 
+  // Terminal, one-way stop (issue #22). halt() is what degrade() calls: once the
+  // component is being marked failed, the drain must abandon the rest of the
+  // batch, because any further apply() would run on a dead controller and could
+  // overwrite the terminal "unavailable" publication (and queued authority /
+  // persistence effects must not run either). This is DELIBERATELY the opposite
+  // of budget exhaustion below: budget exhaustion is backpressure and preserves
+  // every un-applied effect for the next loop() (issue #8, no-drop); halting is
+  // terminal and discards the remainder. The two must never be conflated —
+  // separate flag, separate exit — or one bricks the controller under ordinary
+  // load and the other resurrects #22.
+  void halt() { halted_ = true; }
+  bool halted() const { return halted_; }
+
   template <typename Apply, typename Publish>
   void drain(Apply& apply, Publish& publish) {
-    if (draining_) return;
+    // Terminal across drains (issue #22): once halted, drain() never runs
+    // again, so no later batch can publish over the terminal "unavailable".
+    if (draining_ || halted_) return;
     draining_ = true;
     std::size_t applied = 0;
     bool budget_exhausted = false;
     while (publication_pending_ || queue_.size() != 0) {
       while (const auto queued = queue_.pop()) {
         apply(queued->effect, queued->now_ms);
+        // degrade() may have halted us from inside apply(): stop before the next
+        // apply and before this round's publish(), so nothing overruns the
+        // terminal publication degrade() already made.
+        if (halted_) break;
         if (++applied >= kMaxAppliesPerDrain) {
           budget_exhausted = true;
           break;
         }
       }
+      if (halted_) break;
       // On budget exhaustion, break with the remainder still queued and
       // publication_pending_ untouched (still true for the pending round).
       // drain() is resumable — all state lives in queue_ / publication_pending_
@@ -132,6 +152,7 @@ class CoreEffectDrain final {
   std::uint32_t budget_exhaustions_{0};
   bool publication_pending_{false};
   bool draining_{false};
+  bool halted_{false};  // terminal stop (issue #22); never set by the budget path
 };
 
 struct UnprovisionedContext final {};
