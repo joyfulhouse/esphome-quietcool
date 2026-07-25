@@ -1,17 +1,13 @@
 #include "quietcool_fan.h"
 
+#include "fan_command.h"
+
 #include "esphome/core/log.h"
 
 namespace esphome::quietcool {
 namespace {
 
 constexpr char TAG[] = "quietcool.fan";
-
-int clamp_speed(int speed, std::uint8_t supported_speed_count) {
-  if (speed < 1) return 1;
-  if (speed > supported_speed_count) return supported_speed_count;
-  return speed;
-}
 
 }  // namespace
 
@@ -35,19 +31,15 @@ void QuietCoolFan::control(const fan::FanCall& call) {
     ESP_LOGE(TAG, "FanCall refused: controller is not configured");
     return;
   }
-  const auto requested_state =
+  const bool requested_state =
       call.get_state().has_value() ? *call.get_state() : state;
-  const auto requested_speed = clamp_speed(
-      call.get_speed().has_value() ? *call.get_speed() : speed,
-      supported_speed_count_);
-  const auto typed_speed =
-      static_cast<::quietcool::Speed>(requested_speed);
-  const auto duration = requested_state ? ::quietcool::Duration::Continuous
-                                        : ::quietcool::Duration::Off;
+  const int requested_speed =
+      call.get_speed().has_value() ? *call.get_speed() : speed;
   ESP_LOGD(TAG, "FanCall queued: state=%s speed=%d; awaiting confirmation",
-           ONOFF(requested_state), requested_speed);
-  controller_->request_state(
-      ::quietcool::FanState::command(typed_speed, duration));
+           ONOFF(requested_state),
+           clamp_fan_speed(requested_speed, supported_speed_count_));
+  controller_->request_state(fan_command_from_intent(
+      requested_state, requested_speed, supported_speed_count_));
 }
 
 void QuietCoolFan::publish_authority(
