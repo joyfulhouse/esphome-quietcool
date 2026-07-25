@@ -7,13 +7,19 @@ namespace quietcool {
 
 enum class LearnMode : std::uint8_t { Manual, Automatic };
 enum class LearnEventKind : std::uint8_t {
-  Ignored, CandidateStarted, CandidateRestarted, Learned, WindowExpired
+  Ignored, CandidateStarted, CandidateRestarted, Learned, WindowExpired,
+  AmbiguousRejected
 };
 struct LearnEvent final {
   LearnEventKind kind;
   std::optional<SenderId> sender;
 };
-struct LearnCandidate final { SenderId sender; MonotonicMs started_ms; };
+struct LearnCandidate final {
+  SenderId sender;
+  MonotonicMs first_ms;
+  MonotonicMs last_sighting_ms;
+  std::uint8_t sightings;  // saturating count of independent sightings, starts at 1
+};
 struct LearnSnapshot final {
   bool active;
   LearnMode mode;
@@ -32,6 +38,7 @@ class LearnMachine final {
  private:
   std::optional<SenderId> learnable_sender(ByteView input) const;
   bool active_{false};
+  bool ambiguous_{false};
   LearnMode mode_{LearnMode::Manual};
   MonotonicMs deadline_ms_{0};
   std::optional<LearnCandidate> candidate_;

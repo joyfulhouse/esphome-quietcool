@@ -12,34 +12,90 @@ constexpr std::array<std::uint8_t, 6> command(std::uint8_t id,
   return {0xCB, 0x00, 0x47, id, state, state};
 }
 
-QC_TEST("learn", "two independent commands enforce 600 and 60000 boundaries") {
+QC_TEST("learn", "sighting gap and window span boundaries") {
   LearnMachine learn;
   learn.start(LearnMode::Manual, 0);
   const auto first = command(0x39, 0x9F);
   QC_CHECK_EQ(learn.observe(ByteView(first), 0).kind,
               LearnEventKind::CandidateStarted);
+  // Frames closer than kLearnSightingGapMs are one burst -> not a new sighting.
+  QC_CHECK_EQ(learn.observe(ByteView(first), 599).kind, LearnEventKind::Ignored);
+  // A gap >= kLearnSightingGapMs is an independent sighting, but two of them
+  // (start + this one) is still short of the three-sighting bar.
   QC_CHECK_EQ(learn.observe(ByteView(first), 600).kind, LearnEventKind::Ignored);
-  QC_CHECK_EQ(learn.observe(ByteView(first), 601).kind, LearnEventKind::Learned);
+  // Third independent sighting binds.
+  QC_CHECK_EQ(learn.observe(ByteView(first), 1200).kind,
+              LearnEventKind::Learned);
 
+  // A same-sender frame older than the window span restarts the candidate
+  // rather than counting as a late sighting.
   learn.start(LearnMode::Manual, 0);
   learn.observe(ByteView(first), 0);
-  QC_CHECK_EQ(learn.observe(ByteView(first), 59999).kind, LearnEventKind::Learned);
+  QC_CHECK_EQ(learn.observe(ByteView(first), 59999).kind,
+              LearnEventKind::Ignored);
   learn.start(LearnMode::Manual, 0);
   learn.observe(ByteView(first), 0);
   QC_CHECK_EQ(learn.observe(ByteView(first), 60000).kind,
               LearnEventKind::CandidateRestarted);
 }
 
-QC_TEST("learn", "different sender restarts and different state may confirm") {
+QC_TEST("learn", "two competing senders refuse and persist nothing") {
+  LearnMachine learn;
+  learn.start(LearnMode::Manual, 0);
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x39, 0x9F)), 0).kind,
+              LearnEventKind::CandidateStarted);
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x40, 0xAF)), 700).kind,
+              LearnEventKind::AmbiguousRejected);
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x40, 0xBF)), 1400).kind,
+              LearnEventKind::Ignored);
+  QC_CHECK(!learn.snapshot().candidate.has_value());
+  QC_CHECK(!learn.snapshot().active);
+}
+
+QC_TEST("learn", "exclusive sender needs three independent sightings") {
   LearnMachine learn;
   learn.start(LearnMode::Manual, 0);
   const auto first = command(0x39, 0x9F);
-  const auto other = command(0x40, 0xAF);
-  learn.observe(ByteView(first), 0);
-  QC_CHECK_EQ(learn.observe(ByteView(other), 700).kind,
-              LearnEventKind::CandidateRestarted);
-  QC_CHECK_EQ(learn.observe(ByteView(command(0x40, 0xBF)), 1400).kind,
+  QC_CHECK_EQ(learn.observe(ByteView(first), 0).kind,
+              LearnEventKind::CandidateStarted);
+  QC_CHECK_EQ(learn.observe(ByteView(first), 601).kind,
+              LearnEventKind::Ignored);
+  QC_CHECK_EQ(learn.observe(ByteView(first), 1202).kind,
               LearnEventKind::Learned);
+}
+
+QC_TEST("learn", "a single burst is one sighting") {
+  LearnMachine learn;
+  learn.start(LearnMode::Manual, 0);
+  const auto first = command(0x39, 0x9F);
+  QC_CHECK_EQ(learn.observe(ByteView(first), 0).kind,
+              LearnEventKind::CandidateStarted);  // sighting 1
+  QC_CHECK_EQ(learn.observe(ByteView(first), 700).kind,
+              LearnEventKind::Ignored);  // sighting 2
+  // 760 and 820 are within kLearnSightingGapMs of the last counted sighting
+  // (700): a single OEM self-report burst, so they must not each count.
+  QC_CHECK_EQ(learn.observe(ByteView(first), 760).kind,
+              LearnEventKind::Ignored);
+  QC_CHECK_EQ(learn.observe(ByteView(first), 820).kind,
+              LearnEventKind::Ignored);
+  const auto snapshot = learn.snapshot();
+  QC_CHECK(snapshot.candidate.has_value());
+  QC_CHECK_EQ(snapshot.candidate->sightings, std::uint8_t{2});
+}
+
+QC_TEST("learn", "ambiguity ignores the remainder of the window") {
+  LearnMachine learn;
+  learn.start(LearnMode::Manual, 0);
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x39, 0x9F)), 0).kind,
+              LearnEventKind::CandidateStarted);
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x40, 0xAF)), 700).kind,
+              LearnEventKind::AmbiguousRejected);
+  QC_CHECK(!learn.snapshot().active);
+  // Even the original first sender cannot resume a poisoned window.
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x39, 0x9F)), 1400).kind,
+              LearnEventKind::Ignored);
+  QC_CHECK_EQ(learn.observe(ByteView(command(0x39, 0x9F)), 2100).kind,
+              LearnEventKind::Ignored);
 }
 
 QC_TEST("learn", "queries reports malformed and special frames never participate") {

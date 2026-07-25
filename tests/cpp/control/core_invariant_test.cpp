@@ -221,10 +221,14 @@ QC_TEST("INV-22", "learning cancels work and remains receive-only") {
   const auto first = invariant_frame(0x9F);
   core.on_frame(ByteView(first.bytes), 10);
   QC_CHECK_EQ(core.snapshot(10).state, CoordinatorState::LearningAwaitingSecond);
+  // Issue #6: binding now requires three independent sightings, not two.
   core.on_frame(ByteView(first.bytes), 611);
-  QC_CHECK_EQ(core.snapshot(611).state, CoordinatorState::Idle);
+  QC_CHECK_EQ(core.snapshot(611).state,
+              CoordinatorState::LearningAwaitingSecond);
+  core.on_frame(ByteView(first.bytes), 1212);
+  QC_CHECK_EQ(core.snapshot(1212).state, CoordinatorState::Idle);
   QC_CHECK(std::holds_alternative<UnknownStateAuthority>(
-      core.snapshot(611).authority.state));
+      core.snapshot(1212).authority.state));
 }
 
 QC_TEST("INV-21", "backward response time cannot confirm or extend epoch") {
