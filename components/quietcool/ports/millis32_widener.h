@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esphome/components/quietcool/core/core_types.h"
+#include "quietcool/core/core_types.h"
 
 #include <cstdint>
 

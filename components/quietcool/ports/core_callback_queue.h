@@ -1,7 +1,7 @@
 #pragma once
 
-#include "esphome/components/quietcool/core/core_types.h"
-#include "esphome/components/quietcool/core/ring_buffer.h"
+#include "quietcool/core/core_types.h"
+#include "quietcool/core/ring_buffer.h"
 
 #include <array>
 #include <optional>

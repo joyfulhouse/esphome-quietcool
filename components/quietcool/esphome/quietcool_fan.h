@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esphome/components/quietcool/ports/authority_publication_gate.h"
+#include "quietcool/ports/authority_publication_gate.h"
 #include "quietcool_component.h"
 
 #include "esphome/components/fan/fan.h"

@@ -2,14 +2,8 @@ CXX ?= c++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2
 TEST_CXXFLAGS := $(CXXFLAGS) -DQUIETCOOL_HOST_TEST -finstrument-functions
 ROOT := ../..
-# The component now uses the standard ESPHome external-component include
-# layout ("esphome/components/quietcool/..."), which is what makes it usable
-# via external_components from git. Host builds get that prefix from a
-# generated shim rather than a second copy of the tree; test files keep their
-# own shorter "quietcool/..." includes via -I$(ROOT)/components.
+INCLUDES := -I$(ROOT)/components -I.
 BUILD := build
-SHIM := $(BUILD)/include_shim
-INCLUDES := -I$(ROOT)/components -I$(SHIM) -I.
 
 CORE_SOURCES := $(wildcard $(ROOT)/components/quietcool/core/*.cpp) \
 	$(wildcard $(ROOT)/components/quietcool/ports/*.cpp) \
@@ -58,42 +52,31 @@ PLATFORM_FREE_SOURCES := $(wildcard $(ROOT)/components/quietcool/core/*.h) \
 	$(ROOT)/components/quietcool/radio/burst_transmitter.h \
 	$(ROOT)/components/quietcool/radio/burst_transmitter.cpp
 
-.PHONY: all test test-adapter test-sanitized shim platform-include-check \
+.PHONY: all test test-adapter test-sanitized platform-include-check \
 	production-flags-check clean
-
-# Maps esphome/components/quietcool/... onto the real component tree.
-shim:
-	@mkdir -p $(SHIM)/esphome/components
-	@ln -sfn $(abspath $(ROOT)/components/quietcool) $(SHIM)/esphome/components/quietcool
 all: $(TARGET)
 
-$(TARGET): shim $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
+$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(TEST_CXXFLAGS) $(INCLUDES) $(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
-$(SANITIZED_TARGET): shim $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
+$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(SANITIZE_FLAGS) $(INCLUDES) \
 		$(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
-$(ADAPTER_TARGET): shim $(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) \
+$(ADAPTER_TARGET): $(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) \
 		$(HEADERS) $(ADAPTER_HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(ADAPTER_INCLUDES) \
 		$(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) -o $@
 
-# The component's own headers are addressed as esphome/components/quietcool/...
-# (the standard external-component layout). That prefix is this component, not
-# the ESPHome platform, so it is excluded before the platform check runs —
-# everything else matching esphome/, Arduino, esp_, freertos or driver/ still
-# fails the build.
 platform-include-check:
-	@if grep -n -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"][^>"]*(esphome|Arduino|arduino|esp-idf|esp_|freertos|driver/)' $(PLATFORM_FREE_SOURCES) \
-		| grep -v 'esphome/components/quietcool/'; then \
+	@if grep -n -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"][^>"]*(esphome|Arduino|arduino|esp-idf|esp_|freertos|driver/)' $(PLATFORM_FREE_SOURCES); then \
 		echo "platform include found in platform-free production code"; exit 1; \
 	fi
 
-production-flags-check: shim
+production-flags-check:
 	$(CXX) $(CXXFLAGS) -fno-exceptions -fno-rtti $(INCLUDES) -fsyntax-only $(CORE_SOURCES)
 
 test: platform-include-check production-flags-check $(TARGET) test-adapter

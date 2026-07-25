@@ -1,8 +1,8 @@
 #pragma once
 
-#include "esphome/components/quietcool/core/core_types.h"
-#include "esphome/components/quietcool/ports/clock.h"
-#include "esphome/components/quietcool/ports/radio.h"
+#include "quietcool/core/core_types.h"
+#include "quietcool/ports/clock.h"
+#include "quietcool/ports/radio.h"
 
 namespace quietcool {
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "esphome/components/quietcool/ports/radio.h"
+#include "quietcool/ports/radio.h"
 #include "esphome/core/defines.h"
 
 #ifdef QUIETCOOL_USE_SX127X

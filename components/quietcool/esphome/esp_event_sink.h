@@ -1,7 +1,7 @@
 #pragma once
 
-#include "esphome/components/quietcool/core/authority_store.h"
-#include "esphome/components/quietcool/ports/event_sink.h"
+#include "quietcool/core/authority_store.h"
+#include "quietcool/ports/event_sink.h"
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"

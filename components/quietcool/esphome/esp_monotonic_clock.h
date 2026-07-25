@@ -1,7 +1,7 @@
 #pragma once
 
-#include "esphome/components/quietcool/ports/clock.h"
-#include "esphome/components/quietcool/ports/millis32_widener.h"
+#include "quietcool/ports/clock.h"
+#include "quietcool/ports/millis32_widener.h"
 
 namespace esphome::quietcool {
 
