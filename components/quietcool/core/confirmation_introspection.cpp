@@ -94,13 +94,21 @@ StateContext ConfirmationCore::context_for_test(CoordinatorState state) {
          state == CoordinatorState::RecoveryResponseListening)
           ? QueryPurpose::Recovery
           : QueryPurpose::Boot;
+  // Each family carries its OWN canonical reason, not BootQuery. The reason is
+  // finer-grained than the purpose (the Recovery family spans three reasons);
+  // RecoveryQueryInitial is the natural initial one, and context_matches_state()
+  // accepts any reason in the right family, so the other two still validate.
+  const TxReason reason = purpose == QueryPurpose::Manual ? TxReason::ManualQuery
+      : purpose == QueryPurpose::Fallback ? TxReason::TransactionFallbackQuery
+      : purpose == QueryPurpose::Recovery ? TxReason::RecoveryQueryInitial
+                                          : TxReason::BootQuery;
   if (lease)
-    return QueryLeaseContext{purpose, TxReason::BootQuery, token, 0};
+    return QueryLeaseContext{purpose, reason, token, 0};
   if (tx)
-    return QueryTxContext{purpose, TxReason::BootQuery, token, 0};
+    return QueryTxContext{purpose, reason, token, 0};
   if (response)
-    return QueryResponseContext{purpose, TxReason::BootQuery, token, 1};
-  return QueryPendingContext{purpose, TxReason::BootQuery};
+    return QueryResponseContext{purpose, reason, token, 1};
+  return QueryPendingContext{purpose, reason};
 }
 // The query-family variants (QueryPending/Lease/Tx/Response) each back four
 // distinct states (Boot/Manual/Fallback/Recovery), told apart only by this
@@ -114,12 +122,36 @@ static std::optional<QueryPurpose> query_purpose_of(const StateContext &context)
   if (const auto *p = std::get_if<QueryResponseContext>(&context)) return p->purpose;
   return std::nullopt;
 }
+static std::optional<TxReason> query_reason_of(const StateContext &context) {
+  if (const auto *p = std::get_if<QueryPendingContext>(&context)) return p->reason;
+  if (const auto *p = std::get_if<QueryLeaseContext>(&context)) return p->reason;
+  if (const auto *p = std::get_if<QueryTxContext>(&context)) return p->reason;
+  if (const auto *p = std::get_if<QueryResponseContext>(&context)) return p->reason;
+  return std::nullopt;
+}
 bool ConfirmationCore::context_matches_state(CoordinatorState state,
                                              const StateContext &context) {
   const auto canonical = context_for_test(state);
   if (context.index() != canonical.index()) return false;
   // For non-query variants both sides are nullopt (equal): behaviour unchanged.
-  return query_purpose_of(context) == query_purpose_of(canonical);
+  if (query_purpose_of(context) != query_purpose_of(canonical)) return false;
+  // TxReason is semantic state (it steers radio-recovery routing), so a context
+  // carrying the wrong query family's reason — the class this fixture used to
+  // build with BootQuery — must be rejected even when its purpose field is
+  // right. TxReason is finer-grained than QueryPurpose: the Recovery family
+  // spans RecoveryQueryInitial / RecoveryQueryRetry / TimerExpiryRecoveryQuery,
+  // and the real dispatcher derives the purpose back from the reason
+  // (confirmation_radio.cpp). So require the reason to belong to the state's
+  // family via that same derivation, NOT to equal one canonical reason — an
+  // exact match would falsely reject the two non-initial Recovery reasons, which
+  // are legitimate live pairings. Non-query variants carry no reason (both
+  // nullopt): behaviour unchanged.
+  const auto reason = query_reason_of(context);
+  const auto canonical_purpose = query_purpose_of(canonical);
+  if (reason && canonical_purpose &&
+      TransitionTable::query_purpose(*reason) != *canonical_purpose)
+    return false;
+  return true;
 }
 TransactionRuleMatches ConfirmationCore::matching_transaction_rules_for_test(
     CoordinatorState state, const TransactionConsensusInput &input) {
