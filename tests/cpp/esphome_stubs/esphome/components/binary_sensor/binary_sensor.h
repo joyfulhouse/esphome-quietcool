@@ -11,7 +11,9 @@ class BinarySensor {
  public:
   virtual ~BinarySensor() = default;
 
-  void publish_state(bool state) {
+  // Virtual so an adapter test can subclass and re-enter the component from
+  // inside publish_state(), exercising the degrade() re-entrancy guard.
+  virtual void publish_state(bool state) {
     state_ = state;
     has_state_ = true;
     published_.push_back(state);

@@ -79,13 +79,40 @@ class CoreEffectDrain final {
     return true;
   }
 
+  // Bounds one top-level drain so a re-entrant automation-feedback storm cannot
+  // make loop() run forever (M1, issue #8). 32 = 2x the effect-queue capacity
+  // (16): a legitimate drain applies at most one full queue's worth of
+  // already-admitted effects — apply_effect never enqueues onto the effect
+  // queue itself, only user automations re-enter — so this never trips on real
+  // work while capping loop() to a small constant of shallow, non-recursive
+  // apply() calls. Not safety-critical: any value strictly greater than
+  // CoreEffectQueue::kCapacity works; 32 is headroom.
+  static constexpr std::size_t kMaxAppliesPerDrain = 32;
+
   template <typename Apply, typename Publish>
   void drain(Apply& apply, Publish& publish) {
     if (draining_) return;
     draining_ = true;
+    std::size_t applied = 0;
+    bool budget_exhausted = false;
     while (publication_pending_ || queue_.size() != 0) {
       while (const auto queued = queue_.pop()) {
         apply(queued->effect, queued->now_ms);
+        if (++applied >= kMaxAppliesPerDrain) {
+          budget_exhausted = true;
+          break;
+        }
+      }
+      // On budget exhaustion, break with the remainder still queued and
+      // publication_pending_ untouched (still true for the pending round).
+      // drain() is resumable — all state lives in queue_ / publication_pending_
+      // / latest_ms_ — and every loop() re-enters it, so the leftovers get a
+      // fresh budget next pass. No effect is dropped. This is backpressure, not
+      // a fault: it is counted for diagnostics and must never mark the
+      // component failed (contrast issue #9, where overflow is terminal).
+      if (budget_exhausted) {
+        ++budget_exhaustions_;
+        break;
       }
       publication_pending_ = false;
       publish(latest_ms_);
@@ -94,6 +121,7 @@ class CoreEffectDrain final {
   }
 
   bool draining() const { return draining_; }
+  std::uint32_t budget_exhaustions() const { return budget_exhaustions_; }
   bool empty() const {
     return queue_.size() == 0 && !publication_pending_;
   }
@@ -101,6 +129,7 @@ class CoreEffectDrain final {
  private:
   CoreEffectQueue queue_;
   MonotonicMs latest_ms_{0};
+  std::uint32_t budget_exhaustions_{0};
   bool publication_pending_{false};
   bool draining_{false};
 };

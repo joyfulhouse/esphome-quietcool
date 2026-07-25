@@ -326,6 +326,97 @@ QC_TEST("ports", "mid-burst fault enters started-token radio recovery") {
   QC_CHECK(!callbacks.pop(1200).has_value());
 }
 
+// M1 (issue #8): a re-entrant apply that re-enqueues one effect every time must
+// terminate within kMaxAppliesPerDrain and leave the remainder queued, so
+// loop() is bounded. The re-entrant lambda stops after a FINITE K so the test
+// terminates against buggy (budget-less) code too — a hang is a poor mutation
+// check.
+QC_TEST("ports", "drain budget defers excess applies to a later drain") {
+  constexpr std::size_t kBudget = CoreEffectDrain::kMaxAppliesPerDrain;
+  constexpr std::size_t kTotal = kBudget + 5;
+  CoreEffectDrain drain;
+  CoreEffects initial;
+  QC_CHECK(initial.add(RequestRadioReset{1}));
+  QC_CHECK(drain.enqueue(initial, 0));
+
+  std::size_t applied = 0;
+  const auto apply = [&](const CoreEffect&, MonotonicMs) {
+    ++applied;
+    if (applied < kTotal) {
+      CoreEffects more;
+      QC_CHECK(more.add(RequestRadioReset{2}));
+      QC_CHECK(drain.enqueue(more, 0));  // one-in-one-out: occupancy stays ~1
+    }
+  };
+  const auto publish = [&](MonotonicMs) {};
+
+  drain.drain(apply, publish);
+  QC_CHECK_EQ(applied, kBudget);
+  QC_CHECK(!drain.empty());
+  QC_CHECK(!drain.draining());
+  QC_CHECK_EQ(drain.budget_exhaustions(), 1U);
+
+  drain.drain(apply, publish);  // fresh budget drains the remainder
+  QC_CHECK_EQ(applied, kTotal);
+  QC_CHECK(drain.empty());
+}
+
+// The deferred remainder must be applied in exact FIFO order with no gaps or
+// repeats across the budget boundary.
+QC_TEST("ports", "drain budget preserves effect order and count") {
+  constexpr std::uint8_t kTotal =
+      static_cast<std::uint8_t>(CoreEffectDrain::kMaxAppliesPerDrain) + 5U;
+  CoreEffectDrain drain;
+  CoreEffects initial;
+  QC_CHECK(initial.add(RequestRadioReset{1}));
+  QC_CHECK(drain.enqueue(initial, 0));
+
+  std::vector<std::uint8_t> applied;
+  std::uint8_t next = 2;
+  const auto apply = [&](const CoreEffect& effect, MonotonicMs) {
+    applied.push_back(std::get<RequestRadioReset>(effect).attempt);
+    if (next <= kTotal) {
+      CoreEffects more;
+      QC_CHECK(more.add(RequestRadioReset{next}));
+      QC_CHECK(drain.enqueue(more, 0));
+      ++next;
+    }
+  };
+  const auto publish = [&](MonotonicMs) {};
+
+  drain.drain(apply, publish);
+  QC_CHECK_EQ(applied.size(), CoreEffectDrain::kMaxAppliesPerDrain);
+  drain.drain(apply, publish);
+
+  std::vector<std::uint8_t> expected;
+  for (std::uint8_t attempt = 1; attempt <= kTotal; ++attempt)
+    expected.push_back(attempt);
+  QC_CHECK_EQ(applied, expected);
+  QC_CHECK(drain.empty());
+}
+
+// A legitimate full-queue (16) non-re-entrant workload must complete in one
+// drain and never touch the budget: 32 is comfortably above the queue capacity.
+QC_TEST("ports", "drain budget untouched on a legitimate full-queue batch") {
+  CoreEffectDrain drain;
+  for (std::uint8_t batch = 0; batch < 4; ++batch) {
+    CoreEffects effects;
+    for (std::uint8_t slot = 0; slot < 4; ++slot)
+      QC_CHECK(effects.add(RequestRadioReset{
+          static_cast<std::uint8_t>(batch * 4U + slot + 1U)}));
+    QC_CHECK(drain.enqueue(effects, 0));
+  }
+
+  std::size_t applied = 0;
+  const auto apply = [&](const CoreEffect&, MonotonicMs) { ++applied; };
+  const auto publish = [&](MonotonicMs) {};
+  drain.drain(apply, publish);
+
+  QC_CHECK_EQ(applied, CoreEffectQueue::kCapacity);
+  QC_CHECK(drain.empty());
+  QC_CHECK_EQ(drain.budget_exhaustions(), 0U);
+}
+
 QC_TEST("ports", "core effect batches retain one slot beyond production peak") {
   CoreEffects effects;
   for (std::uint8_t attempt = 1; attempt <= 4; ++attempt)

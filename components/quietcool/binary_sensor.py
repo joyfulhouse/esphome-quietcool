@@ -14,6 +14,7 @@ BINARY_SENSOR_SETTERS = {
     "timer_program_known": "set_timer_program_known_sensor",
     "timer_remaining_known": "set_timer_remaining_known_sensor",
     "confirmed_off": "set_confirmed_off_sensor",
+    "controller_fault": "set_controller_fault_sensor",
 }
 
 
