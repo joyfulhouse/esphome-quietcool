@@ -81,5 +81,21 @@ QC_TEST("fan_command", "out-of-range speed clamps into the supported band") {
   QC_CHECK_EQ(*over_two.speed(), Speed::Medium);
 }
 
+// #19: the clamp must be total. With supported_speed_count == 0 the pre-fix code
+// returned 0, which casts to an undefined Speed nibble; the safety currently
+// relied on a caller guard in a different, untested file (publish_authority).
+// Mutation: drop the ceiling floor in clamp_fan_speed -> clamp_fan_speed(>=1, 0)
+// returns 0, which speed_from_value rejects, failing this test.
+QC_TEST("fan_command", "clamp is total: a zero supported count still yields a valid Speed") {
+  for (const int n : {-3, 0, 1, 2, 3, 4, 99}) {
+    const int clamped = clamp_fan_speed(n, 0);
+    QC_CHECK(::quietcool::speed_from_value(static_cast<std::uint8_t>(clamped))
+                 .has_value());
+  }
+  // The whole translation stays safe too: a 0 count yields a running command
+  // whose speed nibble is valid rather than undefined.
+  QC_CHECK(fan_command_from_intent(true, 1, 0).speed().has_value());
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

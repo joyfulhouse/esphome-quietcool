@@ -6,9 +6,10 @@
 
 namespace esphome::quietcool {
 
-// Clamps a Home Assistant speed level into the [1, supported_speed_count] band
-// the fan understands, so an out-of-range request can never form an undefined
-// speed nibble. supported_speed_count is itself bounded to 1..3 by the caller.
+// Clamps a Home Assistant speed level into the [1, max(1, supported_speed_count)]
+// band the fan understands, so neither an out-of-range request nor a degenerate
+// supported_speed_count of 0 can form an undefined speed nibble. Total and safe
+// in isolation; callers still pass a count of 1..3 in normal operation.
 int clamp_fan_speed(int speed, std::uint8_t supported_speed_count);
 
 // Translates a Home Assistant fan intent — on/off plus a speed level — into the
