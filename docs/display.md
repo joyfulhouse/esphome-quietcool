@@ -5,7 +5,11 @@
 - **Left** — an animated `mdi:fan` glyph (12 pre-rendered rotation frames, spin
   rate proportional to speed; a static `fan-off` glyph when off), the state word
   (OFF/LOW/MED/HIGH), and an **HH:MM:SS** timer countdown when a timer is running.
-  Learn mode replaces the two text rows with `LEARN / REMOTE X2`.
+  On the YAML build (`quietcool-lora32.yaml`), Learn mode replaces the two text
+  rows with `LEARN / REMOTE X2` (and briefly `LEARNED / ID SAVED` on success).
+  The C++ core build (`components/quietcool/`) renders no learn prompt — its
+  pairing progress is visible in the logs and the `Learn Remote ID` button
+  entity instead.
 - **Right** — the three temperatures, right-aligned, indoor dominant (22 pt), each
   with a small icon: house-thermometer (indoor), sun (outdoor), roof (attic).
   Missing/`NaN` values render `--`.
