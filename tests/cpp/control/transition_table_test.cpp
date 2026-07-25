@@ -24,6 +24,11 @@ bool computed_transition_is_justified(const TransitionRule& rule) {
     case ActionId::HandleLearnExpiry:
     case ActionId::HandleRadioRecovered:
       return true;
+    case ActionId::IssueCommandLease:
+      // Owns its resulting state: CommandLeaseIssued on success, Idle on an
+      // encode-failure refusal (issue #11 wedge fix).
+      return rule.state == CoordinatorState::CommandPending &&
+             rule.event == EventKind::Poll;
     case ActionId::FinishQueryMiss:
       return rule.state == CoordinatorState::RecoveryResponseListening;
     case ActionId::HandleTailFrame:

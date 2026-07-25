@@ -7,8 +7,21 @@ CoreEffects ConfirmationCore::issue_command(MonotonicMs now_ms) {
     return {};
   const auto tx = transaction_->snapshot();
   const auto payload = FrameCodec::encode_state(*sender_, tx.outbound_command);
-  if (!payload)
-    return refuse(RefusalReason::InvalidState);
+  if (!payload) {
+    // The outbound cannot be encoded (e.g. a re-encode of a bad value from prior
+    // authority). The lease rule is NextStateId::Computed, so we must set a
+    // coherent terminal here or the machine wedges. finish the transaction and
+    // return to Idle (sender_ is guaranteed by the CanLease guard). Reuses
+    // TransactionOutcome::Exhausted, the existing "could not be delivered"
+    // outcome; a distinct Undeliverable variant would force a new case in the
+    // adapter's exhaustive outcome_name() switch, which this change avoids.
+    CoreEffects effects;
+    finish_transaction(TransactionOutcome::Exhausted, effects);
+    state_ = CoordinatorState::Idle;
+    context_ = IdleContext{};
+    effects.add(RefusedInput{RefusalReason::InvalidState, state_});
+    return effects;
+  }
   const auto token = tx_tokens_.allocate();
   if (!token)
     return refuse(RefusalReason::IdExhausted);

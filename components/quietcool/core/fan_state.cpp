@@ -30,6 +30,11 @@ Result<FanState, StateError> FanState::observed(std::uint8_t raw) {
   return Result<FanState, StateError>::ok(FanState(raw, true));
 }
 
+bool FanState::is_valid_command() const {
+  return has_outbound_command_marker() && speed().has_value() &&
+         duration_from_value(raw_ & 0x0FU).has_value();
+}
+
 std::optional<Speed> FanState::speed() const {
   const auto result = speed_from_value((raw_ >> 4U) & 0x03U);
   return result ? std::optional<Speed>(result.value()) : std::nullopt;

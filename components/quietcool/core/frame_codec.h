@@ -5,7 +5,7 @@
 
 namespace quietcool {
 
-enum class FrameEncodeError : std::uint8_t { MissingRememberedSpeed };
+enum class FrameEncodeError : std::uint8_t { MissingRememberedSpeed, InvalidCommandDuration };
 enum class FrameDecodeError : std::uint8_t {
   InvalidLength, TailMismatch, SenderMismatch, SpecialQuery, InvalidState
 };

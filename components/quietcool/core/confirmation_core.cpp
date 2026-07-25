@@ -99,6 +99,8 @@ CoreEffects ConfirmationCore::handle_command_request(FanState requested,
                                                      MonotonicMs now_ms) {
   if (!sender_)
     return refuse(RefusalReason::Unprovisioned);
+  if (!requested.is_valid_command())
+    return refuse(RefusalReason::InvalidState);
   if ((transaction_ && transaction_->compare_request(requested) ==
                            JoinDecision::SemanticDuplicate) ||
       (deferred_command_ && deferred_command_->semantically_equals(requested)))

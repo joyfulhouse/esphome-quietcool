@@ -26,6 +26,10 @@ class FanState final {
   std::uint8_t outbound_command_byte() const { return 0x80U | canonical_byte(); }
   std::optional<Speed> speed() const;
   Duration duration() const;
+  // True only for a well-formed outbound command: command marker set, a defined
+  // speed nibble (1..3), and a defined duration nibble. A caller can defeat the
+  // command() enum arguments with static_cast; this is the ingest gate.
+  bool is_valid_command() const;
   std::optional<SpeedCapability> report_capability() const;
   bool is_on() const { return duration() != Duration::Off; }
   bool has_outbound_command_marker() const { return (raw_ & 0xC0U) == 0x80U; }

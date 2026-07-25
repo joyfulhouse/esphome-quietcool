@@ -185,9 +185,13 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
              EventKind::TimerEstimateExpired, GuardId::Always,
              ActionId::HandleTimerExpiry, NextStateId::Computed, 1,
              TemplateOrigin::None);
+  // Computed, not a fixed CommandLeaseIssued: issue_command owns its resulting
+  // state so an encode-failure refusal can return to a coherent terminal (Idle)
+  // instead of being overwritten into a CommandLeaseIssued/CommandPendingContext
+  // wedge. Success still sets CommandLeaseIssued itself, byte-for-byte unchanged.
   add_rule(rules, index, CoordinatorState::CommandPending, EventKind::Poll,
            GuardId::CanLease, ActionId::IssueCommandLease,
-           NextStateId::CommandLeaseIssued, 1, TemplateOrigin::None);
+           NextStateId::Computed, 1, TemplateOrigin::None);
   add_rule(rules, index, CoordinatorState::CommandLeaseIssued,
            EventKind::TxBurstStarted, GuardId::MatchingToken, ActionId::StartCommand,
            NextStateId::CommandTransmitting, 1, TemplateOrigin::None);

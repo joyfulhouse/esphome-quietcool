@@ -94,6 +94,22 @@ QC_TEST("domain", "invalid duration and zero-speed running are rejected") {
   }
 }
 
+QC_TEST("domain", "command rejects cast-invalid nibbles") {
+  // A cast-invalid duration keeps a valid speed but an undefined duration nibble.
+  QC_CHECK(!FanState::command(Speed::Low, static_cast<Duration>(7))
+                .is_valid_command());
+  // A cast-invalid speed clears the command marker / zeroes the speed nibble.
+  QC_CHECK(!FanState::command(static_cast<Speed>(4), Duration::Continuous)
+                .is_valid_command());
+  QC_CHECK(!FanState::command(static_cast<Speed>(5), Duration::Off)
+                .is_valid_command());
+  for (const auto speed : {Speed::Low, Speed::Medium, Speed::High})
+    for (const auto duration : {Duration::Off, Duration::Hours1, Duration::Hours2,
+                                Duration::Hours4, Duration::Hours8,
+                                Duration::Hours12, Duration::Continuous})
+      QC_CHECK(FanState::command(speed, duration).is_valid_command());
+}
+
 }  // namespace
 }  // namespace quietcool
 
