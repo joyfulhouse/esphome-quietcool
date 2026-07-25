@@ -335,5 +335,47 @@ QC_TEST("contexts", "sibling context with the wrong purpose is rejected") {
       QueryPendingContext{QueryPurpose::Boot, TxReason::BootQuery}));
 }
 
+QC_TEST("contexts", "sibling context with the wrong reason family is rejected") {
+  // Right purpose field, wrong query-family TxReason — exactly the class the
+  // fixture used to build with BootQuery (issue #25). The QueryPurpose check
+  // passes on all of these, so only the TxReason-family check can reject them.
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::ManualQueryLeaseIssued,
+      QueryLeaseContext{QueryPurpose::Manual, TxReason::BootQuery, TxToken(1),
+                        0}));
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::RecoveryQueryPending,
+      QueryPendingContext{QueryPurpose::Recovery, TxReason::ManualQuery}));
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::FallbackResponseListening,
+      QueryResponseContext{QueryPurpose::Fallback, TxReason::BootQuery,
+                           TxToken(1), 1}));
+  // Positive control: the matching reason is accepted.
+  QC_CHECK(ConfirmationCore::context_matches_state(
+      CoordinatorState::ManualQueryLeaseIssued,
+      QueryLeaseContext{QueryPurpose::Manual, TxReason::ManualQuery, TxToken(1),
+                        0}));
+}
+
+QC_TEST("contexts", "recovery family accepts every recovery reason not just initial") {
+  // The Recovery query family legitimately spans three reasons; production builds
+  // the pending context from RecoveryDue.reason (confirmation_observation.cpp)
+  // and derives the purpose back from the reason (confirmation_radio.cpp). The
+  // reason check must therefore be family-based, not equality against the
+  // fixture's single canonical RecoveryQueryInitial — an exact match would
+  // falsely reject these two on correct behaviour, which is worse than a weak
+  // check because it fires on legitimate pairings.
+  for (const auto reason : {TxReason::RecoveryQueryInitial,
+                            TxReason::RecoveryQueryRetry,
+                            TxReason::TimerExpiryRecoveryQuery}) {
+    QC_CHECK(ConfirmationCore::context_matches_state(
+        CoordinatorState::RecoveryQueryPending,
+        QueryPendingContext{QueryPurpose::Recovery, reason}));
+    QC_CHECK(ConfirmationCore::context_matches_state(
+        CoordinatorState::RecoveryResponseListening,
+        QueryResponseContext{QueryPurpose::Recovery, reason, TxToken(1), 1}));
+  }
+}
+
 }  // namespace
 }  // namespace quietcool
