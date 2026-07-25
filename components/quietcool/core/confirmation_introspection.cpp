@@ -102,9 +102,24 @@ StateContext ConfirmationCore::context_for_test(CoordinatorState state) {
     return QueryResponseContext{purpose, TxReason::BootQuery, token, 1};
   return QueryPendingContext{purpose, TxReason::BootQuery};
 }
+// The query-family variants (QueryPending/Lease/Tx/Response) each back four
+// distinct states (Boot/Manual/Fallback/Recovery), told apart only by this
+// interior `purpose`. Comparing variant index alone would accept a state paired
+// with a sibling context of the wrong purpose — a genuine desync class, since
+// the real dispatcher reads `purpose` back to pick the next transition.
+static std::optional<QueryPurpose> query_purpose_of(const StateContext &context) {
+  if (const auto *p = std::get_if<QueryPendingContext>(&context)) return p->purpose;
+  if (const auto *p = std::get_if<QueryLeaseContext>(&context)) return p->purpose;
+  if (const auto *p = std::get_if<QueryTxContext>(&context)) return p->purpose;
+  if (const auto *p = std::get_if<QueryResponseContext>(&context)) return p->purpose;
+  return std::nullopt;
+}
 bool ConfirmationCore::context_matches_state(CoordinatorState state,
                                              const StateContext &context) {
-  return context.index() == context_for_test(state).index();
+  const auto canonical = context_for_test(state);
+  if (context.index() != canonical.index()) return false;
+  // For non-query variants both sides are nullopt (equal): behaviour unchanged.
+  return query_purpose_of(context) == query_purpose_of(canonical);
 }
 TransactionRuleMatches ConfirmationCore::matching_transaction_rules_for_test(
     CoordinatorState state, const TransactionConsensusInput &input) {
@@ -122,49 +137,4 @@ TransactionRuleMatches ConfirmationCore::matching_transaction_rules_for_test(
   }
   return {first, count};
 }
-bool ConfirmationCore::action_is_dispatchable_for_test(ActionId action) {
-  switch (action) {
-  case ActionId::None:
-  case ActionId::IssueQueryLease:
-  case ActionId::StartQuery:
-  case ActionId::BeginRadioRecovery:
-  case ActionId::OpenQueryResponse:
-  case ActionId::TrackCandidate:
-  case ActionId::ApplyConsensus:
-  case ActionId::FinishQueryMiss:
-  case ActionId::AssertOemPriority:
-  case ActionId::IgnoreLearningOem:
-  case ActionId::AcceptRefresh:
-  case ActionId::RefuseRefresh:
-  case ActionId::ConfirmAndPromote:
-  case ActionId::YieldToOem:
-  case ActionId::RetryWithoutPromotion:
-  case ActionId::ApplyMismatchWithRetry:
-  case ActionId::ExhaustMismatch:
-  case ActionId::CreateFallback:
-  case ActionId::HandleRestore:
-  case ActionId::HandleRadioReady:
-  case ActionId::HandleCommandRequest:
-  case ActionId::HandleLearnRequest:
-  case ActionId::HandleForget:
-  case ActionId::HandleExternalState:
-  case ActionId::HandleTimerExpiry:
-  case ActionId::IssueCommandLease:
-  case ActionId::StartCommand:
-  case ActionId::CompleteCommand:
-  case ActionId::HandlePostWindowMiss:
-  case ActionId::HandleTailFrame:
-  case ActionId::HandleRetryDue:
-  case ActionId::HandleHoldoffExpired:
-  case ActionId::HandleRecoveryDue:
-  case ActionId::HandleLearningFrame:
-  case ActionId::HandleLearnExpiry:
-  case ActionId::HandleRadioRecovered:
-  case ActionId::PublishDiagnostic:
-  case ActionId::InvalidInternalEvent:
-    return true;
-  }
-  return false;
-}
-
 } // namespace quietcool

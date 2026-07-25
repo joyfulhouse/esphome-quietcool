@@ -107,6 +107,10 @@ CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
 }
 CoreEffects ConfirmationCore::dispatch(ActionId action,
                                        const ReducerInput &input) {
+  // This switch has no `default:` on purpose: under -Wswitch -Werror that makes
+  // it the compile-time exhaustiveness gate, so a newly added ActionId fails the
+  // build until it is handled here. Do not add a `default:` — it would silently
+  // reopen that hole (issue #12, L3-3).
   switch (action) {
   case ActionId::HandleRestore:
     return handle_restore(*input.restored, input.now_ms);
