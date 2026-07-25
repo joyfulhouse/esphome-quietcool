@@ -269,6 +269,17 @@ CoreEffects ConfirmationCore::handle_learning_frame(ByteView input,
     context_ = IdleContext{};
     effects.add(RequestPersistenceEffect{
         {PersistenceKind::SaveProvisioning, sender_, std::nullopt}});
+  } else if (event.kind == LearnEventKind::AmbiguousRejected) {
+    // Two distinct fans were heard in one window; refuse and keep whatever was
+    // bound before. sender_ is left untouched, so no SaveProvisioning is
+    // emitted and the previously bound fan survives. Mirrors the expiry path
+    // (HandleLearnExpiry); both learning-frame rules are NextStateId::Computed,
+    // so this in-handler state assignment is authoritative.
+    learn_.cancel();
+    state_ = sender_ ? CoordinatorState::Idle : CoordinatorState::Unprovisioned;
+    context_ = sender_ ? StateContext(IdleContext{})
+                       : StateContext(UnprovisionedContext{});
+    effects.add(RefusedInput{RefusalReason::AmbiguousLearn, state_});
   }
   return effects;
 }

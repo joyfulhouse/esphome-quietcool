@@ -120,7 +120,7 @@ enum class TransactionOutcome : std::uint8_t {
   CancelledByExternalState, YieldedToPossibleOemCommand, CancelledForLearning,
   RadioUnavailable
 };
-enum class RefusalReason : std::uint8_t { Unprovisioned, Busy, Holdoff, Learning, InvalidState, IdExhausted };
+enum class RefusalReason : std::uint8_t { Unprovisioned, Busy, Holdoff, Learning, InvalidState, IdExhausted, AmbiguousLearn };
 enum class QueryPurpose : std::uint8_t { Boot, Manual, Fallback, Recovery };
 enum class EvidenceSource : std::uint8_t {
   BootQueryConsensus, ManualQueryConsensus, RecoveryQueryConsensus,
@@ -164,6 +164,9 @@ constexpr MonotonicMs kDirectQueryAcceptStartMs = 300;
 constexpr MonotonicMs kDirectQueryAcceptEndMs = 1100;
 constexpr MonotonicMs kResponseTailEndMs = 2500;
 constexpr MonotonicMs kMinIndependentCandidateGapMs = 60;
+constexpr MonotonicMs kLearnSightingGapMs = 600;   // min separation between independent learn sightings
+constexpr MonotonicMs kLearnWindowSpanMs = 60000;  // stale boundary: a same-sender frame this old restarts the candidate
+constexpr std::uint8_t kLearnMinSightings = 3;     // independent sightings required before binding a fan
 constexpr MonotonicMs kCommandRetryMinDelayMs = 1000;
 constexpr MonotonicMs kInterFrameGapMs = 45;
 constexpr MonotonicMs kOemHoldoffMs = 2000;

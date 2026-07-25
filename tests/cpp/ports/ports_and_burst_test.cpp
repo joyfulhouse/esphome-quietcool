@@ -430,8 +430,10 @@ QC_TEST("ports", "fake preferences carries learn and forget across reboot") {
   ConfirmationCore learning(CoreConfig{67});
   learning.request_learn(LearnMode::Manual, 0);
   const FrameBytes command{{0xCB, 0x00, 0x47, 0x39, 0x9F, 0x9F}};
+  // Issue #6: binding now requires three independent sightings, not two.
   learning.on_frame(ByteView(command.bytes), 1);
-  const auto learned = learning.on_frame(ByteView(command.bytes), 602);
+  learning.on_frame(ByteView(command.bytes), 602);
+  const auto learned = learning.on_frame(ByteView(command.bytes), 1203);
   apply_preferences(preferences, learned);
   preferences.sync();
 
