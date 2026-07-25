@@ -59,6 +59,33 @@ replies with the explicit 50 kHz SX1278 setting; the SX1262's FSK bandwidth
 enum has no 50 kHz entry, so the V3 file uses 58.6 kHz (with 78.2 kHz as the
 next-wider legal step if RX proves marginal on real hardware).
 
+## Transmit timing and the task watchdog
+
+Transmitting a frame is **synchronous and blocking**. The upstream SX127x driver
+(`SX127x::transmit_packet`) busy-waits on the DIO0 "transmit done" line for up to
+**4000 ms**, with no `yield` and no watchdog feed inside that spin. The ESP32
+loop task carries a **5000 ms** task watchdog in panic mode, fed once per loop
+iteration. A transmit that never completes therefore stalls the main loop for up
+to ~4 s — degrading API responsiveness and OTA — while still leaving roughly a
+**1 s margin** before the watchdog would fire. On its own, a single stuck
+transmit is a liveness hiccup, **not** a reboot.
+
+That 1 s margin is the whole safety story, and it rests on an invariant:
+
+> **At most one synchronous transmit (≤ 4 s) per loop iteration, task WDT 5 s.**
+
+`BurstTransmitter` upholds it: `send_next` issues exactly one `send_packet` per
+call, and `poll()` calls `send_next` at most once per iteration — a three-frame
+burst is spread across iterations, each subsequent frame gated behind
+`kInterFrameGapMs`.
+
+**For maintainers:** any change that issues *two* synchronous transmits in one
+loop iteration, or lowers the watchdog below the transmit timeout, erases the
+margin and converts the stall into a **panic reboot**. Do neither in this layer.
+A real fix for the stall itself belongs upstream (a `yield`/`feed_wdt` inside the
+DIO0 spin) or in configuration (a DIO0 timeout set well under the watchdog), both
+out of scope for this component. See issue #13.
+
 ## Why not BLE?
 
 QuietCool's *Smart* attic-fan line (`ATTICFAN*`) speaks JSON over BLE — a
