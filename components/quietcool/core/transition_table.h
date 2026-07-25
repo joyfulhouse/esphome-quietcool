@@ -14,7 +14,7 @@ enum class EventKind : std::uint8_t {
   TailExpired, RetryDue, OemHoldoffExpired, RecoveryDue,
   LearnCandidateStarted, Learned, LearnWindowExpired, TimerEstimateExpired,
   TxLeaseWatchdogFired, TxBurstWatchdogFired, LocalTailRepeat,
-  LocalTailContradiction, Poll
+  LocalTailContradiction, SpecialDiagnosticHeard, Poll
 };
 enum class GuardId : std::uint8_t {
   Always, CanLease, MatchingToken, CandidateInEpoch, SemanticMatch,
