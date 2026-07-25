@@ -354,5 +354,108 @@ QC_TEST("adapter", "degrade latches before publishing and refuses reentrant requ
   QC_CHECK_EQ(command_status.published().back(), std::string("unavailable"));
 }
 
+// #22: once degrade() latches, the drain must stop — a later effect in the same
+// batch must not overwrite the terminal "unavailable" publication.
+QC_TEST("adapter", "degrade stops the drain so the terminal status is not overwritten") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  DegradationSensors sensors;
+  sensors.wire(harness.component());
+
+  // Fill the callback queue so the RequestRadioReset below cannot enqueue its
+  // RadioRecovered callback and must degrade partway through the batch.
+  harness.component().fill_callback_queue_for_test();
+
+  // The #22 sequence: a RequestRadioReset that degrades mid-drain, followed by a
+  // RequestAccepted that — before the fix — the drain kept applying, publishing
+  // command_status "pending" over the terminal "unavailable".
+  ::quietcool::CoreEffects batch;
+  QC_CHECK(batch.add(::quietcool::RequestRadioReset{0}));
+  QC_CHECK(batch.add(::quietcool::PublishCoreEvent{
+      {::quietcool::CoreEventKind::RequestAccepted,
+       ::quietcool::CoordinatorState::CommandPending, std::nullopt, std::nullopt,
+       std::nullopt}}));
+  harness.component().drive_effects_for_test(batch);
+
+  QC_CHECK(harness.component().is_failed());
+  // Asserted at the END of the drain, not at the instant degrade() returned:
+  // the trailing RequestAccepted must never have run.
+  sensors.check_degraded();
+  for (const auto& status : sensors.command_status.published())
+    QC_CHECK(status != "pending");
+  QC_CHECK_EQ(sensors.command_status.published().back(),
+              std::string("unavailable"));
+}
+
+// #22 companion — halting is terminal and ONE-WAY, the opposite of budget
+// backpressure (issue #8), which is resumable. Once degraded, a subsequent
+// drive of effects must apply nothing: the drain refuses to run again, so no
+// later effect can resurrect a stale status over the terminal "unavailable".
+QC_TEST("adapter", "halt is terminal: a drain after degrade applies nothing") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  DegradationSensors sensors;
+  sensors.wire(harness.component());
+
+  harness.component().degrade_for_test();
+  QC_CHECK(harness.component().is_failed());
+  sensors.check_degraded();
+
+  // A batch delivered after degradation must never run — its RequestAccepted
+  // would otherwise publish "pending" over the terminal "unavailable".
+  ::quietcool::CoreEffects batch;
+  QC_CHECK(batch.add(::quietcool::PublishCoreEvent{
+      {::quietcool::CoreEventKind::RequestAccepted,
+       ::quietcool::CoordinatorState::CommandPending, std::nullopt, std::nullopt,
+       std::nullopt}}));
+  harness.component().drive_effects_for_test(batch);
+
+  for (const auto& status : sensors.command_status.published())
+    QC_CHECK(status != "pending");
+  QC_CHECK_EQ(sensors.command_status.published().back(),
+              std::string("unavailable"));
+}
+
+// #23: setup() must honour the latch like every other entry point.
+QC_TEST("adapter", "setup after degrade does not re-enter the core") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  // Move the core to a distinctive state a fresh restore() would not reproduce.
+  harness.component().request_learn(::quietcool::LearnMode::Manual);
+  QC_CHECK_EQ(harness.component().snapshot().state,
+              CoordinatorState::LearningAwaitingFirst);
+
+  harness.component().degrade_for_test();
+  // degrade() is entity-only; it must not itself have moved the core.
+  QC_CHECK_EQ(harness.component().snapshot().state,
+              CoordinatorState::LearningAwaitingFirst);
+
+  // A re-entrant setup() must be refused by the latch; core_.restore() /
+  // on_radio_ready() must not run, so the state stays put.
+  harness.component().setup();
+  QC_CHECK_EQ(harness.component().snapshot().state,
+              CoordinatorState::LearningAwaitingFirst);
+}
+
+// #23 companion: the guard must not break an ordinary boot, which runs setup()
+// while the latch is legitimately false.
+QC_TEST("adapter", "normal startup still completes with the setup guard") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  QC_CHECK(!harness.component().is_failed());
+  // on_radio_ready() reached the core at boot, so the boot query goes out.
+  for (std::size_t pass = 0; pass < 60; ++pass) harness.advance_and_loop(25);
+  QC_CHECK(!harness.component().is_failed());
+  QC_CHECK(!harness.radio().packets().empty());
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

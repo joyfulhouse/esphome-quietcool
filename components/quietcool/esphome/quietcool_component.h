@@ -91,6 +91,22 @@ class QuietCoolComponent final : public Component {
     // the RadioRecovered callback and degrades — the real line-152 path.
     apply_effect(::quietcool::RequestRadioReset{0});
   }
+  // Fills the callback queue without applying anything (issue #22): a
+  // subsequent RequestRadioReset in a drained batch then cannot enqueue its
+  // RadioRecovered callback and degrades mid-drain.
+  void fill_callback_queue_for_test() {
+    while (core_callbacks_.enqueue(::quietcool::CoreCallbackKind::RadioRecovered,
+                                   std::nullopt)) {
+    }
+  }
+  // Drives a hand-built effect batch through the real apply_effects()/drain()
+  // path (issue #22), so a degrade triggered by one effect is observed against
+  // the effects that follow it in the same batch.
+  void drive_effects_for_test(const ::quietcool::CoreEffects& effects) {
+    apply_effects(effects, 0);
+  }
+  // Degrades directly, without manipulating any queue (issue #23).
+  void degrade_for_test() { degrade("test-forced degradation"); }
 #endif
 
  private:

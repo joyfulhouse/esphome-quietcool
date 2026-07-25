@@ -24,6 +24,12 @@ float QuietCoolComponent::get_setup_priority() const {
 }
 
 void QuietCoolComponent::setup() {
+  // Guarded like every other public entry point (issue #23): a synchronous
+  // automation fired by publish_controller_failed() can call setup(), which
+  // would otherwise re-enter core_.restore() / core_.on_radio_ready() on a core
+  // already declared broken. setup() legitimately runs once at boot, before any
+  // degradation, when this latch is false — so normal startup is unaffected.
+  if (degraded_) return;
   const auto now_ms = clock_.now_ms();
   apply_effects(core_.restore(preferences_.load(), now_ms), now_ms);
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
@@ -150,6 +156,13 @@ bool QuietCoolComponent::enqueue_effects(
 void QuietCoolComponent::degrade(const char* reason) {
   if (degraded_) return;
   degraded_ = true;
+  // Stop the drain terminally (issue #22). degrade() is reached from inside
+  // apply_effect(), i.e. from within CoreEffectDrain::drain(); without this the
+  // drain would keep applying the rest of the batch after we return, and a
+  // later RequestAccepted / authority / persistence effect would overrun the
+  // terminal "unavailable" publication below. This is NOT the backpressure
+  // path — budget exhaustion (issue #8) must keep draining with nothing dropped.
+  effect_drain_.halt();
   ESP_LOGE(kTag, "QuietCool controller degraded: %s; control and observation halted",
            reason);
   events_.publish_controller_failed();
