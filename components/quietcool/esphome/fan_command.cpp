@@ -3,8 +3,14 @@
 namespace esphome::quietcool {
 
 int clamp_fan_speed(int speed, std::uint8_t supported_speed_count) {
+  // Floor the ceiling at 1: a supported_speed_count of 0 would otherwise let
+  // speed 0 through, which casts to an undefined Speed nibble. Keeping the
+  // function total makes it safe in isolation rather than by a caller
+  // precondition in a different file (issue #19).
+  const int ceiling =
+      supported_speed_count < 1 ? 1 : static_cast<int>(supported_speed_count);
   if (speed < 1) return 1;
-  if (speed > supported_speed_count) return supported_speed_count;
+  if (speed > ceiling) return ceiling;
   return speed;
 }
 

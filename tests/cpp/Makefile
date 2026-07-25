@@ -1,5 +1,12 @@
 CXX ?= c++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2
+# Optimisation stays tunable via an exported or command-line CXXFLAGS (default
+# -O2). The language standard and the warning/error flags are appended with
+# `override` so an environment or command-line CXXFLAGS cannot drop them. The
+# -Werror here is the -Wswitch exhaustiveness gate that #12 leans on after
+# deleting action_is_dispatchable_for_test; it must not be environment-defeatable
+# (issue #21).
+CXXFLAGS ?= -O2
+override CXXFLAGS += -std=c++17 -Wall -Wextra -Wpedantic -Werror
 TEST_CXXFLAGS := $(CXXFLAGS) -DQUIETCOOL_HOST_TEST -finstrument-functions
 ROOT := ../..
 INCLUDES := -I$(ROOT)/components -I.

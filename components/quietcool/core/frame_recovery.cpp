@@ -25,12 +25,19 @@ Result<RecoveredResponse, RecoveryError> FrameRecovery::recover_response(
     return Result<RecoveredResponse, RecoveryError>::err(RecoveryError::TailMismatch);
   RecoveryQuality quality = RecoveryQuality::Exact;
   ResponseKind kind = ResponseKind::Normal;
+  // The normal-response header is the provisioned sender's own byte[0], derived
+  // here the same way decode_strict compares against expected[0] — not the
+  // hardcoded 0xCB it used to assume. This keeps the two decoders' notion of
+  // sender identity from diverging if a non-0xCB sender ever exists (issue #20).
+  // The special-response header 0xCE is a protocol constant, unchanged.
+  const auto normal_header = expected[0];
   if (input[0] == 0xCE) {
     kind = ResponseKind::Special;
-  } else if (input[0] != 0xCB) {
-    const auto cb_distance = bit_count(static_cast<std::uint8_t>(input[0] ^ 0xCBU));
+  } else if (input[0] != normal_header) {
+    const auto normal_distance =
+        bit_count(static_cast<std::uint8_t>(input[0] ^ normal_header));
     const auto ce_distance = bit_count(static_cast<std::uint8_t>(input[0] ^ 0xCEU));
-    if (cb_distance > 1 || cb_distance >= ce_distance)
+    if (normal_distance > 1 || normal_distance >= ce_distance)
       return Result<RecoveredResponse, RecoveryError>::err(
           RecoveryError::HeaderNotRecoverable);
     quality = RecoveryQuality::Recovered;
