@@ -188,6 +188,17 @@ void EspHomeEventSink::publish_authority(
   if (!command_status_published_) publish_command_status("idle");
 }
 
+void EspHomeEventSink::publish_controller_failed() {
+  if (controller_fault_ != nullptr) controller_fault_->publish_state(true);
+  if (state_known_ != nullptr) state_known_->publish_state(false);
+  if (timer_program_known_ != nullptr)
+    timer_program_known_->publish_state(false);
+  if (timer_remaining_known_ != nullptr)
+    timer_remaining_known_->publish_state(false);
+  if (confirmed_off_ != nullptr) confirmed_off_->publish_state(false);
+  if (command_status_ != nullptr) command_status_->publish_state("unavailable");
+}
+
 void EspHomeEventSink::on_core_event(const ::quietcool::CoreEvent& event) {
   using Kind = ::quietcool::CoreEventKind;
   if (event.kind == Kind::RequestAccepted) {

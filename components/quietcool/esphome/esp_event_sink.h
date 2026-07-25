@@ -28,6 +28,9 @@ class EspHomeEventSink final : public ::quietcool::EventSink {
   void set_confirmed_off_sensor(binary_sensor::BinarySensor* sensor) {
     confirmed_off_ = sensor;
   }
+  void set_controller_fault_sensor(binary_sensor::BinarySensor* sensor) {
+    controller_fault_ = sensor;
+  }
   void set_timer_remaining_sensor(sensor::Sensor* sensor) {
     timer_remaining_ = sensor;
   }
@@ -42,6 +45,13 @@ class EspHomeEventSink final : public ::quietcool::EventSink {
                          ::quietcool::MonotonicMs now_ms);
   void on_core_event(const ::quietcool::CoreEvent& event) override;
 
+  // Entity-layer degradation for a terminally failed controller (M2, issue #9).
+  // Raises the "Controller Fault" problem sensor and invalidates every standing
+  // authority claim so Home Assistant stops presenting stale confirmed state as
+  // trustworthy. Touches only entity pointers — never the core, which is
+  // non-reentrant and may itself be the thing that broke.
+  void publish_controller_failed();
+
  private:
   bool should_log(const ::quietcool::CoreEvent& event);
   void publish_command_status(const char* status);
@@ -53,6 +63,7 @@ class EspHomeEventSink final : public ::quietcool::EventSink {
   binary_sensor::BinarySensor* timer_program_known_{nullptr};
   binary_sensor::BinarySensor* timer_remaining_known_{nullptr};
   binary_sensor::BinarySensor* confirmed_off_{nullptr};
+  binary_sensor::BinarySensor* controller_fault_{nullptr};
   sensor::Sensor* timer_remaining_{nullptr};
   text_sensor::TextSensor* command_status_{nullptr};
   text_sensor::TextSensor* evidence_source_{nullptr};

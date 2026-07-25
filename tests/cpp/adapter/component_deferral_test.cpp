@@ -32,8 +32,11 @@ namespace esphome::quietcool {
 namespace {
 
 using ::quietcool::CoordinatorState;
+using ::quietcool::Duration;
+using ::quietcool::FanState;
 using ::quietcool::RadioRecoveryResult;
 using ::quietcool::RadioSendResult;
+using ::quietcool::Speed;
 
 constexpr std::uint32_t kSenderSeed = 0xCB004739U;
 constexpr std::uint32_t kPreferenceKey = 0x51434332U;
@@ -242,6 +245,113 @@ QC_TEST("adapter", "boot transmits only the query, never a state command") {
   for (const auto& packet : harness.radio().packets())
     for (std::size_t index = 4; index < packet.bytes.size(); ++index)
       QC_CHECK_EQ(packet.bytes[index], std::uint8_t(0x66));
+}
+
+// M2 (issue #9): a fault sensor whose publish_state re-enters the component,
+// used to prove the degraded_ latch is set before any degradation publication.
+class ReentrantFaultSensor final : public binary_sensor::BinarySensor {
+ public:
+  void set_target(QuietCoolComponent* component) { component_ = component; }
+  void publish_state(bool state) override {
+    binary_sensor::BinarySensor::publish_state(state);
+    if (component_ != nullptr)
+      component_->request_state(
+          FanState::command(Speed::High, Duration::Continuous));
+  }
+
+ private:
+  QuietCoolComponent* component_{nullptr};
+};
+
+// Wires the full degradation entity surface onto a component.
+struct DegradationSensors final {
+  binary_sensor::BinarySensor fault;
+  binary_sensor::BinarySensor state_known;
+  binary_sensor::BinarySensor timer_program_known;
+  binary_sensor::BinarySensor timer_remaining_known;
+  binary_sensor::BinarySensor confirmed_off;
+  text_sensor::TextSensor command_status;
+
+  void wire(QuietCoolComponent& component) {
+    component.set_controller_fault_sensor(&fault);
+    component.set_state_known_sensor(&state_known);
+    component.set_timer_program_known_sensor(&timer_program_known);
+    component.set_timer_remaining_known_sensor(&timer_remaining_known);
+    component.set_confirmed_off_sensor(&confirmed_off);
+    component.set_command_status_sensor(&command_status);
+  }
+
+  // Every "known" claim drops to false, the problem sensor raises, and
+  // command_status reads "unavailable": stale confirmed authority is
+  // invalidated so Home Assistant stops presenting it as trustworthy.
+  void check_degraded() const {
+    QC_CHECK(!fault.published().empty());
+    QC_CHECK(fault.published().back());
+    QC_CHECK(!state_known.published().empty());
+    QC_CHECK(!state_known.published().back());
+    QC_CHECK(!timer_program_known.published().empty());
+    QC_CHECK(!timer_program_known.published().back());
+    QC_CHECK(!timer_remaining_known.published().empty());
+    QC_CHECK(!timer_remaining_known.published().back());
+    QC_CHECK(!confirmed_off.published().empty());
+    QC_CHECK(!confirmed_off.published().back());
+    QC_CHECK(!command_status.published().empty());
+    QC_CHECK_EQ(command_status.published().back(), std::string("unavailable"));
+  }
+};
+
+QC_TEST("adapter", "effect queue overflow degrades visibly and terminally") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  DegradationSensors sensors;
+  sensors.wire(harness.component());
+
+  harness.component().force_effect_queue_overflow_for_test();
+
+  QC_CHECK(harness.component().is_failed());
+  sensors.check_degraded();
+}
+
+QC_TEST("adapter", "callback queue overflow degrades visibly and terminally") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  DegradationSensors sensors;
+  sensors.wire(harness.component());
+
+  harness.component().force_callback_queue_overflow_for_test();
+
+  QC_CHECK(harness.component().is_failed());
+  sensors.check_degraded();
+}
+
+QC_TEST("adapter", "degrade latches before publishing and refuses reentrant requests") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  ReentrantFaultSensor fault;
+  text_sensor::TextSensor command_status;
+  fault.set_target(&harness.component());
+  harness.component().set_controller_fault_sensor(&fault);
+  harness.component().set_command_status_sensor(&command_status);
+
+  harness.component().force_callback_queue_overflow_for_test();
+
+  // degraded_ was latched before publish_controller_failed(), so the fault
+  // sensor's re-entrant request_state() hit the guard and never drove the core:
+  // no "refused"/"pending" status was produced, only the terminal
+  // "unavailable". degrade() is idempotent, so the fault published exactly once.
+  QC_CHECK(harness.component().is_failed());
+  QC_CHECK_EQ(fault.published().size(), std::size_t(1));
+  QC_CHECK(fault.published().back());
+  for (const auto& status : command_status.published())
+    QC_CHECK(status != "refused" && status != "pending");
+  QC_CHECK(!command_status.published().empty());
+  QC_CHECK_EQ(command_status.published().back(), std::string("unavailable"));
 }
 
 }  // namespace
