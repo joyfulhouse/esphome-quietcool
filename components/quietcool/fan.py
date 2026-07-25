@@ -24,7 +24,7 @@ CONFIG_SCHEMA = (
 
 async def to_code(config):
     # Subdirectory headers are not auto-included; declare the entity class.
-    cg.add_global(cg.RawStatement('#include "quietcool/esphome/quietcool_fan.h"'))
+    cg.add_global(cg.RawStatement('#include "esphome/components/quietcool/esphome/quietcool_fan.h"'))
     var = await fan.new_fan(config)
     await cg.register_component(var, config)
     controller = await cg.get_variable(config[CONF_CONTROLLER_ID])

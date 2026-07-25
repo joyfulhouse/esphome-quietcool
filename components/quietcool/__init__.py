@@ -145,12 +145,12 @@ async def to_code(config):
     # adapter headers self-guard on QUIETCOOL_USE_SX127X/SX126X, so including
     # both is safe regardless of the configured variant.
     cg.add_global(
-        cg.RawStatement('#include "quietcool/esphome/quietcool_component.h"'))
-    cg.add_global(cg.RawStatement('#include "quietcool/esphome/automation.h"'))
+        cg.RawStatement('#include "esphome/components/quietcool/esphome/quietcool_component.h"'))
+    cg.add_global(cg.RawStatement('#include "esphome/components/quietcool/esphome/automation.h"'))
     cg.add_global(
-        cg.RawStatement('#include "quietcool/radio/sx127x_radio_adapter.h"'))
+        cg.RawStatement('#include "esphome/components/quietcool/radio/sx127x_radio_adapter.h"'))
     cg.add_global(
-        cg.RawStatement('#include "quietcool/radio/sx126x_radio_adapter.h"'))
+        cg.RawStatement('#include "esphome/components/quietcool/radio/sx126x_radio_adapter.h"'))
 
     radio_config = config[CONF_RADIO]
     radio = await cg.get_variable(radio_config[CONF_ID])

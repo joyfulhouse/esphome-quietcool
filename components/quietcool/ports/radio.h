@@ -1,6 +1,6 @@
 #pragma once
 
-#include "quietcool/core/core_types.h"
+#include "esphome/components/quietcool/core/core_types.h"
 
 namespace quietcool {
 

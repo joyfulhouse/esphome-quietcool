@@ -1,6 +1,6 @@
 #pragma once
 
-#include "quietcool/core/authority_store.h"
+#include "esphome/components/quietcool/core/authority_store.h"
 
 #include <optional>
 

@@ -1,11 +1,11 @@
 #pragma once
 
-#include "quietcool/core/confirmation_core.h"
-#include "quietcool/ports/core_callback_queue.h"
+#include "esphome/components/quietcool/core/confirmation_core.h"
+#include "esphome/components/quietcool/ports/core_callback_queue.h"
 #include "esp_event_sink.h"
 #include "esp_monotonic_clock.h"
 #include "preferences_adapter.h"
-#include "quietcool/radio/burst_transmitter.h"
+#include "esphome/components/quietcool/radio/burst_transmitter.h"
 
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
