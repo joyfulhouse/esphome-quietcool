@@ -81,6 +81,8 @@ void AuthorityStore::bind_manual_query_token(TxToken token) {
 void AuthorityStore::promote(const AcceptedObservation& accepted,
                              MonotonicMs now_ms) {
   ++revision_;
+  // ConfirmedStateAuthority denotes observational corroboration, not
+  // authenticity; the OEM protocol carries no way to prove origin. See SECURITY.md.
   state_ = ConfirmedStateAuthority{
       accepted.state, accepted.source, accepted.confidence,
       accepted.observed_ms, accepted.independent_candidates,

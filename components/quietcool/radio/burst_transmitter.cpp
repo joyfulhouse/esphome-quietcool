@@ -45,6 +45,18 @@ BurstSnapshot BurstTransmitter::snapshot() const {
           frames_sent_, next_frame_ms_};
 }
 
+// INVARIANT: at most one synchronous transmit per loop iteration.
+// radio_.send_packet() maps to the upstream SX127x::transmit_packet, which
+// busy-waits on DIO0 for up to 4000 ms with no yield and no watchdog feed. The
+// loop task's watchdog is 5000 ms (panic), fed once per iteration, so a single
+// stuck transmit stalls the loop up to ~4 s but leaves ~1 s of margin — a
+// liveness hit to API/OTA, not a reboot. send_next() issues exactly one
+// send_packet per call, and poll() calls it at most once per iteration (the
+// next frame is gated behind kInterFrameGapMs into a later iteration). Do not
+// issue a second synchronous transmit in one iteration, and do not lower the
+// watchdog below the transmit timeout: either turns the stall into a panic
+// reboot. See docs/hardware.md, "Transmit timing and the task watchdog", and
+// issue #13.
 std::optional<BurstEvent> BurstTransmitter::send_next(MonotonicMs now_ms) {
   if (!request_) return std::nullopt;
   phase_ = frames_sent_ == 0 ? BurstPhase::SendingFrame1

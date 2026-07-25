@@ -152,7 +152,7 @@ QC_TEST("transition_table", "query families share template but keep state IDs") 
 }
 
 QC_TEST("transition_table", "all states have RF permission and Refresh policy") {
-  for (std::uint8_t value = 0; value < 31; ++value) {
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
     const auto permission = TransitionTable::rf_permission(state);
     if (state == CoordinatorState::CommandPending) QC_CHECK(permission.lease_command);
@@ -182,22 +182,15 @@ QC_TEST("transition_table", "fallback has one contractual predecessor") {
   QC_CHECK_EQ(predecessors, 1U);
 }
 
-QC_TEST("transition_table", "every descriptor action has a core dispatcher") {
-  const auto view = TransitionTable::rules();
-  for (std::size_t index = 0; index < view.size; ++index)
-    QC_CHECK(ConfirmationCore::action_is_dispatchable_for_test(
-        view.data[index].action));
-  for (std::uint8_t value = 0;
-       value <= static_cast<std::uint8_t>(ActionId::InvalidInternalEvent);
-       ++value)
-    QC_CHECK(ConfirmationCore::action_is_dispatchable_for_test(
-        static_cast<ActionId>(value)));
-  QC_CHECK(!ConfirmationCore::action_is_dispatchable_for_test(
-      static_cast<ActionId>(0xFF)));
-}
+// Deliberately no "every action is dispatchable" test here: the real dispatcher
+// (ConfirmationCore::dispatch) has no `default:` label, so -Wswitch -Werror
+// already forces every ActionId to be handled at compile time, and each action's
+// actual behaviour is pinned by the INV/REG/supersession/tail-exit suites. A
+// hand-maintained surrogate switch that returns true for every ActionId proved
+// none of that — it only restated the enum — so it was removed (issue #12, L3-3).
 
 QC_TEST("transition_table", "every state-event group is first-match ordered") {
-  constexpr std::size_t state_count = 31;
+  constexpr std::size_t state_count = kCoordinatorStateCount;
   constexpr std::size_t event_count =
       static_cast<std::size_t>(EventKind::Poll) + 1U;
   std::array<std::uint16_t, state_count * event_count> priorities{};
@@ -219,7 +212,7 @@ QC_TEST("transition_table", "global reducer events cover every state") {
       EventKind::ExactOemQueryHeard, EventKind::TimerEstimateExpired};
   const auto view = TransitionTable::rules();
   for (const auto event : global_events) {
-    std::array<bool, 31> covered{};
+    std::array<bool, kCoordinatorStateCount> covered{};
     for (std::size_t index = 0; index < view.size; ++index)
       if (view.data[index].event == event)
         covered[static_cast<std::size_t>(view.data[index].state)] = true;

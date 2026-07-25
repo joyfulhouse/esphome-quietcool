@@ -185,7 +185,7 @@ RefreshFixture fixture_for(CoordinatorState state) {
 
 QC_TEST("INV-09", "Refresh is inert in every reachable non-Idle state") {
   std::size_t invoked = 0;
-  for (std::uint8_t value=0; value<31; ++value) {
+  for (std::uint8_t value=0; value<kCoordinatorStateCount; ++value) {
     const auto state=static_cast<CoordinatorState>(value);
     if (state==CoordinatorState::Idle) continue;
     QC_CHECK(!TransitionTable::refresh_is_accepted(state));

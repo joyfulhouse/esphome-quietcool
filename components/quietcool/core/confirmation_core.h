@@ -235,7 +235,6 @@ class ConfirmationCore final {
                                     const StateContext& context);
   static TransactionRuleMatches matching_transaction_rules_for_test(
       CoordinatorState state, const TransactionConsensusInput& input);
-  static bool action_is_dispatchable_for_test(ActionId action);
  private:
 #ifdef QUIETCOOL_HOST_TEST
   friend class ConfirmationCoreTestBuilder;

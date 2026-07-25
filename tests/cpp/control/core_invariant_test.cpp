@@ -306,18 +306,33 @@ QC_TEST("bug_check", "TX token exhaustion cannot install a tokenless lease state
   QC_CHECK(!snapshot.live_tx.has_value());
 }
 
-QC_TEST("contexts", "all 31 enum values have a valid typed context mapping") {
-  for (std::uint8_t value = 0; value < 31; ++value) {
+QC_TEST("contexts", "all coordinator states have a valid typed context mapping") {
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
     const auto context = ConfirmationCore::context_for_test(state);
     QC_CHECK(ConfirmationCore::context_matches_state(state, context));
-    const auto next = static_cast<CoordinatorState>((value + 1U) % 31U);
+    const auto next = static_cast<CoordinatorState>((value + 1U) % kCoordinatorStateCount);
     QC_CHECK(!ConfirmationCore::context_matches_state(next, context) ||
              context.index() == ConfirmationCore::context_for_test(next).index());
   }
   QC_CHECK(!ConfirmationCoreTestBuilder::make(
                 CoordinatorState::CommandPending, IdleContext{})
                 .has_value());
+}
+
+QC_TEST("contexts", "sibling context with the wrong purpose is rejected") {
+  // Same variant index as the canonical context, wrong interior purpose: the
+  // index-only check accepted these; the strengthened check must reject them.
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::BootQueryPending,
+      QueryPendingContext{QueryPurpose::Manual, TxReason::ManualQuery}));
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::ManualQueryLeaseIssued,
+      QueryLeaseContext{QueryPurpose::Boot, TxReason::BootQuery, TxToken(1), 0}));
+  // Positive control: correct purpose still matches.
+  QC_CHECK(ConfirmationCore::context_matches_state(
+      CoordinatorState::BootQueryPending,
+      QueryPendingContext{QueryPurpose::Boot, TxReason::BootQuery}));
 }
 
 }  // namespace

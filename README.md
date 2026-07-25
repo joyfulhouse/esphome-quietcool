@@ -266,6 +266,14 @@ an explicit Refresh or a separate motor/airflow sensor where freshness is
 safety-critical.
 
 
+## Security
+
+The OEM 433 MHz protocol is unauthenticated, so a transmitter within RF range
+can influence both the fan and the state reported to Home Assistant. What that
+means for deployment — and what "confirmed" state does and does not guarantee —
+is written up in [SECURITY.md](SECURITY.md).
+
+
 ## Learn mode / porting to your own fan
 
 Every QuietCool OEM sender ID is four bytes beginning with `CB`; the RF
