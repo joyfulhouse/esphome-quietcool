@@ -35,7 +35,7 @@ constexpr std::array<QueryStates, 4> kQueryStates{{
 constexpr std::array<TemplateOrigin, 4> kOrigins{
     TemplateOrigin::BootQuery, TemplateOrigin::ManualQuery,
     TemplateOrigin::FallbackQuery, TemplateOrigin::RecoveryQuery};
-constexpr std::size_t kRuleCount = 357;
+constexpr std::size_t kRuleCount = 357 + kCoordinatorStateCount;
 
 constexpr NextStateId tail_or_computed(std::size_t family) {
   // Recovery misses consult the retry schedule; other query misses have a fixed tail.
@@ -171,6 +171,15 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
                ActionId::HandleExternalState, NextStateId::OemHoldoff, 1,
                TemplateOrigin::None);
   }
+  // A 0xCE special response is surfaced as observable protocol evidence and
+  // nothing more. PublishDiagnostic emits CoreEventKind::Diagnostic; Same means
+  // no state, authority, timer, or TX change and no fan actuation, in every
+  // state — this event is deliberately never an input to authority.
+  for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value)
+    add_rule(rules, index, static_cast<CoordinatorState>(value),
+             EventKind::SpecialDiagnosticHeard, GuardId::Always,
+             ActionId::PublishDiagnostic, NextStateId::Same, 1,
+             TemplateOrigin::None);
   for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value)
     add_rule(rules, index, static_cast<CoordinatorState>(value),
              EventKind::TimerEstimateExpired, GuardId::Always,

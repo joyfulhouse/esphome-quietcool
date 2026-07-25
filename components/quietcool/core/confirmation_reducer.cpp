@@ -281,6 +281,8 @@ CoreEffects ConfirmationCore::on_frame(ByteView input, MonotonicMs now_ms) {
   else if (std::holds_alternative<IgnoredPostCommandPreAcceptanceState>(
                classified))
     kind = EventKind::IgnoredPostCommandPreAcceptanceState;
+  else if (std::holds_alternative<SpecialDiagnostic>(classified))
+    kind = EventKind::SpecialDiagnosticHeard;
   else
     return {};
   ReducerInput event{kind, now_ms};
