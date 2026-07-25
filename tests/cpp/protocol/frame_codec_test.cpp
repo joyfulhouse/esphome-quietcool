@@ -36,6 +36,13 @@ QC_TEST("protocol", "every valid command state round-trips") {
   }
 }
 
+QC_TEST("protocol", "encode rejects undefined duration nibble") {
+  // Valid speed, cast-invalid duration -> command byte 0x97, which decode would
+  // reject; encode must refuse it before it is ever modulated (defence in depth).
+  QC_CHECK(!FrameCodec::encode_state(
+      sender(), FanState::command(Speed::Low, static_cast<Duration>(7))));
+}
+
 QC_TEST("protocol", "encoding normalizes metadata and rejects neutral OFF") {
   const auto observed = FanState::observed(0x5F).value();
   QC_CHECK_EQ(FrameCodec::encode_state(sender(), observed).value().bytes[4], 0x9F);

@@ -11,6 +11,8 @@ Result<FrameBytes, FrameEncodeError> FrameCodec::encode_state(SenderId sender,
                                                                FanState state) {
   if (!state.speed())
     return Result<FrameBytes, FrameEncodeError>::err(FrameEncodeError::MissingRememberedSpeed);
+  if (!duration_from_value(state.raw_byte() & 0x0FU))
+    return Result<FrameBytes, FrameEncodeError>::err(FrameEncodeError::InvalidCommandDuration);
   const auto id = sender.bytes();
   const auto byte = state.outbound_command_byte();
   return Result<FrameBytes, FrameEncodeError>::ok(
