@@ -1,0 +1,181 @@
+# Stage-2 compile-only example. This file is not a deployment or flashing
+# target; it shows the intended config-and-wiring-only ownership shape.
+esphome:
+  name: quietcool-cpp-example
+  friendly_name: "QuietCool C++ Example"
+  # Toolchain floor, matching the version the shipped firmware was built with
+  # (2026.7.0). The production config resolved to an ephemeral ESPHome that was
+  # not the installed one, and older releases reject parts of that config with
+  # a confusing schema error rather than a version message. Pin the floor so a
+  # build cannot silently land on a toolchain that cannot express this config.
+  min_version: 2026.7.0
+  # ESPHome 2025.11 does not recursively copy C++ files from an external
+  # component. This official includes bridge preserves the contractual
+  # core/ports/radio/esphome source tree in the generated build.
+  includes:
+    - components/quietcool/
+
+esp32:
+  board: ttgo-lora32-v21
+  # REQUIRED: ESP-IDF with a 16 KB loop-task stack.
+  #
+  # This is not a preference. Worst-case target stack for the command path is
+  # ~6.3 KB (measured peak 6,304 B on hardware; deepest chain
+  # loop -> reduce -> dispatch -> handle_command_request -> begin_transaction).
+  # ESPHome's default Arduino loop stack is 8,192 B, which leaves ~1.9 KB —
+  # and that configuration demonstrably overran into the FreeRTOS ready lists
+  # and crash-looped a production controller twice. See
+  # docs/claude/2026-07-24-post-cutover-audit.md.
+  #
+  # The component enforces this at codegen time; an Arduino build or a stack
+  # below quietcool.MIN_LOOP_TASK_STACK_SIZE is rejected with an explanation.
+  framework:
+    type: esp-idf
+    advanced:
+      loop_task_stack_size: 16384
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components:
+      - quietcool
+
+spi:
+  clk_pin: GPIO5
+  miso_pin: GPIO19
+  mosi_pin: GPIO27
+
+# SX127x variant: the radio integration owns hardware configuration and has
+# exactly one RX consumer, which forwards directly into QuietCoolComponent.
+sx127x:
+  id: fan_radio
+  cs_pin: GPIO18
+  rst_pin: GPIO23
+  dio0_pin: GPIO26
+  frequency: 433920000
+  modulation: FSK
+  bandwidth: 50_0kHz
+  packet_mode: true
+  bitsync: true
+  bitrate: 2400
+  deviation: 10000
+  shaping: NONE
+  sync_value: [0x2D, 0xD4]
+  payload_length: 0
+  crc_enable: false
+  preamble_size: 8
+  preamble_polarity: 0xAA
+  preamble_errors: 0
+  pa_pin: BOOST
+  pa_power: 17
+  rx_start: true
+  on_packet:
+    - quietcool.on_packet:
+        id: quietcool_controller
+        packet: received_packet
+
+quietcool:
+  id: quietcool_controller
+  # Zero is safely unprovisioned. A nonzero compiled seed must begin 0xCB;
+  # learned state and explicit Forget are schema-versioned in preferences.
+  sender_seed: 0x00000000
+  radio:
+    type: sx127x
+    id: fan_radio
+
+fan:
+  - platform: quietcool
+    id: whole_house_fan
+    controller_id: quietcool_controller
+    name: "Whole House Fan"
+
+binary_sensor:
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: state_known
+    name: "Fan State Known"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: timer_program_known
+    name: "Fan Timer Program Known"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: timer_remaining_known
+    name: "Fan Timer Remaining Known"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: confirmed_off
+    name: "Fan Confirmed Off"
+
+sensor:
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: timer_remaining
+    name: "Fan Timer Remaining"
+
+text_sensor:
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: command_status
+    name: "Fan Command Confirmation"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: evidence_source
+    name: "Fan Evidence Source"
+
+button:
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: refresh
+    name: "Query Fan State"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: learn
+    name: "Learn Remote ID"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: forget
+    name: "Forget Remote ID"
+
+# SX126x selection shape (commented so this remains one valid target):
+#
+#   1. Change esp32.board to heltec_wifi_lora_32_V3.
+#   2. Use SPI GPIO9/GPIO10/GPIO11.
+#   3. Replace the sx127x block above with:
+#
+# sx126x:
+#   id: fan_radio
+#   cs_pin: GPIO8
+#   busy_pin: GPIO13
+#   dio1_pin: GPIO14
+#   rst_pin: GPIO12
+#   hw_version: sx1262
+#   rf_switch: true
+#   tcxo_voltage: 1_8V
+#   tcxo_delay: 5ms
+#   frequency: 433920000
+#   modulation: FSK
+#   shaping: NONE
+#   bandwidth: 58_6kHz
+#   bitrate: 2400
+#   deviation: 10000
+#   sync_value: [0x2D, 0xD4]
+#   payload_length: 0
+#   crc_enable: false
+#   whitening_enable: false
+#   preamble_size: 8
+#   preamble_detect: 0
+#   pa_power: 17
+#   rx_start: true
+#   RX callback: reuse the single quietcool.on_packet action shown above
+#
+# and change only this selector:
+#
+# quietcool:
+#   radio:
+#     type: sx126x
+#     id: fan_radio
