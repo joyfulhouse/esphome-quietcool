@@ -1,15 +1,15 @@
 #pragma once
 
+#include "button_dispatch.h"
 #include "quietcool_component.h"
 
 #include "esphome/components/button/button.h"
 #include "esphome/core/component.h"
 
-#include <cstdint>
-
 namespace esphome::quietcool {
 
-enum class QuietCoolButtonKind : std::uint8_t { Refresh, Learn, Forget };
+// QuietCoolButtonKind lives in button_dispatch.h so the kind -> action routing
+// stays testable without this ESPHome-derived class.
 
 class QuietCoolButton final : public Component, public button::Button {
  public:

@@ -1,6 +1,7 @@
 #include "quietcool_fan.h"
 
 #include "fan_command.h"
+#include "fan_feedback.h"
 
 #include "esphome/core/log.h"
 
@@ -47,13 +48,11 @@ void QuietCoolFan::publish_authority(
   const auto confirmed = publication_gate_.next(authority);
   if (!confirmed) return;
 
-  if (const auto capability = confirmed->state.report_capability()) {
-    const auto count = static_cast<std::uint8_t>(*capability);
-    if (count >= 1 && count <= 3) supported_speed_count_ = count;
-  }
-  if (const auto confirmed_speed = confirmed->state.speed())
-    speed = static_cast<int>(*confirmed_speed);
-  state = confirmed->state.is_on();
+  const auto feedback = authority_to_feedback(confirmed->state);
+  if (feedback.supported_speed_count)
+    supported_speed_count_ = *feedback.supported_speed_count;
+  if (feedback.speed) speed = *feedback.speed;
+  state = feedback.on;
   publish_state();
 }
 
