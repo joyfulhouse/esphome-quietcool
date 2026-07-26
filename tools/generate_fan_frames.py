@@ -6,7 +6,7 @@ MDI `mdi:fan` glyph. ESPHome's display lambda can draw a static `image:` at
 an (x, y) position, but it cannot rotate one at runtime, so instead of
 rotating anything on-device this tool rotates the glyph AHEAD OF TIME into a
 fixed set of frames and the display lambda just flips between them (KEEP IN
-SYNC: FAN_ANIM in quietcool-lora32.yaml's `display: lambda:`, mirrored
+SYNC: FAN_ANIM in legacy/quietcool-lora32.yaml's `display: lambda:`, mirrored
 in tools/render_display.py).
 
 Codepoint verification: `mdi:fan` and `mdi:fan-off` are NOT looked up from

@@ -58,10 +58,13 @@ firmware for the TTGO LoRa32 V2.1 (SX1278):
 ```
 
 The Heltec/HiLetgo **V3 (SX1262)** board has no C++ build yet, so it runs the
-**legacy YAML build** (`.venv/bin/esphome run quietcool-lora-v3.yaml`) — whose
-pairing differs (two presses, on-OLED prompt); see the "legacy YAML build"
-sections in the [README](README.md#learn-mode--porting-to-your-own-fan). The
-rest of this guide describes the C++ build.
+**legacy YAML build** (`.venv/bin/esphome run legacy/quietcool-lora-v3.yaml`,
+after also copying your secrets there: `cp secrets.yaml legacy/secrets.yaml`) —
+whose pairing differs (two presses, on-OLED prompt); see the "legacy YAML
+build" sections in the
+[README](README.md#learn-mode--porting-to-your-own-fan) and
+[legacy/README.md](legacy/README.md). The rest of this guide describes the C++
+build.
 
 Pick your serial port when prompted. The first compile takes a few minutes;
 every later update can go over the air (same command, choose OTA).
@@ -298,7 +301,7 @@ to finish, clears obsolete queued work, and executes the latest desired action.
   received frames).
 - **Blank OLED on the V3 board** — the V3's display is powered through Vext;
   the config drives it, but early clones vary. See the `PIN CONFIDENCE` notes
-  in `quietcool-lora-v3.yaml` and [docs/hardware.md](docs/hardware.md).
+  in `legacy/quietcool-lora-v3.yaml` and [docs/hardware.md](docs/hardware.md).
 - **HA can't connect after adoption** — almost always network segmentation
   (mDNS across VLANs). Use the device's IP directly and reserve it in DHCP.
 

@@ -3,7 +3,7 @@
 
 This is a hand-port, not a YAML parser: every drawing call below is tagged
 `KEEP IN SYNC: <NAME>` and the matching tag appears next to the equivalent
-C++ in the `display: lambda:` block of quietcool-lora32.yaml. When
+C++ in the `display: lambda:` block of legacy/quietcool-lora32.yaml. When
 the lambda changes, update the matching section here (and vice versa).
 
 Usage:
@@ -37,7 +37,7 @@ ROBOTO_TTF = ROOT / ".esphome" / "font" / "Roboto@400@False@v1.ttf"
 MDI_TTF = FONTS_DIR / "materialdesignicons-webfont.ttf"
 
 # =============================================================================
-# KEEP IN SYNC: CANVAS / ZONES (quietcool-lora32.yaml: display: lambda:)
+# KEEP IN SYNC: CANVAS / ZONES (legacy/quietcool-lora32.yaml: display: lambda:)
 #
 #   LEFT  zone (x   0-54): fan icon, state word, HH:MM:SS countdown (or the
 #                          learn-mode text rows in those two slots), and the
@@ -329,7 +329,7 @@ def render_frame(state: DisplayState) -> Canvas:
     c = Canvas.new()
     running = state.running
     idx = state.speed_idx if 1 <= state.speed_idx <= 3 else 0
-    # ---- KEEP IN SYNC: STATE_UNKNOWN (quietcool-lora32.yaml display lambda) ----
+    # ---- KEEP IN SYNC: STATE_UNKNOWN (legacy/quietcool-lora32.yaml display lambda) ----
     state_str = (SPEED_NAMES[idx] if running else "OFF") + ("" if state.state_known else "?")
 
     # ---- KEEP IN SYNC: FAN_ANIM ----

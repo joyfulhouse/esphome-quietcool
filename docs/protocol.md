@@ -355,7 +355,7 @@ Without an independent motor/airflow sensor, this proves RF/entity behavior but
 not physical motor state.
 
 Both public YAML templates share the corrected transaction logic:
-`quietcool-lora32.yaml` on SX1278 and `quietcool-lora-v3.yaml` on SX1262. The
+`legacy/quietcool-lora32.yaml` on SX1278 and `legacy/quietcool-lora-v3.yaml` on SX1262. The
 SX1262 uses a 58.6 kHz receive bandwidth, the nearest FSK-legal value to the
 validated SX1278 50 kHz setting. ESPHome 2026.7.0 config validation and
 compilation succeeded for both public targets and both downstream wrappers; the

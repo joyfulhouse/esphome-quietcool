@@ -4,7 +4,12 @@ The firmware doesn't hard-code anything device-specific. A second (or third) fan
 reuses the whole base config through a thin wrapper that overrides only
 substitutions — ESPHome gives the including file precedence over the package.
 
-A second-device wrapper looks like this:
+A second-device wrapper looks like this (shown for the frozen legacy YAML
+base; a C++-build wrapper packages `quietcool-cpp-lora32.yaml` the same way).
+Place the wrapper in the **same directory as its base config** — ESPHome
+resolves the base's relative font/image/component paths against the top-level
+config's directory, so a wrapper for `legacy/quietcool-lora32.yaml` belongs in
+`legacy/`:
 
 ```yaml
 substitutions:

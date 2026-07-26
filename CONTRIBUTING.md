@@ -2,12 +2,16 @@
 
 - Run the checks before opening a PR:
   ```bash
+  make -C tests/cpp test            # C++ core + adapter host suites
   cp secrets.yaml.example secrets.yaml
+  cp secrets.yaml.example legacy/secrets.yaml
   .venv/bin/python -m unittest tests.test_quietcool_esphome_config -v
-  .venv/bin/esphome config quietcool-lora32.yaml
-  .venv/bin/esphome compile quietcool-lora32.yaml
-  .venv/bin/esphome config quietcool-lora-v3.yaml
-  .venv/bin/esphome compile quietcool-lora-v3.yaml
+  .venv/bin/esphome config quietcool-cpp-example.yaml
+  .venv/bin/esphome compile quietcool-cpp-example.yaml
+  .venv/bin/esphome config legacy/quietcool-lora32.yaml
+  .venv/bin/esphome compile legacy/quietcool-lora32.yaml
+  .venv/bin/esphome config legacy/quietcool-lora-v3.yaml
+  .venv/bin/esphome compile legacy/quietcool-lora-v3.yaml
   ```
 - The V3 remains an unverified hardware port, so successful config validation
   and compilation are not evidence of on-air RF parity.

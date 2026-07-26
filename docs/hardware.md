@@ -11,7 +11,7 @@
 ### Heltec / HiLetgo ESP32 LoRa V3 (SX1262)
 
 - ESP32-**S3** + **Semtech SX1262** (SX126x) + SSD1306 OLED (Vext-gated).
-- Newer, cheaper, more available. Uses `quietcool-lora-v3.yaml`.
+- Newer, cheaper, more available. Uses `legacy/quietcool-lora-v3.yaml`.
 - Buy: <https://amzn.to/4wagWqi> (includes a 433–510 MHz antenna).
 
 The V3 config reproduces the exact same radio profile (2-FSK, 2400 bps, ±10 kHz,

@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "quietcool-lora32.yaml"
-V3_CONFIG = ROOT / "quietcool-lora-v3.yaml"
+CONFIG = ROOT / "legacy" / "quietcool-lora32.yaml"
+V3_CONFIG = ROOT / "legacy" / "quietcool-lora-v3.yaml"
 SECRETS = ROOT / "secrets.yaml"
 README = ROOT / "README.md"
 CONFIRMED_FAN_HEADER = (
@@ -2088,9 +2088,9 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         for i in range(12):
             with self.subTest(frame=i):
                 self.assertIn(f"id: fan_frame_{i}", image_block)
-                self.assertIn(f'file: "images/fan_frame_{i}.png"', image_block)
+                self.assertIn(f'file: "../images/fan_frame_{i}.png"', image_block)
         self.assertIn("id: fan_off_frame", image_block)
-        self.assertIn('file: "images/fan_off.png"', image_block)
+        self.assertIn('file: "../images/fan_off.png"', image_block)
         # Every entry uses the new `platform: file` form, not the
         # deprecated bare-list image: syntax ESPHome 2026.7 warns about.
         self.assertEqual(image_block.count("platform: file"), 13)
@@ -2295,7 +2295,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_mdi_icon_font_declared_from_local_file(self) -> None:
         font_block = top_level_block(self.text, "font")
-        self.assertIn('file: "fonts/materialdesignicons-webfont.ttf"', font_block)
+        self.assertIn('file: "../fonts/materialdesignicons-webfont.ttf"', font_block)
         self.assertIn("id: font_icons", font_block)
         # font_icons_lg (18pt, infinity-only) was removed along with the
         # infinity glyph (FIX 2) - every icon, including battery, now
@@ -2836,6 +2836,47 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         renderer = (ROOT / "tools" / "render_display.py").read_text()
         self.assertIn("KEEP IN SYNC: STATE_UNKNOWN", renderer)
         self.assertIn('("" if state.state_known else "?")', renderer)
+
+
+class RepoLayoutTest(unittest.TestCase):
+    """The frozen legacy track lives under legacy/ and stays buildable.
+
+    These guards exist because the 2026-07 repo-clarity move relocated the two
+    monolithic YAML configs; every relative path inside them (component source,
+    fonts, images) had to gain a `../` prefix or `esphome compile` breaks in a
+    way the pure-text tests above would never notice.
+    """
+
+    def test_legacy_configs_live_under_legacy_with_a_readme(self) -> None:
+        self.assertTrue(CONFIG.is_file(), f"missing {CONFIG}")
+        self.assertTrue(V3_CONFIG.is_file(), f"missing {V3_CONFIG}")
+        legacy_readme = ROOT / "legacy" / "README.md"
+        self.assertTrue(legacy_readme.is_file(), f"missing {legacy_readme}")
+        text = legacy_readme.read_text()
+        self.assertIn("frozen", text)
+        self.assertIn("2026-07-21", text)
+        self.assertIn("quietcool_legacy_yaml", text)
+
+    def test_moved_configs_resolve_assets_relative_to_legacy(self) -> None:
+        # ESPHome resolves external_components/font/image paths against the
+        # top-level config's directory, which is now legacy/.
+        for path in (CONFIG, V3_CONFIG):
+            with self.subTest(config=path.name):
+                text = path.read_text()
+                self.assertIn("path: ../components", text)
+                self.assertNotRegex(text, r"(?m)^\s+path: components\s*$")
+                self.assertIn(
+                    'file: "../fonts/materialdesignicons-webfont.ttf"', text
+                )
+                self.assertNotIn('file: "fonts/', text)
+                self.assertNotIn('file: "images/', text)
+
+    def test_root_readme_labels_the_legacy_track(self) -> None:
+        readme = README.read_text()
+        self.assertIn("## Legacy YAML track (frozen)", readme)
+        self.assertIn("legacy/README.md", readme)
+        self.assertIn("legacy/quietcool-lora32.yaml", readme)
+        self.assertIn("legacy/quietcool-lora-v3.yaml", readme)
 
 
 if __name__ == "__main__":
