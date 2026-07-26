@@ -401,4 +401,24 @@ QueryPurpose TransitionTable::query_purpose(TxReason reason) {
   return QueryPurpose::Recovery;
 }
 
+std::optional<QueryPurpose> TransitionTable::query_family_of(TxReason reason) {
+  // No `default:` on purpose: -Wswitch -Werror forces a new TxReason to be
+  // classified here explicitly, rather than silently folding into a family.
+  switch (reason) {
+  case TxReason::BootQuery:
+    return QueryPurpose::Boot;
+  case TxReason::ManualQuery:
+    return QueryPurpose::Manual;
+  case TxReason::TransactionFallbackQuery:
+    return QueryPurpose::Fallback;
+  case TxReason::RecoveryQueryInitial:
+  case TxReason::RecoveryQueryRetry:
+  case TxReason::TimerExpiryRecoveryQuery:
+    return QueryPurpose::Recovery;
+  case TxReason::TransactionCommand:
+    return std::nullopt;  // a command TX reason, not a query reason
+  }
+  return std::nullopt;  // unreachable: the switch is exhaustive over TxReason
+}
+
 }  // namespace quietcool

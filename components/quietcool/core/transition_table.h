@@ -100,6 +100,12 @@ class TransitionTable final {
   static CoordinatorState query_response_state(QueryPurpose purpose);
   static CoordinatorState query_pending_state(QueryPurpose purpose);
   static QueryPurpose query_purpose(TxReason reason);
+  // Total, query-only classifier: the family a reason belongs to, or nullopt if
+  // it is not a query reason at all. Unlike query_purpose() (whose catch-all
+  // default folds every non-query reason into Recovery for its routing callers),
+  // this distinguishes TransactionCommand from a genuine Recovery query, so the
+  // invariant check can reject a non-query reason instead of certifying it.
+  static std::optional<QueryPurpose> query_family_of(TxReason reason);
 };
 
 }  // namespace quietcool
