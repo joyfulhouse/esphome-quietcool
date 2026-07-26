@@ -39,4 +39,18 @@ FanFeedback authority_to_feedback(const ::quietcool::FanState& confirmed,
   return feedback;
 }
 
+std::uint8_t authority_speed_count(
+    const ::quietcool::AuthoritySnapshot& authority,
+    std::uint8_t current_supported_speed_count) {
+  // Same producer guard as above: only a capability in the fan's real 1..3
+  // band may become the entity's speed count. The core never stores an
+  // out-of-band value (restorable_state_is_valid and promote() both filter),
+  // so this is defence in depth, not a live code path.
+  if (authority.speed_capability) {
+    const auto count = static_cast<std::uint8_t>(*authority.speed_capability);
+    if (count >= 1 && count <= 3) return count;
+  }
+  return current_supported_speed_count;
+}
+
 }  // namespace esphome::quietcool

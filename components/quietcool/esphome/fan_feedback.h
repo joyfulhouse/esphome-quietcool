@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quietcool/core/authority_store.h"
 #include "quietcool/core/fan_state.h"
 
 #include <cstdint>
@@ -30,5 +31,16 @@ struct FanFeedback final {
 // report that narrows the band and carries a speed stays self-consistent.
 FanFeedback authority_to_feedback(const ::quietcool::FanState& confirmed,
                                   std::uint8_t current_supported_speed_count);
+
+// The entity's supported speed count for a published authority snapshot
+// (issue #31). The snapshot's sticky speed_capability is the single source of
+// truth: promote() folds every confirmed report's capability into it and
+// restore seeds it from NVS, so it is defined strictly whenever
+// FanFeedback::supported_speed_count would be — plus at restore time, before
+// any RF round-trip, which is the window this closes. Returns `current` when
+// the snapshot carries nothing (first ever boot), keeping the function total.
+std::uint8_t authority_speed_count(
+    const ::quietcool::AuthoritySnapshot& authority,
+    std::uint8_t current_supported_speed_count);
 
 }  // namespace esphome::quietcool

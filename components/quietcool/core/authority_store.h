@@ -18,12 +18,17 @@ struct RestorableState final {
   SeedPolicy seed_policy{SeedPolicy::AllowCompiledSeed};
   std::optional<Speed> remembered_speed;
   std::optional<RestoredObservationHint> observation_hint;
+  // Deliberately first-class rather than an observation_hint: the hint requires
+  // a canonical fan state and on/off state is intentionally not persisted,
+  // while the speed capability is a property of the bound fan (issue #31).
+  std::optional<SpeedCapability> speed_capability;
 };
 bool restorable_state_is_valid(const RestorableState& restored);
 struct PersistenceRequest final {
   PersistenceKind kind;
   std::optional<SenderId> sender;
   std::optional<Speed> remembered_speed;
+  std::optional<SpeedCapability> speed_capability;
 };
 enum class TimerExpiryStatus : std::uint8_t { NotDue, Due };
 struct TimerExpiryDecision final {
@@ -102,6 +107,10 @@ struct AuthoritySnapshot final {
   StateAuthority state;
   TimerAuthority timer;
   std::optional<Speed> remembered_speed;
+  // Sticky confirmed speed capability of the bound fan (issue #31). Unlike the
+  // state variants it survives invalidate(): capability is a property of the
+  // fan, not of authority freshness.
+  std::optional<SpeedCapability> speed_capability;
   std::optional<FanState> last_diagnostic;
   std::uint64_t revision;
 };
@@ -126,6 +135,7 @@ class AuthorityStore final {
   StateAuthority state_;
   TimerAuthority timer_;
   std::optional<Speed> remembered_speed_;
+  std::optional<SpeedCapability> confirmed_capability_;
   std::optional<FanState> last_diagnostic_;
   std::optional<RestoredObservationHint> restored_hint_;
   std::uint64_t revision_{0};

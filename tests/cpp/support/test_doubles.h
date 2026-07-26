@@ -106,9 +106,12 @@ class FakePreferences final {
       restored_.sender.reset();
       restored_.remembered_speed.reset();
       restored_.observation_hint.reset();
+      restored_.speed_capability.reset();
       restored_.seed_policy = SeedPolicy::SuppressCompiledSeed;
     } else if (request.kind == PersistenceKind::SaveRememberedSpeed) {
       restored_.remembered_speed = request.remembered_speed;
+    } else if (request.kind == PersistenceKind::SaveSpeedCapability) {
+      restored_.speed_capability = request.speed_capability;
     }
   }
   void sync() { ++sync_count_; }

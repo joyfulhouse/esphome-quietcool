@@ -26,7 +26,10 @@ class CoreEffects final {
  public:
   // Four is the exact production maximum, not a maximum plus slack: the
   // supersession-with-pre-existing-deferred path emits RequestRadioReset,
-  // TransactionFinished, Superseded and RequestAccepted in one reduction.
+  // TransactionFinished, Superseded and RequestAccepted in one reduction, and
+  // a confirming promote whose remembered speed AND speed capability both
+  // change emits SaveRememberedSpeed, SaveSpeedCapability, PublishAuthority
+  // and TransactionFinished (issue #31).
   // add() fails closed on the fifth, and callers ignore the return, so a new
   // branch that emits five would silently drop one — raise this if that ever
   // becomes possible. The buffer is deliberately small because CoreEffects is

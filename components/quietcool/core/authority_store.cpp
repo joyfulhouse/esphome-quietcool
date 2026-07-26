@@ -25,6 +25,15 @@ bool restorable_state_is_valid(const RestorableState& restored) {
   if (restored.remembered_speed &&
       !speed_from_value(static_cast<std::uint8_t>(*restored.remembered_speed)))
     return false;
+  if (restored.speed_capability) {
+    switch (*restored.speed_capability) {
+      case SpeedCapability::One: case SpeedCapability::Two:
+      case SpeedCapability::Three:break;
+      // Unknown is deliberately invalid here: only a CONFIRMED capability is
+      // ever persisted, so a stored Unknown means a corrupt or forged record.
+      default:return false;
+    }
+  }
   if (!restored.observation_hint) return true;
   const auto& hint = *restored.observation_hint;
   if (hint.canonical_state > 0x3FU) return false;
@@ -47,7 +56,8 @@ AuthorityStore::AuthorityStore()
       timer_(UnknownTimerAuthority{TimerLossReason::Unknown, 0}) {}
 
 AuthoritySnapshot AuthorityStore::snapshot(MonotonicMs) const {
-  return {state_, timer_, remembered_speed_, last_diagnostic_, revision_};
+  return {state_, timer_, remembered_speed_, confirmed_capability_,
+          last_diagnostic_, revision_};
 }
 
 std::optional<PriorAuthoritySnapshot> AuthorityStore::capture_prior(
@@ -88,6 +98,11 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
       accepted.observed_ms, accepted.independent_candidates,
       accepted.transaction, accepted.attempt, revision_};
   if (accepted.state.speed()) remembered_speed_ = accepted.state.speed();
+  // Sticky: overwritten by every confirmed report that carries a capability,
+  // never cleared by invalidate() — the capability describes the bound fan,
+  // not the freshness of the current authority claim (issue #31).
+  if (accepted.capability != SpeedCapability::Unknown)
+    confirmed_capability_ = accepted.capability;
   const auto duration = accepted.state.duration();
   const auto duration_anchor = duration_ms(duration);
   if (duration == Duration::Off || duration == Duration::Continuous) {
@@ -135,6 +150,7 @@ void AuthorityStore::restore_hint(const RestorableState& restored,
                                   MonotonicMs now_ms) {
   last_diagnostic_.reset();
   remembered_speed_ = restored.remembered_speed;
+  confirmed_capability_ = restored.speed_capability;
   restored_hint_ = restored.observation_hint;
   ++revision_;
   state_ = UnknownStateAuthority{AuthorityLossReason::RestoredUnverified,

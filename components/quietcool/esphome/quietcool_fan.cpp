@@ -45,13 +45,23 @@ void QuietCoolFan::control(const fan::FanCall& call) {
 
 void QuietCoolFan::publish_authority(
     const ::quietcool::AuthoritySnapshot& authority) {
+  // Seed the speed count BEFORE the publication gate (issue #31): the
+  // restore-time publication carries no confirmed state — the gate swallows
+  // it — but its restored speed_capability must reach get_traits() before
+  // Home Assistant can send a command, or a level-2 press on a 2-speed fan is
+  // mapped against the compiled default of 3 and transmits MED, which stops
+  // the fan (issue #30's failure, transiently). The snapshot's sticky
+  // capability is the single source of truth here; the per-report
+  // FanFeedback::supported_speed_count is never fresher (promote() folds the
+  // same consensus capability into the snapshot before it is published), so
+  // it is deliberately not consulted.
+  supported_speed_count_ = authority_speed_count(authority,
+                                                 supported_speed_count_);
   const auto confirmed = publication_gate_.next(authority);
   if (!confirmed) return;
 
   const auto feedback =
       authority_to_feedback(confirmed->state, supported_speed_count_);
-  if (feedback.supported_speed_count)
-    supported_speed_count_ = *feedback.supported_speed_count;
   if (feedback.speed) speed = *feedback.speed;
   state = feedback.on;
   publish_state();

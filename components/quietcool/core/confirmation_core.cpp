@@ -36,6 +36,13 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
     state_ = CoordinatorState::Unprovisioned;
     context_ = UnprovisionedContext{};
   }
+  // Publish the restored snapshot (issue #31): restore previously produced no
+  // PublishAuthorityEffect at all, so the fan entity never saw the restored
+  // speed_capability and kept its compiled default of 3 until the boot query's
+  // reply. The publication gate swallows this for STATE purposes (authority is
+  // Unknown here), but the adapter seeds its supported speed count from it
+  // before the gate runs.
+  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   return effects;
 }
 CoreEffects ConfirmationCore::handle_radio_ready(MonotonicMs) {
@@ -249,8 +256,9 @@ CoreEffects ConfirmationCore::handle_forget(MonotonicMs now_ms) {
   authority_.invalidate(AuthorityLossReason::Unprovisioned, now_ms);
   state_ = CoordinatorState::Unprovisioned;
   context_ = UnprovisionedContext{};
-  effects.add(RequestPersistenceEffect{
-      {PersistenceKind::EraseProvisioning, std::nullopt, std::nullopt}});
+  effects.add(RequestPersistenceEffect{{PersistenceKind::EraseProvisioning,
+                                        std::nullopt, std::nullopt,
+                                        std::nullopt}});
   return effects;
 }
 
@@ -269,8 +277,9 @@ CoreEffects ConfirmationCore::handle_learning_frame(ByteView input,
     authority_.invalidate(AuthorityLossReason::SenderChanged, now_ms);
     state_ = CoordinatorState::Idle;
     context_ = IdleContext{};
-    effects.add(RequestPersistenceEffect{
-        {PersistenceKind::SaveProvisioning, sender_, std::nullopt}});
+    effects.add(RequestPersistenceEffect{{PersistenceKind::SaveProvisioning,
+                                          sender_, std::nullopt,
+                                          std::nullopt}});
   } else if (event.kind == LearnEventKind::AmbiguousRejected) {
     // Two distinct fans were heard in one window; refuse and keep whatever was
     // bound before. sender_ is left untouched, so no SaveProvisioning is

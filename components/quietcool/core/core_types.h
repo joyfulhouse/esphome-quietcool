@@ -134,7 +134,7 @@ enum class AuthorityLossReason : std::uint8_t {
   ConsensusTimeout, TransactionExhausted, EstimatedTimerDeadline,
   LearningStarted, SenderChanged, RadioUnavailable, RestoredUnverified
 };
-enum class PersistenceKind : std::uint8_t { SaveProvisioning, EraseProvisioning, SaveRememberedSpeed };
+enum class PersistenceKind : std::uint8_t { SaveProvisioning, EraseProvisioning, SaveRememberedSpeed, SaveSpeedCapability };
 enum class CoreEventKind : std::uint8_t {
   Diagnostic, RequestAccepted, RequestRefused, CandidateObserved,
   ConsensusReached, AuthorityChanged, TransactionFinished, OemPriority,
