@@ -1,0 +1,678 @@
+# QuietCool Fan Controller — C++ core build (primary, TTGO LoRa32 V2.1 / SX1278).
+#
+# This is the maintained, primary firmware for the TTGO LoRa32 V2.1 controller.
+# The RF confirmation state machine lives entirely in the C++ external component
+# under components/quietcool/ (which ships in this repository); this file is
+# configuration and wiring only: network, radio hardware, entities, display.
+# It supersedes the all-YAML build in quietcool-lora32.yaml.
+#
+# Before you flash:
+#   - Set quietcool_sender_id below. The checked-in default is "0", which boots
+#     in learn mode; a real deployment learns its fan's ID over the air or
+#     compiles in a previously learned ID (must begin 0xCB — the component
+#     validates zero-or-0xCB). A compiled seed is applied in memory at boot but
+#     is only written to NVS by a later persistence event (a successful Learn
+#     or a remembered-speed update).
+#   - Copy secrets.yaml.example to secrets.yaml and fill in the referenced keys.
+#   - wifi/api/ota are all present, so subsequent updates go over the air.
+#
+# Behavioral notes vs. the legacy YAML build:
+#   - Display countdown shows HH:MM (the core publishes remaining minutes),
+#     not HH:MM:SS.
+#   - No on-display LEARN/ID-SAVED prompts (learn progress is visible in
+#     logs and via the Learn button's entity); learn itself works.
+#   - No Fan Timer select entity yet; timer commands come from the OEM
+#     remote or future component work.
+#   - An unprovisioned boot or a Forget does NOT auto-open the 15-minute
+#     learn window the YAML build had; press the Learn button explicitly.
+#   - Diagnostics not carried over: Last TX Command, Last Valid RX Frame,
+#     Last Confirmed Fan State, Fan Speed Capability, Remote Sender ID,
+#     TX/RX counters, probe/PRG/Restart buttons. The C++ build's
+#     Fan Evidence Source text sensor is new.
+
+substitutions:
+  device_name: quietcool-lora32
+  device_friendly_name: "QuietCool RF Controller"
+  fallback_ap_ssid: "QuietCool-LoRa32"
+
+  # Per-device credentials, substitution-indirected (see the YAML build's
+  # header comment for why: a second-unit wrapper overrides only
+  # substitutions, so bare !secret names here would share credentials
+  # across units).
+  api_key_secret: !secret quietcool_lora32_api_key
+  ota_password_secret: !secret quietcool_lora32_ota_password
+  fallback_ap_password_secret: !secret quietcool_lora32_fallback_ap_password
+
+  # Your fan's learned OEM sender ID. The default "0" boots in learn mode; pair
+  # over the air (see README / INSTALL.md), or once learned, compile the ID in
+  # here to skip pairing on a fresh flash. Validated by the component: must be
+  # 0 (learn mode) or a real ID beginning 0xCB.
+  quietcool_sender_id: "0"
+
+  # Stable Home Assistant display-source aliases (same as the YAML build).
+  display_indoor_entity: "sensor.quietcool_display_indoor"
+  display_outdoor_entity: "sensor.quietcool_display_outdoor"
+  display_attic_entity: "sensor.quietcool_display_attic"
+
+  # Path to the C++ component tree, relative to this file. The components ship
+  # in this repository, so a fresh clone builds with no path edits.
+  cpp_components_root: "components"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_friendly_name}
+  # Toolchain floor. This config uses schema that older ESPHome releases reject
+  # with a confusing error (e.g. `[platform] is an invalid option for [image]`)
+  # rather than a clear version message. Pin the floor so a build cannot
+  # silently land on a toolchain that cannot express this config.
+  min_version: 2026.7.0
+  # ESPHome 2025.11 does not recursively copy C++ files from an external
+  # component; this official includes bridge preserves the contractual
+  # core/ports/radio/esphome source tree in the generated build.
+  includes:
+    - ${cpp_components_root}/quietcool/
+
+esp32:
+  board: ttgo-lora32-v21
+  # ESP-IDF with a doubled loop-task stack, promoted from the 2026-07-24
+  # stack diagnostic. The Arduino build's 8,192 B loop stack overflowed into
+  # FreeRTOS kernel structures during RF exchanges (confirmed by panic
+  # registers, target-frame audit, and live watermark: peak observed
+  # consumption 6,304 B even after the round-2 stack slimming — only ~1.9 KB
+  # of margin on 8 KB). 16 KB gives structural headroom; the diagnostic build
+  # measured 10 KB free under refresh/command load with zero panics.
+  framework:
+    type: esp-idf
+    advanced:
+      loop_task_stack_size: 16384
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: ${api_key_secret}
+
+ota:
+  platform: esphome
+  password: ${ota_password_secret}
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${fallback_ap_ssid}
+    password: ${fallback_ap_password_secret}
+
+captive_portal:
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  # 400 kHz: a full 128x64 SSD1306 frame push is ~20-25 ms, comfortably
+  # inside the display's 250 ms update_interval (see the YAML build's i2c
+  # comment for the 50 kHz history).
+  frequency: 400kHz
+
+spi:
+  clk_pin: GPIO5
+  miso_pin: GPIO19
+  mosi_pin: GPIO27
+
+external_components:
+  - source:
+      type: local
+      path: ${cpp_components_root}
+    components:
+      - quietcool
+
+# SX127x radio. The radio integration owns hardware configuration and has
+# exactly one RX consumer, which forwards directly into QuietCoolComponent.
+# FSK parameters match the deployed YAML build (433.920 MHz, 2.4 kbps,
+# ±10 kHz deviation, 0x2D 0xD4 sync, CRC/whitening off).
+sx127x:
+  id: fan_radio
+  cs_pin: GPIO18
+  rst_pin: GPIO23
+  dio0_pin: GPIO26
+  frequency: 433920000
+  modulation: FSK
+  bandwidth: 50_0kHz
+  packet_mode: true
+  bitsync: true
+  bitrate: 2400
+  deviation: 10000
+  shaping: NONE
+  sync_value: [0x2D, 0xD4]
+  payload_length: 0
+  crc_enable: false
+  preamble_size: 8
+  preamble_polarity: 0xAA
+  preamble_errors: 0
+  pa_pin: BOOST
+  pa_power: 17
+  rx_start: true
+  on_packet:
+    # Diagnostic tap (2026-07-25). Log-only: it observes the frame and drives
+    # the activity indicators, then hands the identical packet to the core, so
+    # it cannot change classification. The working YAML build accepted any
+    # frame >= 6 bytes and noted that a corrupted 0x06 length byte makes the
+    # SX1278 deliver more; the C++ core's out-of-window decode requires
+    # exactly 6, so this records the true length of what actually arrives.
+    - lambda: |-
+        id(last_rx_ms) = millis();
+        id(rx_frame_count) = id(rx_frame_count) + 1;
+        ESP_LOGD("qc.rx", "RX #%u: %u bytes: %s",
+                 (unsigned) id(rx_frame_count), (unsigned) x.size(),
+                 format_hex_pretty(x).c_str());
+    - quietcool.on_packet:
+        id: quietcool_controller
+        packet: received_packet
+
+quietcool:
+  id: quietcool_controller
+  sender_seed: ${quietcool_sender_id}
+  radio:
+    type: sx127x
+    id: fan_radio
+
+# Entity names deliberately match the deployed YAML build wherever a
+# 1:1 counterpart exists, so HA automations/dashboards keep working across
+# the cutover (review finding: a rename here silently orphans them).
+fan:
+  - platform: quietcool
+    id: whole_house_fan
+    controller_id: quietcool_controller
+    name: "QuietCool Fan"
+
+binary_sensor:
+  - platform: quietcool
+    id: fan_state_known
+    controller_id: quietcool_controller
+    kind: state_known
+    name: "Fan State Known"
+  - platform: quietcool
+    id: fan_timer_program_known
+    controller_id: quietcool_controller
+    kind: timer_program_known
+    # Closest successor to the deployed "Timer State Known" (the C++ core
+    # splits program-known from remaining-known); keeps the old HA name so
+    # existing consumers of that signal keep a meaningful value.
+    name: "Timer State Known"
+  - platform: quietcool
+    id: fan_timer_remaining_known
+    controller_id: quietcool_controller
+    kind: timer_remaining_known
+    name: "Fan Timer Remaining Known"
+  - platform: quietcool
+    id: fan_confirmed_off
+    controller_id: quietcool_controller
+    kind: confirmed_off
+    name: "Fan Confirmed Off"
+
+text_sensor:
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: command_status
+    name: "Command Confirmation Status"
+    # TX indicator source. 'pending' is published when a command is accepted
+    # and the burst is about to go out, which is the closest observable proxy
+    # for transmit activity without adding a core port.
+    #
+    # This lambda only writes a global — it must never call a quietcool
+    # service. A synchronous automation that re-enters the core during effect
+    # publication is the one path the audit identified that can grow the
+    # effect queue toward its bound.
+    on_value:
+      - lambda: |-
+          if (x == "pending") {
+            id(last_tx_ms) = millis();
+          }
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: evidence_source
+    name: "Fan Evidence Source"
+
+  # Restored from the pre-cutover build: dropping it was undocumented and
+  # orphans any dashboard or automation referencing quietcool-lora32's
+  # IP Address entity.
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+
+button:
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: refresh
+    name: "Refresh Fan State"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: learn
+    name: "Learn Remote ID"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: forget
+    name: "Forget Remote ID"
+
+  # Restored from the pre-cutover build. This is the only in-HA recovery path
+  # if the controller ever calls mark_failed(): ESPHome disables a failed
+  # component's loop permanently and nothing invokes
+  # reset_to_construction_state() at runtime, so the coordinator stops
+  # transmitting and confirming while the fan entity, display, WiFi and API
+  # all keep running — the device looks healthy and Home Assistant keeps
+  # showing the last confirmed state. Without this button the only recovery is
+  # an OTA reflash or a physical power cycle.
+  - platform: restart
+    name: "Restart"
+
+
+# =============================================================================
+# Telemetry sensors (display-only; nothing here reaches any TX/RX path)
+# =============================================================================
+sensor:
+  - platform: quietcool
+    id: timer_remaining_min
+    controller_id: quietcool_controller
+    kind: timer_remaining
+    name: "Timer Remaining"
+
+  - platform: wifi_signal
+    id: wifi_signal_sensor
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+
+  # Battery telemetry (TTGO onboard LiPo circuit; VBAT via the board's 2:1
+  # divider on GPIO35). Voltage-only heuristic — the TP4054's CHRG pin is
+  # not wired to the ESP32; see the YAML build's README "Battery" caveat.
+  - platform: adc
+    pin: GPIO35
+    id: battery_voltage_sensor
+    name: "Battery Voltage"
+    entity_category: diagnostic
+    update_interval: 30s
+    attenuation: 12db
+    filters:
+      - multiply: 2.0
+      - sliding_window_moving_average:
+          window_size: 4
+          send_every: 1
+
+  - platform: template
+    name: "Battery Level"
+    id: battery_level_sensor
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    internal: false
+    update_interval: 30s
+    lambda: |-
+      if (!id(battery_voltage_sensor).has_state() || !std::isfinite(id(battery_voltage_sensor).state)) {
+        return NAN;
+      }
+      float v = id(battery_voltage_sensor).state;
+      if (v < 2.5f) {
+        return NAN;
+      }
+      static const float CURVE_V[] = {
+          4.20f, 4.15f, 4.11f, 4.08f, 4.02f, 3.98f, 3.95f, 3.91f, 3.87f, 3.85f,
+          3.84f, 3.82f, 3.80f, 3.79f, 3.77f, 3.75f, 3.73f, 3.71f, 3.69f, 3.61f, 3.27f};
+      static const float CURVE_PCT[] = {
+          100, 95, 90, 85, 80, 75, 70, 65, 60, 55,
+          50,  45, 40, 35, 30, 25, 20, 15, 10, 5, 0};
+      const int n = sizeof(CURVE_V) / sizeof(CURVE_V[0]);
+      if (v >= CURVE_V[0]) return 100.0f;
+      if (v <= CURVE_V[n - 1]) return 0.0f;
+      for (int i = 0; i < n - 1; i++) {
+        if (v <= CURVE_V[i] && v >= CURVE_V[i + 1]) {
+          float frac = (v - CURVE_V[i + 1]) / (CURVE_V[i] - CURVE_V[i + 1]);
+          return CURVE_PCT[i + 1] + frac * (CURVE_PCT[i] - CURVE_PCT[i + 1]);
+        }
+      }
+      return 0.0f;
+
+  # Display-only values from Home Assistant helpers (internal, no automation).
+  - platform: homeassistant
+    id: temp_indoor
+    entity_id: ${display_indoor_entity}
+    internal: true
+
+  - platform: homeassistant
+    id: temp_outdoor
+    entity_id: ${display_outdoor_entity}
+    internal: true
+
+  - platform: homeassistant
+    id: temp_attic
+    entity_id: ${display_attic_entity}
+    internal: true
+
+# =============================================================================
+# Display (ported from the YAML build; state now read from the C++
+# component's entities instead of the YAML machine's globals)
+# =============================================================================
+font:
+  - file: "gfonts://Roboto"
+    id: font_state
+    size: 11
+    # '?' is the lost-authority suffix.
+    glyphs: "OFLWMEDHIG?"
+  - file: "gfonts://Roboto"
+    id: font_timer
+    size: 11
+    glyphs: "0123456789:"
+  - file: "gfonts://Roboto"
+    id: font_temp_large
+    size: 22
+    glyphs: "0123456789°F-"
+  - file: "gfonts://Roboto"
+    id: font_temp_small
+    size: 11
+    glyphs: "0123456789°F-"
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: font_icons
+    size: 13
+    glyphs: [
+      "\U000F091F",  # wifi-strength-1
+      "\U000F0922",  # wifi-strength-2
+      "\U000F0925",  # wifi-strength-3
+      "\U000F0928",  # wifi-strength-4
+      "\U000F092D",  # wifi-strength-off
+      "\U000F07D0",  # home-assistant (API connected)
+      "\U000F0C9C",  # network-off-outline (API disconnected)
+      "\U000F0083",  # battery-alert
+      "\U000F008E",  # battery-outline
+      "\U000F0079",  # battery (full)
+      "\U000F0084",  # battery-charging
+      "\U000F06A5",  # power-plug
+      "\U000F0F55",  # home-thermometer-outline (indoor)
+      "\U000F0599",  # weather-sunny (outdoor)
+      "\U000F112B",  # home-roof (attic)
+    ]
+
+image:
+  - platform: file
+    id: fan_frame_0
+    file: "images/fan_frame_0.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_1
+    file: "images/fan_frame_1.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_2
+    file: "images/fan_frame_2.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_3
+    file: "images/fan_frame_3.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_4
+    file: "images/fan_frame_4.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_5
+    file: "images/fan_frame_5.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_6
+    file: "images/fan_frame_6.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_7
+    file: "images/fan_frame_7.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_8
+    file: "images/fan_frame_8.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_9
+    file: "images/fan_frame_9.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_10
+    file: "images/fan_frame_10.png"
+    type: BINARY
+  - platform: file
+    id: fan_frame_11
+    file: "images/fan_frame_11.png"
+    type: BINARY
+  - platform: file
+    id: fan_off_frame
+    file: "images/fan_off.png"
+    type: BINARY
+
+# RF activity instrumentation. Added 2026-07-25 while diagnosing why the C++
+# build never observes the OEM remote: the working YAML build accepted any
+# frame >= 6 bytes, while the C++ core's out-of-window decode requires exactly
+# 6, so a frame whose 0x06 length byte is corrupted is silently dropped. These
+# globals drive the on-board LED and the screen indicators so RX/TX activity is
+# visible without a log stream.
+globals:
+  - id: last_rx_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: last_tx_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: rx_frame_count
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+output:
+  - platform: gpio
+    pin: GPIO25
+    id: onboard_led_output
+
+light:
+  - platform: binary
+    name: "RF Activity LED"
+    id: rf_activity_led
+    output: onboard_led_output
+    entity_category: config
+
+# Extinguish the activity LED shortly after the last event so each frame reads
+# as a distinct blink rather than a solid glow.
+interval:
+  - interval: 60ms
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool active = (now - id(last_rx_ms) < 120) ||
+                              (now - id(last_tx_ms) < 120);
+          if (active != id(rf_activity_led).current_values.is_on()) {
+            auto call = id(rf_activity_led).make_call();
+            call.set_state(active);
+            call.perform();
+          }
+
+display:
+  - platform: ssd1306_i2c
+    id: oled
+    model: "SSD1306 128x64"
+    address: 0x3C
+    update_interval: 250ms
+    lambda: |-
+      const char *speed_names[] = {"OFF", "LOW", "MED", "HIGH"};
+      bool running = id(whole_house_fan).state;
+      int speed = id(whole_house_fan).speed;
+      int idx = (speed >= 1 && speed <= 3) ? speed : 0;
+      // The fan entity publishes only confirmed authority (INV-25); when
+      // authority is lost the state_known binary sensor goes false and the
+      // panel suffixes '?' so it never asserts a stale word as fact.
+      char state_str[8];
+      snprintf(state_str, sizeof(state_str), "%s%s",
+               running ? speed_names[idx] : "OFF",
+               id(fan_state_known).state ? "" : "?");
+
+      // Fan icon animation: pre-rendered mdi:fan rotation frames (see the
+      // YAML build for the 12-frame rationale). The frame counter is a
+      // display-local static — cosmetic state, never read by any RF path.
+      static int fan_anim_frame = 0;
+      int frame_step = 0;
+      if (idx == 1) frame_step = 1;
+      else if (idx == 2) frame_step = 2;
+      else if (idx == 3) frame_step = 3;
+      if (running) {
+        fan_anim_frame = (fan_anim_frame + frame_step) % 12;
+      }
+      image::Image *fan_frames[12] = {
+          id(fan_frame_0), id(fan_frame_1), id(fan_frame_2), id(fan_frame_3),
+          id(fan_frame_4), id(fan_frame_5), id(fan_frame_6), id(fan_frame_7),
+          id(fan_frame_8), id(fan_frame_9), id(fan_frame_10), id(fan_frame_11),
+      };
+      image::Image *current_fan_frame = running ? fan_frames[fan_anim_frame] : id(fan_off_frame);
+      it.image(11, 1, current_fan_frame);
+
+      const int left_zone_center_x = 27;
+      it.print(left_zone_center_x, 29, id(font_state), TextAlign::TOP_CENTER, state_str);
+
+      // Countdown: HH:MM from the core's remaining-minutes sensor, shown
+      // only while a locally anchored timer is confirmed (the C++ core
+      // publishes no guessed remaining value for OEM-set timers).
+      if (running && id(fan_timer_remaining_known).state &&
+          id(timer_remaining_min).has_state() &&
+          std::isfinite(id(timer_remaining_min).state)) {
+        int total_min = (int) (id(timer_remaining_min).state + 0.5f);
+        if (total_min < 0) total_min = 0;
+        it.printf(left_zone_center_x, 40, id(font_timer), TextAlign::TOP_CENTER,
+                  "%d:%02d", total_min / 60, total_min % 60);
+      }
+
+      // Status icons: wifi + api + battery, bottom-left row.
+      const int status_row_y = 52;
+      const int status_wifi_x = 4, status_api_x = 21, status_battery_x = 38;
+      bool wifi_up = wifi::global_wifi_component->is_connected();
+      bool api_up = api::global_api_server->is_connected();
+      const char *wifi_glyph;
+      if (!wifi_up) {
+        wifi_glyph = "\U000F092D";
+      } else {
+        float rssi = id(wifi_signal_sensor).state;
+        if (rssi >= -55) wifi_glyph = "\U000F0928";
+        else if (rssi >= -65) wifi_glyph = "\U000F0925";
+        else if (rssi >= -75) wifi_glyph = "\U000F0922";
+        else wifi_glyph = "\U000F091F";
+      }
+      it.print(status_wifi_x, status_row_y, id(font_icons), TextAlign::TOP_LEFT, wifi_glyph);
+      const char *api_glyph = api_up ? "\U000F07D0" : "\U000F0C9C";
+      it.print(status_api_x, status_row_y, id(font_icons), TextAlign::TOP_LEFT, api_glyph);
+
+      // Battery icon: voltage-only heuristic with per-tier hysteresis (see
+      // the YAML build's BATTERY_ICON comment). Tier memory is a
+      // display-local static instead of a global.
+      static const float BATT_RISE[5] = {2.55f, 3.74f, 3.90f, 4.23f, 4.33f};
+      static const float BATT_FALL[5] = {2.45f, 3.68f, 3.84f, 4.17f, 4.27f};
+      static int batt_tier_state = -1;
+      float vbatt = id(battery_voltage_sensor).has_state() ? id(battery_voltage_sensor).state : -1.0f;
+      int batt_tier;
+      if (batt_tier_state < 0) {
+        batt_tier = 0;
+        for (int i = 0; i < 5; i++) {
+          if (vbatt >= BATT_RISE[i]) batt_tier = i + 1;
+        }
+      } else {
+        batt_tier = batt_tier_state;
+        while (batt_tier < 5 && vbatt >= BATT_RISE[batt_tier]) batt_tier++;
+        while (batt_tier > 0 && vbatt < BATT_FALL[batt_tier - 1]) batt_tier--;
+      }
+      batt_tier_state = batt_tier;
+      if (batt_tier > 0) {
+        const char *batt_glyph;
+        switch (batt_tier) {
+          case 1: batt_glyph = "\U000F0083"; break;
+          case 2: batt_glyph = "\U000F008E"; break;
+          case 3: batt_glyph = "\U000F0079"; break;
+          case 4: batt_glyph = "\U000F0084"; break;
+          default: batt_glyph = "\U000F06A5"; break;
+        }
+        it.print(status_battery_x, status_row_y, id(font_icons), TextAlign::TOP_LEFT, batt_glyph);
+      }
+
+      // Temperatures, right-aligned; "--" for missing/non-finite.
+      char in_buf[8];
+      if (id(temp_indoor).has_state() && std::isfinite(id(temp_indoor).state)) {
+        snprintf(in_buf, sizeof(in_buf), "%.0f", id(temp_indoor).state);
+      } else {
+        strcpy(in_buf, "--");
+      }
+      it.printf(127, 0, id(font_temp_large), TextAlign::TOP_RIGHT, "%s°F", in_buf);
+
+      char out_buf[8];
+      if (id(temp_outdoor).has_state() && std::isfinite(id(temp_outdoor).state)) {
+        snprintf(out_buf, sizeof(out_buf), "%.0f", id(temp_outdoor).state);
+      } else {
+        strcpy(out_buf, "--");
+      }
+      it.printf(127, 27, id(font_temp_small), TextAlign::TOP_RIGHT, "%s°F", out_buf);
+
+      char attic_buf[8];
+      if (id(temp_attic).has_state() && std::isfinite(id(temp_attic).state)) {
+        snprintf(attic_buf, sizeof(attic_buf), "%.0f", id(temp_attic).state);
+      } else {
+        strcpy(attic_buf, "--");
+      }
+      it.printf(127, 43, id(font_temp_small), TextAlign::TOP_RIGHT, "%s°F", attic_buf);
+
+      // Temperature icon column (shared x, see YAML build for geometry).
+      const int temp_icon_x = 67;
+      it.print(temp_icon_x, 3, id(font_icons), TextAlign::TOP_LEFT, "\U000F0F55");
+      it.print(temp_icon_x, 25, id(font_icons), TextAlign::TOP_LEFT, "\U000F0599");
+      it.print(temp_icon_x, 43, id(font_icons), TextAlign::TOP_LEFT, "\U000F112B");
+
+      // ---------------------------------------------------------------
+      // RF activity indicators — bottom-right corner, bottom/right aligned.
+      //
+      // 7x6 triangles: TX points up, RX points down. Sized to the real
+      // clearance here — the attic temperature occupies y=43..54 on this
+      // side, so these sit at rows 58..63 against the panel edge.
+      //
+      // Idle is a hollow outline and active is solid fill. A checkerboard
+      // dither was tried first, but at this size the scattered pixels read as
+      // noise rather than gray, so the outline carries the "present but
+      // inactive" meaning instead.
+      //
+      // They interleave to within two columns because the shapes are
+      // complementary: the up triangle is one pixel wide at the top where the
+      // down triangle is at full width, and vice versa at the base, so their
+      // bounding boxes overlap without the shapes ever touching.
+      {
+        const uint32_t now = millis();
+        const bool rx_hot = (now - id(last_rx_ms)) < 400;
+        const bool tx_hot = (now - id(last_tx_ms)) < 400;
+
+        const int tri_h = 6;
+        const int tri_w = 7;
+        const int tri_y = 58;   // rows 58..63, flush with the bottom edge
+        const int tx_x = 116;
+        const int rx_x = 121;   // right edge lands on x=127
+
+        auto draw_tri = [&](int x0, bool up, bool hot) {
+          const int cx = x0 + tri_w / 2;
+          for (int r = 0; r < tri_h; r++) {
+            const int span_row = up ? r : (tri_h - 1 - r);
+            const int half = (span_row * (tri_w / 2)) / (tri_h - 1);
+            const int y = tri_y + r;
+            const int left = cx - half;
+            const int right = cx + half;
+            const bool base_row = up ? (r == tri_h - 1) : (r == 0);
+            if (hot || base_row) {
+              for (int x = left; x <= right; x++) it.draw_pixel_at(x, y);
+            } else {
+              it.draw_pixel_at(left, y);
+              it.draw_pixel_at(right, y);
+            }
+          }
+        };
+
+        draw_tri(tx_x, true, tx_hot);
+        draw_tri(rx_x, false, rx_hot);
+      }

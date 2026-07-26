@@ -10,8 +10,8 @@ CONF_LOW_SCRIPT = "low_script"
 CONF_MEDIUM_SCRIPT = "medium_script"
 CONF_HIGH_SCRIPT = "high_script"
 
-quietcool_confirmed_fan_ns = cg.esphome_ns.namespace("quietcool_confirmed_fan")
-QuietCoolFan = quietcool_confirmed_fan_ns.class_(
+quietcool_legacy_yaml_ns = cg.esphome_ns.namespace("quietcool_legacy_yaml")
+QuietCoolFan = quietcool_legacy_yaml_ns.class_(
     "QuietCoolFan", cg.Component, fan.Fan
 )
 

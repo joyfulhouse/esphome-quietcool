@@ -19,7 +19,7 @@ complete kit: ESP32 + 433 MHz radio + OLED + antenna):
 | [LilyGO TTGO LoRa32 V2.1 (433 MHz)](https://amzn.to/4vBvqOU) | [HiLetgo ESP32 LoRa V3 (SX1262)](https://amzn.to/4wagWqi) |
 | :---: | :---: |
 | [![LilyGO TTGO LoRa32 V2.1 433 MHz board](docs/images/lilygo-ttgo-lora32-v21.jpg)](https://amzn.to/4vBvqOU) | [![HiLetgo ESP32 LoRa V3 SX1262 board with OLED and 433–510 MHz antenna](docs/images/hiletgo-esp32-lora-v3.jpg)](https://amzn.to/4wagWqi) |
-| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and **verified working on real fans** (SX1278, `quietcool-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — ⚠️ **not yet confirmed working**: the SX1262/ESP32-S3 port (`quietcool-lora-v3.yaml`) compiles but hasn't been tested on real hardware. Choose the LilyGO unless you want to help with bring-up |
+| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and **verified working on real fans** (SX1278, `quietcool-cpp-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — ⚠️ **not yet confirmed working**: the SX1262/ESP32-S3 port (`quietcool-lora-v3.yaml`) compiles but hasn't been tested on real hardware. Choose the LilyGO unless you want to help with bring-up |
 
 <sub>Disclosure: as an Amazon Associate (store `joyfulhousegi-20`) the maintainers
 may earn from qualifying purchases through the links above. They cost you nothing
@@ -181,8 +181,15 @@ unverified on hardware.
 
 | Board | Radio | MCU | Config | Status |
 | --- | --- | --- | --- | --- |
-| LilyGO TTGO LoRa32 **V2.1** (433 MHz) | SX1278 (SX127x) | ESP32 | `quietcool-lora32.yaml` | Verified on real fans |
-| Heltec / HiLetgo ESP32 LoRa **V3** (433–510 MHz) | SX1262 (SX126x) | ESP32-S3 | `quietcool-lora-v3.yaml` | Builds; awaiting hardware bring-up |
+| LilyGO TTGO LoRa32 **V2.1** (433 MHz) | SX1278 (SX127x) | ESP32 | `quietcool-cpp-lora32.yaml` (C++, **primary**) | Running on real fans |
+| Heltec / HiLetgo ESP32 LoRa **V3** (433–510 MHz) | SX1262 (SX126x) | ESP32-S3 | `quietcool-lora-v3.yaml` (legacy YAML) | Builds; awaiting hardware bring-up |
+
+The maintained build is the **C++ core** (`quietcool-cpp-lora32.yaml`), which
+moves the RF confirmation state machine into the tested C++ component under
+`components/quietcool/`. The all-YAML build (`quietcool-lora32.yaml`) is retained
+as **legacy** for units not yet cut over. The V3/SX1262 board has no deployable
+C++ config yet (`quietcool-cpp-example-sx126x.yaml` is a compile-only reference),
+so V3 stays on the legacy YAML build for now.
 
 The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
 `sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
@@ -207,7 +214,7 @@ uv venv .venv && uv pip install --python .venv/bin/python esphome
 cp secrets.yaml.example secrets.yaml   # then edit
 
 # 3. Validate, build, flash (USB first time, OTA after)
-.venv/bin/esphome run quietcool-lora32.yaml
+.venv/bin/esphome run quietcool-cpp-lora32.yaml
 ```
 
 Then adopt the device in Home Assistant (ESPHome integration) and teach it your
@@ -229,10 +236,15 @@ troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
 ## Repository layout
 
 ```
-INSTALL.md                       # step-by-step setup guide
-quietcool-lora32.yaml            # TTGO LoRa32 V2.1 / SX1278 — shared base config
-quietcool-lora-v3.yaml           # Heltec/HiLetgo ESP32-S3 / SX1262 port
-components/quietcool_confirmed_fan/ # confirmation-driven fan entity platform
+INSTALL.md                        # step-by-step setup guide
+quietcool-cpp-lora32.yaml         # TTGO LoRa32 V2.1 / SX1278 — C++ build (PRIMARY, flash this)
+quietcool-cpp-example.yaml        # minimal compile-only C++ reference
+quietcool-cpp-example-sx126x.yaml # minimal compile-only C++ reference (SX126x)
+quietcool-cpp-diag.yaml           # C++ loop-stack diagnostic harness
+quietcool-lora32.yaml             # legacy all-YAML build (TTGO) — superseded
+quietcool-lora-v3.yaml            # legacy all-YAML build (Heltec/HiLetgo V3)
+components/quietcool/             # C++ confirmation core (primary build)
+components/quietcool_legacy_yaml/  # legacy YAML-build fan entity platform
 secrets.yaml.example             # copy to secrets.yaml (gitignored)
 tests/                           # config regression tests (pytest/unittest)
 tools/                           # display renderer + fan-frame generator
@@ -280,16 +292,17 @@ Every QuietCool OEM sender ID is four bytes beginning with `CB`; the RF
 profile and command format are universal. This firmware can therefore learn a
 fan's ID from its OEM remote through the existing receive path.
 
-> **Which build are you running?** The procedures immediately below describe the
-> **YAML build** (`quietcool-lora32.yaml`) — the configuration this repository
-> flashes and the one verified on real fans. The separate **C++ core build**
-> (`components/quietcool/`) pairs differently: it needs **three** remote presses
-> rather than two, aborts if it hears a second fan, and shows no OLED learn
-> prompt. If you are running it, follow
-> [Pairing on the C++ core build](#pairing-on-the-c-core-build) instead. Match
-> the section to the firmware you actually flashed.
+> **Two builds — follow the one you flashed.** The **default build is now the
+> C++ core** (`quietcool-cpp-lora32.yaml`, which compiles `components/quietcool/`);
+> pair it with [Pairing on the C++ core build](#pairing-on-the-c-core-build)
+> below. The original **legacy YAML build** (`quietcool-lora32.yaml`) pairs
+> differently — two presses and an on-OLED prompt — and is documented under the
+> "legacy YAML build" headings that follow. As of this writing the reference
+> TTGO unit runs the C++ build; a second unit remains on the legacy YAML build
+> pending cutover. Matching the wrong procedure to your firmware is the common
+> mistake, so confirm which you flashed.
 
-### First-boot flow (YAML build)
+### First-boot flow (legacy YAML build)
 
 1. Before compiling, change the top-level substitution in
    `quietcool-lora32.yaml` to:
@@ -334,7 +347,7 @@ from completing a candidate started by another sender. Learn frames are
 consumed by the RX and storage path and never publish fan state or reach any
 TX action.
 
-### Manual re-learn and forget (YAML build)
+### Manual re-learn and forget (legacy YAML build)
 
 - Press the Home Assistant `Learn Remote ID` button (in the device's
   Configuration section, disabled by default — enable the entity first), or
@@ -368,10 +381,9 @@ SAVED` on success (previewed in `docs/display-previews/learn-active.png` and
 
 ### Pairing on the C++ core build
 
-The C++ core (`components/quietcool/`) is a from-scratch reimplementation of the
-learn logic. Its deployment configuration is maintained outside this repository,
-so there is no C++ build config to flash from here — but if you are running it,
-its pairing procedure differs from the YAML build above in four ways:
+This is the **default build**, flashed from `quietcool-cpp-lora32.yaml`. The C++
+core reimplements the learn logic with a higher evidence bar, so its pairing
+procedure differs from the legacy YAML build above in four ways:
 
 - **Three independent sightings, not two.** The controller binds a remote only
   after it has heard the *same* `CB`-prefixed command frame three separate

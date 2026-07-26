@@ -5,7 +5,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
 
-namespace esphome::quietcool_confirmed_fan {
+namespace esphome::quietcool_legacy_yaml {
 
 static const char *const TAG = "quietcool.fan";
 
@@ -80,4 +80,4 @@ class QuietCoolFan final : public Component, public fan::Fan {
   script::Script<> *high_script_{nullptr};
 };
 
-}  // namespace esphome::quietcool_confirmed_fan
+}  // namespace esphome::quietcool_legacy_yaml

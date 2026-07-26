@@ -1,14 +1,19 @@
-# Round-2 stack diagnostic for the deployed TTGO LoRa32 V2.1 controller.
+# Historical stack diagnostic (TTGO LoRa32 V2.1). It was used to confirm that an
+# ESP-IDF build with a doubled loop-task stack resolves the loop-stack overflow
+# the Arduino / 8 KiB build hit. The primary build (quietcool-cpp-lora32.yaml)
+# now already ships ESP-IDF with a 16 KiB loop stack, so this file is retained
+# only as a reusable stack-measurement harness, not as a delta from production.
 #
-# This deliberately packages the read-only production configuration instead of
-# copying it, so radio settings, entities, display work, logger level, API
-# encryption, credentials, and the C++ component source remain identical.
+# It packages the primary config (in this repo) so radio settings, entities,
+# display work, logger level, API encryption, credentials, and the C++ component
+# source stay identical to what ships.
 packages:
-  production: !include ../homeassistant-dev/quietcool/quietcool-cpp-lora32.yaml
+  production: !include quietcool-cpp-lora32.yaml
 
-# Diagnostic changes versus production:
-#   1. Use ESP-IDF directly instead of the Arduino compatibility component.
-#   2. Double ESPHome's actual loopTask stack from 8 KiB to 16 KiB.
+# The esp32 block below re-declares the ESP-IDF framework and the 16 KiB loop
+# stack. These now match the packaged primary config (identical values merge
+# cleanly, the main file overriding the package), and are kept so the harness
+# stays self-describing.
 #
 # CONFIG_ESP_MAIN_TASK_STACK_SIZE is not the controlling setting here:
 # ESPHome's esp32/core.cpp creates a separate static loopTask using

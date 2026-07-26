@@ -1,3 +1,15 @@
+# ============================================================================
+# LEGACY YAML BUILD — superseded by the C++ core build.
+#
+# This is the original all-YAML firmware: Arduino framework, the
+# `quietcool_legacy_yaml` external component, and the RF confirmation state
+# machine implemented in YAML lambdas. The maintained, primary build is now
+# `quietcool-cpp-lora32.yaml`, which moves that state machine into the tested
+# C++ component under `components/quietcool/`. This file is kept — and stays
+# buildable — only for units not yet cut over to the C++ build. New installs
+# should use the C++ build; see README.md.
+# ============================================================================
+#
 # QuietCool Fan Controller - firmware-verified CMT2300A protocol
 #
 # The SX127x packet engine emits the eight-byte 0xAA preamble, 0x2D 0xD4
@@ -156,7 +168,7 @@ external_components:
   - source:
       type: local
       path: components
-    components: [quietcool_confirmed_fan]
+    components: [quietcool_legacy_yaml]
 
 esp32:
   board: ttgo-lora32-v21
@@ -2067,7 +2079,7 @@ interval:
 # =============================================================================
 # Fan Entity
 #
-# The local quietcool_confirmed_fan platform is confirmation-driven. control()
+# The local quietcool_legacy_yaml platform is confirmation-driven. control()
 # routes a request to one command script but deliberately does NOT mutate or
 # publish the fan entity. Only authoritative, query-correlated closed-loop
 # consensus publishes state. Passive RF and estimated timer expiry fail the
@@ -2080,7 +2092,7 @@ interval:
 # send_off decides whether that is a new transaction or joins an active one.
 # =============================================================================
 fan:
-  - platform: quietcool_confirmed_fan
+  - platform: quietcool_legacy_yaml
     name: "QuietCool Fan"
     id: quietcool_fan
     restore_mode: NO_RESTORE
