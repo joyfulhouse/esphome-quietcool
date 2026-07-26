@@ -18,17 +18,20 @@ void QuietCoolButton::press_action() {
     ESP_LOGE(TAG, "Button press refused: controller is not configured");
     return;
   }
-  switch (kind_) {
-    case QuietCoolButtonKind::Refresh:
-      controller_->request_manual_refresh();
-      break;
-    case QuietCoolButtonKind::Learn:
-      controller_->request_learn(::quietcool::LearnMode::Manual);
-      break;
-    case QuietCoolButtonKind::Forget:
-      controller_->request_forget();
-      break;
-  }
+  // Forward the three provisioning actions to the controller. The kind -> action
+  // routing itself lives in dispatch_button_press(), which is unit-tested; these
+  // forwards are 1:1 by name.
+  struct ControllerSink final : ButtonActionSink {
+    explicit ControllerSink(QuietCoolComponent& c) : controller(c) {}
+    QuietCoolComponent& controller;
+    void manual_refresh() override { controller.request_manual_refresh(); }
+    void learn() override {
+      controller.request_learn(::quietcool::LearnMode::Manual);
+    }
+    void forget() override { controller.request_forget(); }
+  };
+  ControllerSink sink(*controller_);
+  dispatch_button_press(kind_, sink);
 }
 
 }  // namespace esphome::quietcool
