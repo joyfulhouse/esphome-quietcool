@@ -125,5 +125,48 @@ QC_TEST("fan_feedback", "command and feedback mappings roundtrip on every band")
   }
 }
 
+// Issue #31: the entity's speed count is seeded from the snapshot's sticky
+// speed_capability BEFORE the publication gate, so it is right at the
+// restore-time publication — the one the gate swallows for state purposes.
+::quietcool::AuthoritySnapshot restored_snapshot(
+    std::optional<::quietcool::SpeedCapability> capability) {
+  return {::quietcool::UnknownStateAuthority{
+              ::quietcool::AuthorityLossReason::RestoredUnverified, 0,
+              std::nullopt, std::nullopt},
+          ::quietcool::UnknownTimerAuthority{
+              ::quietcool::TimerLossReason::RestoredUnverified, 0},
+          std::nullopt,
+          capability,
+          std::nullopt,
+          0};
+}
+
+QC_TEST("fan_feedback", "authority speed count seeds from the sticky capability") {
+  // A restored capability narrows the band with no confirmed state at all.
+  QC_CHECK_EQ(
+      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two),
+                            3),
+      2);
+  // No capability: keep the entity's current count (first ever boot).
+  QC_CHECK_EQ(authority_speed_count(restored_snapshot(std::nullopt), 3), 3);
+  // Out-of-band values cannot be produced by the core; defence in depth keeps
+  // the function total anyway.
+  QC_CHECK_EQ(authority_speed_count(
+                  restored_snapshot(static_cast<::quietcool::SpeedCapability>(7)),
+                  3),
+              3);
+}
+
+// The #31 acceptance property end to end at the mapping layer: immediately
+// after a reboot that restored capability Two, a Home Assistant level-2
+// command must transmit HIGH (0xBF), not MED (0xAF, which stops the fan).
+QC_TEST("fan_feedback", "level 2 maps to HIGH right after a capability-restored boot") {
+  const auto count =
+      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two),
+                            3);
+  const auto command = fan_command_from_intent(true, 2, count);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0xBF);
+}
+
 }  // namespace
 }  // namespace esphome::quietcool
