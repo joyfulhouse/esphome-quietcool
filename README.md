@@ -64,8 +64,11 @@ extra.</sub>
   HA-relayed temperatures (indoor / outdoor / attic) with semantic icons, and a
   WiFi / API / battery status row. Temperature sources are configurable from the
   HA UI, not hard-coded.
-- **Safety-first** — never transmits at boot, after OTA, on API reconnect, from
-  restored state, or from a received frame. Multi-model adversarially reviewed.
+- **Safety-first** — never sends a fan *command* unbidden: commands come only
+  from an explicit press or HA request, plus the bounded confirmation query and
+  spaced re-fires they arm. (It does send non-energizing `66 66` status queries
+  on its own — after boot/OTA and a few seconds after hearing the OEM remote —
+  which cannot start the fan.) Multi-model adversarially reviewed.
 - **Multi-board & multi-fan** — two board configs (SX1278 / SX1262) kept
   behaviorally identical; a second fan on the same board type can be a thin
   per-device wrapper overriding only the device-identity substitutions.
@@ -259,9 +262,13 @@ for makeup air, confirm combustion appliances can't backdraft, and keep a workin
 OEM control as a fallback. The checked-in templates preserve a strict causal
 invariant: RF only ever originates from an explicit button press or Home
 Assistant command, plus the bounded follow-ups those arm — the confirmation
-query and the spaced re-fire attempts, both volatile and hard-limited. Nothing
-transmits at boot, after OTA, on reconnect, from restored state, or from a
-received frame. Repeated equivalent Off requests are transaction-idempotent:
+query and the spaced re-fire attempts, both volatile and hard-limited. No
+*command* transmits at boot, after OTA, on reconnect, from restored state, or
+from a received frame. The radio does send bounded, **non-energizing** `66 66`
+status queries on its own — a provisioned unit sends one shortly after boot (and
+after an OTA reboot), and one a few seconds after it hears an OEM-remote press,
+to re-establish confirmed state — none of which can start the fan. Repeated
+equivalent Off requests are transaction-idempotent:
 they cannot transmit, replenish attempts, clear confirmation evidence, or
 extend the terminal deadline. A heard OEM-remote press cancels all pending
 automatic work.
