@@ -393,7 +393,7 @@ SAVED` on success (previewed in `docs/display-previews/learn-active.png` and
 
 This is the **default build**, flashed from `quietcool-cpp-lora32.yaml`. The C++
 core reimplements the learn logic with a higher evidence bar, so its pairing
-procedure differs from the legacy YAML build above in four ways:
+procedure differs from the legacy YAML build above in five ways:
 
 - **Three independent sightings, not two.** The controller binds a remote only
   after it has heard the *same* `CB`-prefixed command frame three separate
@@ -408,6 +408,18 @@ procedure differs from the legacy YAML build above in four ways:
   the controller abandons the entire window and keeps whatever ID was already
   bound, rather than risk binding the wrong fan. Silence the other unit and
   retry.
+- **Re-learning a provisioned unit is deliberately two steps: Forget, then
+  Learn.** While a sender ID is bound — whether learned over the air or
+  compiled in via `quietcool_sender_id` — pressing `Learn Remote ID` is
+  **refused**: no learn window opens, the binding is untouched, and nothing is
+  written to flash. The refusal is visible on the `Command Confirmation
+  Status` sensor (`refused`) and in the device log
+  (`reason=already_provisioned`). Press `Forget Remote ID` first, then `Learn
+  Remote ID`. Previously a single accidental Learn press on a
+  correctly-provisioned unit opened a window in which its binding could be
+  replaced by whatever single fan happened to be transmitting; requiring the
+  explicit Forget makes re-binding a deliberate act. Fresh (unprovisioned)
+  devices are unaffected — Learn works immediately.
 - **No OLED learn prompt.** This build renders no `LEARN` / `REMOTE X2` screen.
   Watch pairing progress in the device logs and on the `Learn Remote ID` button
   entity instead.
