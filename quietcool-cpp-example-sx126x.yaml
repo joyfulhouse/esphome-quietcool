@@ -108,6 +108,13 @@ binary_sensor:
     controller_id: quietcool_controller
     kind: confirmed_off
     name: "Fan Confirmed Off"
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: controller_fault
+    device_class: problem
+    # Latched fault signal: set (until reboot) if the controller degrades and
+    # control/observation stop. See quietcool-cpp-lora32.yaml for context.
+    name: "Controller Fault"
 
 sensor:
   - platform: quietcool
