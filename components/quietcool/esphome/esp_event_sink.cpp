@@ -89,6 +89,21 @@ const char* outcome_name(::quietcool::TransactionOutcome outcome) {
   return "unknown";
 }
 
+const char* refusal_name(::quietcool::RefusalReason reason) {
+  using Reason = ::quietcool::RefusalReason;
+  switch (reason) {
+    case Reason::Unprovisioned: return "unprovisioned";
+    case Reason::Busy: return "busy";
+    case Reason::Holdoff: return "holdoff";
+    case Reason::Learning: return "learning";
+    case Reason::InvalidState: return "invalid_state";
+    case Reason::IdExhausted: return "id_exhausted";
+    case Reason::AmbiguousLearn: return "ambiguous_learn";
+    case Reason::AlreadyProvisioned: return "already_provisioned";
+  }
+  return "unknown";
+}
+
 const char* evidence_name(::quietcool::EvidenceSource source) {
   using Source = ::quietcool::EvidenceSource;
   switch (source) {
@@ -214,8 +229,12 @@ void EspHomeEventSink::on_core_event(const ::quietcool::CoreEvent& event) {
   const auto* state = state_name(event.state);
   if (event.kind == Kind::InvalidInternalEvent) {
     ESP_LOGE(kTag, "event=%s state=%s", kind, state);
-  } else if (event.kind == Kind::RequestRefused ||
-             event.kind == Kind::WatchdogFired ||
+  } else if (event.kind == Kind::RequestRefused) {
+    // The reason is part of the user-visible surface: "already_provisioned"
+    // (issue #16) is how an operator learns that re-pairing needs Forget first.
+    ESP_LOGW(kTag, "event=%s state=%s reason=%s", kind, state,
+             event.refusal ? refusal_name(*event.refusal) : "unknown");
+  } else if (event.kind == Kind::WatchdogFired ||
              event.kind == Kind::StaleTxCallback) {
     ESP_LOGW(kTag, "event=%s state=%s", kind, state);
   } else if (event.kind == Kind::AuthorityChanged ||

@@ -120,7 +120,7 @@ enum class TransactionOutcome : std::uint8_t {
   CancelledByExternalState, YieldedToPossibleOemCommand, CancelledForLearning,
   RadioUnavailable
 };
-enum class RefusalReason : std::uint8_t { Unprovisioned, Busy, Holdoff, Learning, InvalidState, IdExhausted, AmbiguousLearn };
+enum class RefusalReason : std::uint8_t { Unprovisioned, Busy, Holdoff, Learning, InvalidState, IdExhausted, AmbiguousLearn, AlreadyProvisioned };
 enum class QueryPurpose : std::uint8_t { Boot, Manual, Fallback, Recovery };
 enum class EvidenceSource : std::uint8_t {
   BootQueryConsensus, ManualQueryConsensus, RecoveryQueryConsensus,

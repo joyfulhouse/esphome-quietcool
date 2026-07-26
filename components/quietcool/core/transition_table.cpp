@@ -154,8 +154,13 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
              ActionId::HandleRadioReady, NextStateId::Computed, 1, TemplateOrigin::None);
     add_rule(rules, index, state, EventKind::CommandRequested, GuardId::Always,
              ActionId::HandleCommandRequest, NextStateId::Computed, 1, TemplateOrigin::None);
+    // Computed, not a fixed LearningAwaitingFirst: handle_learn refuses when a
+    // sender is already bound (issue #16) and must leave the current state
+    // untouched; a fixed next-state here would overwrite the refusal into a
+    // learn window. On the accepted (unprovisioned) path handle_learn sets
+    // LearningAwaitingFirst itself, byte-for-byte as before.
     add_rule(rules, index, state, EventKind::LearnRequested, GuardId::Always,
-             ActionId::HandleLearnRequest, NextStateId::LearningAwaitingFirst, 1,
+             ActionId::HandleLearnRequest, NextStateId::Computed, 1,
              TemplateOrigin::None);
     add_rule(rules, index, state, EventKind::ForgetRequested, GuardId::Always,
              ActionId::HandleForget, NextStateId::Unprovisioned, 1, TemplateOrigin::None);

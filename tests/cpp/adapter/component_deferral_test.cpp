@@ -426,19 +426,54 @@ QC_TEST("adapter", "setup after degrade does not re-enter the core") {
   Harness harness;
   harness.setup();
 
-  // Move the core to a distinctive state a fresh restore() would not reproduce.
-  harness.component().request_learn(::quietcool::LearnMode::Manual);
+  // Move the core to a distinctive state a fresh restore() would not
+  // reproduce. (request_learn no longer qualifies: the harness boots with a
+  // compiled seed, so a Learn is refused since issue #16.)
+  harness.component().request_state(
+      FanState::command(Speed::Low, Duration::Continuous));
   QC_CHECK_EQ(harness.component().snapshot().state,
-              CoordinatorState::LearningAwaitingFirst);
+              CoordinatorState::CommandPending);
 
   harness.component().degrade_for_test();
   // degrade() is entity-only; it must not itself have moved the core.
   QC_CHECK_EQ(harness.component().snapshot().state,
-              CoordinatorState::LearningAwaitingFirst);
+              CoordinatorState::CommandPending);
 
   // A re-entrant setup() must be refused by the latch; core_.restore() /
   // on_radio_ready() must not run, so the state stays put.
   harness.component().setup();
+  QC_CHECK_EQ(harness.component().snapshot().state,
+              CoordinatorState::CommandPending);
+}
+
+// Issue #16, seeded variant: this harness provisions through the compiled-in
+// sender seed (kSenderSeed with an empty NVS), exactly like the live units. An
+// accidental Learn press must be refused — binding untouched, nothing written
+// durably — and the refusal must be user-visible through command_status.
+// Forget-then-Learn stays available as the explicit override.
+QC_TEST("adapter", "compiled-seed unit refuses learn until forget") {
+  ScopedPreferences preferences;
+  Harness harness;
+  harness.setup();
+
+  DegradationSensors sensors;
+  sensors.wire(harness.component());
+
+  const auto state_before = harness.component().snapshot().state;
+  const auto syncs_before = preferences.get().sync_count();
+  harness.component().request_learn(::quietcool::LearnMode::Manual);
+
+  QC_CHECK_EQ(harness.component().snapshot().state, state_before);
+  QC_CHECK(!harness.component().snapshot().learning.active);
+  QC_CHECK(!sensors.command_status.published().empty());
+  QC_CHECK_EQ(sensors.command_status.published().back(),
+              std::string("refused"));
+  // No durable NVS write happened on the refusal path.
+  QC_CHECK_EQ(preferences.get().sync_count(), syncs_before);
+
+  // The explicit override: Forget (erases + suppresses the seed), then Learn.
+  harness.component().request_forget();
+  harness.component().request_learn(::quietcool::LearnMode::Manual);
   QC_CHECK_EQ(harness.component().snapshot().state,
               CoordinatorState::LearningAwaitingFirst);
 }

@@ -212,12 +212,22 @@ QC_TEST("INV-16", "late timer poll anchors freshness to the actual deadline") {
   QC_CHECK_EQ(expired.logical_query_bursts, 0U);
 }
 
-QC_TEST("INV-22", "learning cancels work and remains receive-only") {
+QC_TEST("INV-22", "learning is gated by provisioning and remains receive-only") {
   auto core = ready_core();
   core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
-  const auto effects = core.request_learn(LearnMode::Manual, 1);
+  // Issue #16: while a sender is bound, Learn is refused — RF-silent, and the
+  // pending command survives untouched.
+  const auto refused = core.request_learn(LearnMode::Manual, 1);
+  QC_CHECK_EQ(emitted_tx(refused), 0U);
+  QC_CHECK_EQ(core.snapshot(1).state, CoordinatorState::CommandPending);
+  QC_CHECK(core.snapshot(1).transaction.has_value());
+
+  // The explicit override — Forget, then Learn — opens a window that stays
+  // receive-only until binding completes.
+  core.request_forget(2);
+  const auto effects = core.request_learn(LearnMode::Manual, 3);
   QC_CHECK_EQ(emitted_tx(effects), 0U);
-  QC_CHECK_EQ(core.snapshot(1).state, CoordinatorState::LearningAwaitingFirst);
+  QC_CHECK_EQ(core.snapshot(3).state, CoordinatorState::LearningAwaitingFirst);
   const auto first = invariant_frame(0x9F);
   core.on_frame(ByteView(first.bytes), 10);
   QC_CHECK_EQ(core.snapshot(10).state, CoordinatorState::LearningAwaitingSecond);
@@ -267,7 +277,10 @@ QC_TEST("bug_check", "deferred command keeps its immutable prior after tail cont
               confirmed.revision);
 }
 
-QC_TEST("bug_check", "learning abandons a deferred command") {
+QC_TEST("bug_check", "a refused learn leaves a deferred command intact") {
+  // Pre-#16 a Learn abandoned deferred work; now the gate refuses it first, so
+  // an accidental Learn press during OEM holdoff must not cost the user their
+  // queued command.
   auto core = ready_core();
   const auto oem_query = FrameCodec::encode_query(invariant_sender());
   core.on_frame(ByteView(oem_query.bytes), 0);
@@ -277,12 +290,9 @@ QC_TEST("bug_check", "learning abandons a deferred command") {
   QC_CHECK(core.snapshot(1).deferred_command.has_value());
 
   core.request_learn(LearnMode::Manual, 2);
-  QC_CHECK(!core.snapshot(2).deferred_command.has_value());
-  const auto learn_frame = invariant_frame(0x9F);
-  core.on_frame(ByteView(learn_frame.bytes), 3);
-  core.on_frame(ByteView(learn_frame.bytes), 604);
-  core.request_state(request, 605);
-  QC_CHECK_EQ(core.snapshot(605).state, CoordinatorState::CommandPending);
+  QC_CHECK(core.snapshot(2).deferred_command.has_value());
+  QC_CHECK_EQ(core.snapshot(2).state, CoordinatorState::OemHoldoff);
+  QC_CHECK(!core.snapshot(2).learning.active);
 }
 
 QC_TEST("bug_check", "TX token exhaustion cannot install a tokenless lease state") {
