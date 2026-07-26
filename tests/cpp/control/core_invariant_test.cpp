@@ -377,5 +377,24 @@ QC_TEST("contexts", "recovery family accepts every recovery reason not just init
   }
 }
 
+QC_TEST("contexts", "a non-query reason is rejected in a query family") {
+  // TransactionCommand is a command TX reason, not a query reason. The routing
+  // query_purpose() folds it into Recovery via its catch-all default, so before
+  // #26 this pairing was certified coherent by the invariant check. The explicit
+  // query_family_of() classifier yields nullopt for it, so it must be rejected.
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::RecoveryQueryPending,
+      QueryPendingContext{QueryPurpose::Recovery, TxReason::TransactionCommand}));
+  QC_CHECK(!ConfirmationCore::context_matches_state(
+      CoordinatorState::RecoveryResponseListening,
+      QueryResponseContext{QueryPurpose::Recovery, TxReason::TransactionCommand,
+                           TxToken(1), 1}));
+  // Control: a genuine Recovery query reason in the same slot is still accepted.
+  QC_CHECK(ConfirmationCore::context_matches_state(
+      CoordinatorState::RecoveryQueryPending,
+      QueryPendingContext{QueryPurpose::Recovery,
+                          TxReason::RecoveryQueryInitial}));
+}
+
 }  // namespace
 }  // namespace quietcool

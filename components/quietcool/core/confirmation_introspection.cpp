@@ -139,17 +139,18 @@ bool ConfirmationCore::context_matches_state(CoordinatorState state,
   // carrying the wrong query family's reason — the class this fixture used to
   // build with BootQuery — must be rejected even when its purpose field is
   // right. TxReason is finer-grained than QueryPurpose: the Recovery family
-  // spans RecoveryQueryInitial / RecoveryQueryRetry / TimerExpiryRecoveryQuery,
-  // and the real dispatcher derives the purpose back from the reason
-  // (confirmation_radio.cpp). So require the reason to belong to the state's
-  // family via that same derivation, NOT to equal one canonical reason — an
-  // exact match would falsely reject the two non-initial Recovery reasons, which
-  // are legitimate live pairings. Non-query variants carry no reason (both
-  // nullopt): behaviour unchanged.
+  // spans RecoveryQueryInitial / RecoveryQueryRetry / TimerExpiryRecoveryQuery.
+  // Classify via query_family_of(), NOT the routing query_purpose(): the latter
+  // has a catch-all default that folds every non-query reason (e.g.
+  // TransactionCommand) into Recovery, which would certify RecoveryQueryPending +
+  // TransactionCommand as coherent (#26). query_family_of() yields nullopt for a
+  // non-query reason, so it is rejected, while the three Recovery query reasons
+  // still map to Recovery — family semantics preserved, exact-reason rejection
+  // avoided. Non-query variants carry no reason (both nullopt): unchanged.
   const auto reason = query_reason_of(context);
   const auto canonical_purpose = query_purpose_of(canonical);
   if (reason && canonical_purpose &&
-      TransitionTable::query_purpose(*reason) != *canonical_purpose)
+      TransitionTable::query_family_of(*reason) != canonical_purpose)
     return false;
   return true;
 }
