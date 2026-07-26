@@ -66,11 +66,15 @@ rest of this guide describes the C++ build.
 Pick your serial port when prompted. The first compile takes a few minutes;
 every later update can go over the air (same command, choose OTA).
 
-The firmware **never transmits merely because it booted** — not after OTA and
-not on reconnect. It transmits only after an explicit control/Refresh action
-and for the bounded query/re-fire work that action authorizes. Keep the antenna
-connected and observe the normal whole-house-fan safety precautions while
-flashing.
+The firmware **never sends a fan command unless you ask it to** — a command
+(anything that could change the fan) originates only from an explicit control
+action in Home Assistant, plus the bounded confirmation query and spaced re-fire
+attempts that action authorizes. It does, on its own, send a **non-energizing**
+`66 66` **status query** in a few cases — most importantly, a provisioned unit
+sends one shortly after boot (including the reboot after an OTA update) to
+re-establish confirmed state. A status query cannot start the fan. So the radio
+can be briefly live right after power-on: keep the antenna connected and observe
+the normal whole-house-fan safety precautions while flashing.
 
 ## 4. Adopt in Home Assistant
 
@@ -90,8 +94,7 @@ window at boot and shows **no OLED learn prompt**; you start learning explicitly
 and watch progress in Home Assistant.
 
 1. In HA, open the device, enable the **`Learn Remote ID`** button (Configuration
-   section, disabled by default), and press it to open the learn window. (You
-   can also hold the board's PRG button 5–10 s.)
+   section, disabled by default), and press it to open the learn window.
 2. Stand near the controller and **operate the fan you are pairing with its own
    OEM remote — press a real speed/duration button about three times, roughly a
    second apart**, all within 60 seconds.
@@ -213,13 +216,13 @@ replies are much weaker than its reception). The bounded command/re-fire
 schedule still runs, but without confirmation the physical outcome is unknown;
 you'll see `no response consensus` in `Command Confirmation Status` instead of
 `confirmed`. A `Refresh Fan State` button sends a non-energizing status query
-on demand and applies the same response-consensus rules as the command loop
-(the `Query Fan State (probe)` diagnostic also opens 15 s of raw RX logging).
+on demand and applies the same response-consensus rules as the command loop.
 An active-timer reply reports its programmed duration but not its age, so a
 manual query keeps the timer and safety fan entity unknown rather than
-synthesizing an authoritative countdown. Boot,
-OTA, and API reconnect never query or otherwise transmit; use Refresh when an
-explicit post-restart resync is wanted.
+synthesizing an authoritative countdown. A provisioned unit already sends one
+non-energizing status query shortly after boot (and after the reboot an OTA
+triggers) to re-establish confirmed state; an API reconnect on its own does not
+transmit. Use `Refresh Fan State` if you want an additional resync on demand.
 
 The custom control path is confirmation-driven: an HA request does not publish
 its requested On/Off state. There is nevertheless one unavoidable ESPHome API
@@ -283,8 +286,8 @@ to finish, clears obsolete queued work, and executes the latest desired action.
   of the same remote, each ≥ ~0.6 s apart and all within 60 s, and each must be
   a real speed/off button (not a bare status ping). **Two presses is not
   enough.** Make sure you pressed `Learn Remote ID` first (it ships disabled
-  under Configuration — enable it, or hold the board's PRG button 5–10 s), and
-  that no *other* `CB` fan is transmitting nearby — a second sender aborts the
+  under Configuration — enable it), and that no *other* `CB` fan is transmitting
+  nearby — a second sender aborts the
   window. Operating the target fan itself helps: its ~1.2 s self-reports count
   toward the three.
 - **HA entity doesn't follow the OEM remote** — this is intentional: a heard
