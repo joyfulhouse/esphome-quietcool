@@ -21,12 +21,14 @@
 #include "quietcool/esphome/quietcool_component.h"
 
 #include "esphome/core/hal.h"
+#include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 
 #include "support/test.h"
 #include "support/test_doubles.h"
 
 #include <cstdint>
+#include <string>
 
 namespace esphome::quietcool {
 namespace {
@@ -461,6 +463,7 @@ QC_TEST("adapter", "compiled-seed unit refuses learn until forget") {
 
   const auto state_before = harness.component().snapshot().state;
   const auto syncs_before = preferences.get().sync_count();
+  esphome::host_test::captured_logs().clear();
   harness.component().request_learn(::quietcool::LearnMode::Manual);
 
   QC_CHECK_EQ(harness.component().snapshot().state, state_before);
@@ -468,6 +471,19 @@ QC_TEST("adapter", "compiled-seed unit refuses learn until forget") {
   QC_CHECK(!sensors.command_status.published().empty());
   QC_CHECK_EQ(sensors.command_status.published().back(),
               std::string("refused"));
+  // README/INSTALL promise the specific reason on the refusal log line —
+  // `reason=already_provisioned` is how an operator learns that re-pairing
+  // needs Forget first. Pinning the line end-to-end (component effect mapping
+  // → event sink → refusal_name) is what kills the mutant that dropped
+  // refusal->reason in apply_effect() while every state assertion stayed
+  // green.
+  bool refusal_line_logged = false;
+  for (const auto& line : esphome::host_test::captured_logs()) {
+    if (line.find("event=request_refused") != std::string::npos &&
+        line.find("reason=already_provisioned") != std::string::npos)
+      refusal_line_logged = true;
+  }
+  QC_CHECK(refusal_line_logged);
   // No durable NVS write happened on the refusal path.
   QC_CHECK_EQ(preferences.get().sync_count(), syncs_before);
 
