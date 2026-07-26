@@ -235,8 +235,8 @@ diagnostic instead of joining two separately delivered entity updates:
 {{ is_state('binary_sensor.YOUR_DEVICE_fan_confirmed_off', 'on') }}
 ```
 
-Use the corresponding `Timer State Known` diagnostic before acting on the timer
-select or countdown. The timer select is not initialized to a guessed `None` at
+Use the corresponding `Timer State Known` diagnostic before trusting the
+`Timer Remaining` countdown. The C++ build presents no guessed timer state at
 boot. A new command and every actual non-query burst (including each spaced
 re-fire) invalidate both known flags. Outgoing state/timer requests do not
 optimistically arm or clear confirmed timer metadata; a failed or unanswered

@@ -42,12 +42,13 @@ extra.</sub>
   in seconds instead of waiting for a manual Refresh; while authority is lost
   the OLED suffixes the state word with `?`.
 - **Direct RF fan control** — Off / Low / Medium / High (where supported by
-  the fan model) on the fan entity, plus a speed-aware timer select covering
-  the fan's full 1 / 2 / 4 / 8 / 12-hour range — more than the OEM remote's
-  three timer buttons expose — transmitted as the exact OEM frames. `Timer
-  State Known` gates the select and countdown: they are not initialized to a
-  guessed `None`, and an unresolved command cannot present stale timer metadata
-  as confirmed.
+  the fan model) on the fan entity, transmitted as the exact OEM frames. On the
+  C++ build timer modes are set from the OEM remote (the legacy YAML build
+  additionally exposes a speed-aware timer *select* in Home Assistant covering
+  the fan's full 1 / 2 / 4 / 8 / 12-hour range). Either way, `Timer State Known`
+  and the read-only `Timer Remaining` sensor present a countdown only when it is
+  backed by correlated evidence — never a guessed `None` — so an unresolved
+  command cannot present stale timer metadata as confirmed.
 - **Learn mode** — capture your fan's 4-byte sender ID from its OEM remote (two
   presses on the YAML build, three on the C++ core build). No packet sniffing or
   firmware extraction needed to onboard; the ID is persisted in NVS and survives
@@ -120,8 +121,8 @@ only when authoritative consensus says Off, and false for running or unknown
 state. This avoids an HA batching race that can occur when a safety automation
 separately joins the fan entity and a Known flag.
 
-The same rule applies to timers. Boot leaves the timer select without a guessed
-selection. Every new command, and every actual non-query command burst including
+The same rule applies to timers: the controller presents no guessed timer state
+at boot. Every new command, and every actual non-query command burst including
 an automatic re-fire, invalidates both `Fan State Known` and `Timer State Known`.
 Outgoing commands do not optimistically arm or clear confirmed timer metadata.
 The fan reports the programmed duration, not when the timer began, so a trusted
