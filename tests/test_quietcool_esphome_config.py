@@ -2541,7 +2541,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
             "(int32_t) (id(timer_expiry_millis) - millis())", interval_block
         )
 
-        known_guard = interval_block.index("if (!id(timer_state_known))")
+        self.assertIn("if (!id(timer_state_known))", interval_block)
         self.assertIn("id(timer_active) = false;", interval_block)
         self.assertIn("id(fan_state_known) = false;", interval_block)
         self.assertIn("id(timer_state_known) = false;", interval_block)
@@ -2857,6 +2857,21 @@ class RepoLayoutTest(unittest.TestCase):
         self.assertIn("2026-07-21", text)
         self.assertIn("quietcool_legacy_yaml", text)
 
+    def test_configs_were_moved_not_copied(self) -> None:
+        # The relocation must not leave (or regain) root-level duplicates:
+        # a stale root copy would silently diverge from the tested legacy
+        # copy while still looking like the canonical file to a visitor.
+        for stale in (
+            ROOT / "quietcool-lora32.yaml",
+            ROOT / "quietcool-lora-v3.yaml",
+        ):
+            with self.subTest(path=stale.name):
+                self.assertFalse(
+                    stale.exists(),
+                    f"{stale.name} must exist only under legacy/, "
+                    f"but a root-level copy is present at {stale}",
+                )
+
     def test_moved_configs_resolve_assets_relative_to_legacy(self) -> None:
         # ESPHome resolves external_components/font/image paths against the
         # top-level config's directory, which is now legacy/.
@@ -2870,6 +2885,46 @@ class RepoLayoutTest(unittest.TestCase):
                 )
                 self.assertNotIn('file: "fonts/', text)
                 self.assertNotIn('file: "images/', text)
+
+    def test_every_local_reference_resolves_on_disk(self) -> None:
+        # Guard the actual invariant, not just the path spelling: every
+        # local `file:` (fonts/images) and `path:` (external_components)
+        # reference must resolve to a real file/directory from legacy/,
+        # and must stay inside the repository.
+        file_ref = re.compile(r'(?m)^\s*(?:-\s*)?file:\s*"([^"]+)"')
+        path_ref = re.compile(r"(?m)^\s*path:\s*(\S+)\s*$")
+        for config in (CONFIG, V3_CONFIG):
+            with self.subTest(config=config.name):
+                text = config.read_text()
+                local_files = [
+                    ref
+                    for ref in file_ref.findall(text)
+                    if "://" not in ref  # skip gfonts:// etc.
+                ]
+                dirs = path_ref.findall(text)
+                # The configs are known to embed local fonts, images, and
+                # the external component; an empty list means the regex
+                # rotted, not that the configs stopped using assets.
+                self.assertGreaterEqual(len(local_files), 2)
+                self.assertGreaterEqual(len(dirs), 1)
+                for ref in local_files:
+                    with self.subTest(file=ref):
+                        resolved = (config.parent / ref).resolve()
+                        self.assertTrue(
+                            resolved.is_file(),
+                            f"{config.name} references {ref}, which does "
+                            f"not exist at {resolved}",
+                        )
+                        self.assertTrue(resolved.is_relative_to(ROOT))
+                for ref in dirs:
+                    with self.subTest(path=ref):
+                        resolved = (config.parent / ref).resolve()
+                        self.assertTrue(
+                            resolved.is_dir(),
+                            f"{config.name} references {ref}, which does "
+                            f"not exist at {resolved}",
+                        )
+                        self.assertTrue(resolved.is_relative_to(ROOT))
 
     def test_root_readme_labels_the_legacy_track(self) -> None:
         readme = README.read_text()
