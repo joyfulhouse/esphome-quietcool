@@ -134,6 +134,13 @@ bool EspHomePreferencesAdapter::apply(
       if (!request.sender) return false;
       restored_.sender = request.sender;
       restored_.seed_policy = ::quietcool::SeedPolicy::AllowCompiledSeed;
+      // Provisioning re-binds the record to a fan, and the capability is a
+      // property of that fan: take whatever the core's sticky value is NOW
+      // (nullopt after learning a different fan, the retained value after
+      // re-learning the same one). Keeping the previous restored_ value here
+      // re-persisted the OLD fan's capability under the NEW sender, which
+      // then survived reboots and mis-aimed commands (issue #31).
+      restored_.speed_capability = request.speed_capability;
       durable = true;
       break;
     case ::quietcool::PersistenceKind::EraseProvisioning:

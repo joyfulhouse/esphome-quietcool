@@ -268,6 +268,84 @@ QC_TEST("persistence", "stale Medium command retargets to High under capability 
   QC_CHECK_EQ(transaction->requested.canonical_byte(), 0x3F);
 }
 
+// The capability-One band: a 1-speed fan supports only HIGH, so both LOW and
+// MED are out-of-band and re-aim to the top. Pins the exact band predicate —
+// a filter admitting "anything but Low" (or any other near-miss) fails here.
+QC_TEST("persistence", "capability One re-aims Low and Medium to High") {
+  for (const auto speed : {Speed::Low, Speed::Medium}) {
+    ConfirmationCore core(CoreConfig{59});
+    RestorableState restored;
+    restored.sender = persistence_sender();
+    restored.speed_capability = SpeedCapability::One;
+    core.restore(restored, 0);
+    core.request_state(FanState::command(speed, Duration::Continuous), 0);
+    const auto tx = persistence_tx(core.poll(0));
+    QC_CHECK(tx.has_value());
+    QC_CHECK_EQ(tx->payload.bytes[4], 0xBF);
+  }
+}
+
+// The filter must be surgical: in-band speeds pass through byte-identical.
+QC_TEST("persistence", "supported speeds pass the capability filter untouched") {
+  ConfirmationCore core(CoreConfig{59});
+  RestorableState restored;
+  restored.sender = persistence_sender();
+  restored.speed_capability = SpeedCapability::Two;
+  core.restore(restored, 0);
+  core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
+  const auto tx = persistence_tx(core.poll(0));
+  QC_CHECK(tx.has_value());
+  QC_CHECK_EQ(tx->payload.bytes[4], 0x9F);
+}
+
+// Every attempt's frame passes the re-aim choke point, not just the first:
+// reaim_off_to can rewrite an OFF transaction's outbound to the speed of a
+// mid-transaction ECHO (our own stale Medium command heard back), which
+// re-introduces an out-of-band nibble after attempt 1 was already corrected.
+// The retry must go out re-aimed. A first-attempt-only re-aim fails here.
+QC_TEST("persistence", "off retry is re-aimed after an echo reintroduces Medium") {
+  ConfirmationCore core(CoreConfig{59});
+  RestorableState restored;
+  restored.sender = persistence_sender();
+  restored.speed_capability = SpeedCapability::Two;
+  core.restore(restored, 0);
+
+  core.request_state(FanState::command(Speed::High, Duration::Off), 0);
+  const auto first = persistence_tx(core.poll(0));
+  QC_CHECK(first.has_value());
+  QC_CHECK_EQ(first->payload.bytes[4], 0xB0);  // HIGH|Off, in-band
+  core.on_tx_started(first->token, 0);
+  core.on_tx_complete(first->token, 400);
+
+  // Consensus on a marker frame carrying ON Medium (0xAF): decide_off retries
+  // without promotion and reaim_off_to rewrites outbound to Medium|Off (0xA0).
+  const FrameBytes echo{{0xCB, 0x00, 0x47, 0x39, 0xAF, 0xAF}};
+  core.on_frame(ByteView(echo.bytes), 1300);
+  core.on_frame(ByteView(echo.bytes), 1300 + kMinIndependentCandidateGapMs);
+
+  core.poll(400 + kResponseTailEndMs + 1);  // tail expiry -> retry pending
+  const auto retry = persistence_tx(core.poll(400 + kResponseTailEndMs + 2));
+  QC_CHECK(retry.has_value());
+  QC_CHECK_EQ(retry->attempt.value().value(), 2U);
+  QC_CHECK_EQ(retry->payload.bytes[4], 0xB0);  // re-aimed back in-band
+}
+
+// Issue #31: Forget destroys the fan BINDING, so the RAM sticky goes with the
+// NVS record — the old fan's capability must not re-aim a later fan's commands.
+QC_TEST("persistence", "forget clears the sticky capability in RAM") {
+  ConfirmationCore core(CoreConfig{59});
+  RestorableState restored;
+  restored.sender = persistence_sender();
+  restored.speed_capability = SpeedCapability::Two;
+  core.restore(restored, 0);
+  QC_CHECK_EQ(core.snapshot(0).authority.speed_capability.value(),
+              SpeedCapability::Two);
+  const auto effects = core.request_forget(1);
+  QC_CHECK_EQ(persistence_count(effects, PersistenceKind::EraseProvisioning),
+              1U);
+  QC_CHECK(!core.snapshot(1).authority.speed_capability.has_value());
+}
+
 QC_TEST("persistence", "transaction IDs exhaust without wrapping or reuse") {
   const auto maximum = std::numeric_limits<std::uint64_t>::max();
   MonotonicIdAllocator<TransactionId> ids(maximum);

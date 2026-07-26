@@ -125,6 +125,11 @@ class AuthorityStore final {
   void bind_manual_query_token(TxToken token);
   void promote(const AcceptedObservation& accepted, MonotonicMs now_ms);
   void invalidate(AuthorityLossReason reason, MonotonicMs now_ms);
+  // The one sanctioned way to drop the sticky capability: the fan BINDING
+  // itself is going away (Forget) or moving to a different fan (Learn). A
+  // capability describes the bound fan, so it must not outlive the binding —
+  // but authority-freshness invalidations must never touch it (issue #31).
+  void clear_confirmed_capability();
   void record_diagnostic(FanState state);
   TimerExpiryDecision timer_estimate_expired(MonotonicMs now_ms);
   std::optional<MonotonicMs> timer_deadline() const;

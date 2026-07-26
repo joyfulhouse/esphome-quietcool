@@ -253,6 +253,11 @@ CoreEffects ConfirmationCore::handle_forget(MonotonicMs now_ms) {
   consensus_.reset();
   recovery_.cancel();
   learn_.cancel();
+  // The binding is gone, so the fan-bound sticky capability goes with it —
+  // in RAM as well as in NVS (EraseProvisioning below). Forget may precede
+  // learning a DIFFERENT fan, and the old fan's capability must not re-aim
+  // that fan's commands in the meantime (issue #31).
+  authority_.clear_confirmed_capability();
   authority_.invalidate(AuthorityLossReason::Unprovisioned, now_ms);
   state_ = CoordinatorState::Unprovisioned;
   context_ = UnprovisionedContext{};
@@ -272,14 +277,22 @@ CoreEffects ConfirmationCore::handle_learning_frame(ByteView input,
     context_ =
         LearningContext{learn_.snapshot().mode, learn_.snapshot().deadline_ms};
   } else if (event.kind == LearnEventKind::Learned) {
+    // Re-binding to a DIFFERENT fan discards the sticky capability: it
+    // described the previous fan, and left in place it would re-aim the new
+    // fan's commands (and get_traits) against the wrong band until the first
+    // confirmed report (issue #31). Re-learning the SAME fan keeps it — the
+    // fan did not change. The SaveProvisioning below carries the surviving
+    // value so NVS is re-bound atomically with the sender: the adapter must
+    // not re-persist the old fan's capability under the new sender.
+    if (!(sender_ == event.sender)) authority_.clear_confirmed_capability();
     sender_ = event.sender;
     recovery_.cancel();
     authority_.invalidate(AuthorityLossReason::SenderChanged, now_ms);
     state_ = CoordinatorState::Idle;
     context_ = IdleContext{};
-    effects.add(RequestPersistenceEffect{{PersistenceKind::SaveProvisioning,
-                                          sender_, std::nullopt,
-                                          std::nullopt}});
+    effects.add(RequestPersistenceEffect{
+        {PersistenceKind::SaveProvisioning, sender_, std::nullopt,
+         authority_.snapshot(now_ms).speed_capability}});
   } else if (event.kind == LearnEventKind::AmbiguousRejected) {
     // Two distinct fans were heard in one window; refuse and keep whatever was
     // bound before. sender_ is left untouched, so no SaveProvisioning is

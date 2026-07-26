@@ -188,6 +188,43 @@ QC_TEST("preferences", "forget erases the persisted capability") {
   QC_CHECK(!restored.speed_capability.has_value());
 }
 
+// Issue #31 (review finding): SaveProvisioning re-binds the whole record, so
+// its capability field is authoritative. Learning a DIFFERENT fan emits it
+// with no capability, and the adapter must NOT re-persist the previous fan's
+// value under the new sender — that stale value would survive reboots.
+QC_TEST("preferences", "re-provisioning replaces the persisted capability") {
+  ScopedPreferences preferences;
+  constexpr std::uint32_t kOtherSenderBe = 0xCB0011EFU;
+  {
+    EspHomePreferencesAdapter adapter(kPreferenceKey, 0);
+    adapter.load();
+    QC_CHECK(provision(adapter));
+    QC_CHECK(save_capability(adapter, SpeedCapability::Two));
+    // Re-learned to a different fan: the core's sticky value was cleared, so
+    // the request carries nullopt.
+    QC_CHECK(adapter.apply(PersistenceRequest{
+        PersistenceKind::SaveProvisioning,
+        SenderId::from_be_u32(kOtherSenderBe).value(), std::nullopt,
+        std::nullopt}));
+  }
+  EspHomePreferencesAdapter reborn(kPreferenceKey, 0);
+  const auto restored = reborn.load();
+  QC_CHECK_EQ(restored.sender->as_be_u32(), kOtherSenderBe);
+  QC_CHECK(!restored.speed_capability.has_value());
+
+  // And a same-fan re-learn (core kept its sticky value) carries it through.
+  {
+    EspHomePreferencesAdapter adapter(kPreferenceKey, 0);
+    adapter.load();
+    QC_CHECK(adapter.apply(PersistenceRequest{
+        PersistenceKind::SaveProvisioning,
+        SenderId::from_be_u32(kOtherSenderBe).value(), std::nullopt,
+        SpeedCapability::Three}));
+  }
+  EspHomePreferencesAdapter again(kPreferenceKey, 0);
+  QC_CHECK_EQ(again.load().speed_capability.value(), SpeedCapability::Three);
+}
+
 QC_TEST("preferences", "SaveSpeedCapability without a value is refused") {
   ScopedPreferences preferences;
   EspHomePreferencesAdapter adapter(kPreferenceKey, 0);

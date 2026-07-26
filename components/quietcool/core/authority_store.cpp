@@ -100,7 +100,9 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
   if (accepted.state.speed()) remembered_speed_ = accepted.state.speed();
   // Sticky: overwritten by every confirmed report that carries a capability,
   // never cleared by invalidate() — the capability describes the bound fan,
-  // not the freshness of the current authority claim (issue #31).
+  // not the freshness of the current authority claim (issue #31). It is
+  // cleared only through clear_confirmed_capability(), when the binding
+  // itself changes (Forget, or learning a different fan).
   if (accepted.capability != SpeedCapability::Unknown)
     confirmed_capability_ = accepted.capability;
   const auto duration = accepted.state.duration();
@@ -128,6 +130,10 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
 
 void AuthorityStore::invalidate(AuthorityLossReason reason, MonotonicMs now_ms) {
   set_unknown(reason, TimerLossReason::StateInvalidated, now_ms);
+}
+
+void AuthorityStore::clear_confirmed_capability() {
+  confirmed_capability_.reset();
 }
 
 void AuthorityStore::record_diagnostic(FanState state) { last_diagnostic_ = state; }

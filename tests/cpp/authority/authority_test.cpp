@@ -121,6 +121,25 @@ QC_TEST("authority", "restore seeds the sticky capability") {
               SpeedCapability::Two);
 }
 
+// The ONLY sanctioned clear: the fan binding itself changed (Forget, or
+// learning a different fan). Freshness invalidations must never do this.
+QC_TEST("authority", "clear_confirmed_capability drops the sticky value") {
+  AuthorityStore authority;
+  auto value = accepted(FanState::observed(0x9F).value(),
+                        EvidenceSource::ManualQueryConsensus, 100);
+  value.capability = SpeedCapability::Two;
+  authority.promote(value, 100);
+  QC_CHECK_EQ(authority.snapshot(100).speed_capability.value(),
+              SpeedCapability::Two);
+  authority.clear_confirmed_capability();
+  QC_CHECK(!authority.snapshot(200).speed_capability.has_value());
+  // And a later confirmed report re-establishes it from evidence, not memory.
+  authority.promote(accepted(FanState::observed(0xDF).value(),
+                             EvidenceSource::ManualQueryConsensus, 300), 300);
+  QC_CHECK_EQ(authority.snapshot(300).speed_capability.value(),
+              SpeedCapability::Three);
+}
+
 QC_TEST("authority", "restore creates diagnostic hint and no authority") {
   AuthorityStore authority;
   RestorableState restored;
