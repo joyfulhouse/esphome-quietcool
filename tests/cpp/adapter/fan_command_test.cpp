@@ -75,10 +75,13 @@ QC_TEST("fan_command", "out-of-range speed clamps into the supported band") {
   QC_CHECK(too_high.speed().has_value());
   QC_CHECK_EQ(*too_high.speed(), Speed::High);
 
-  // The ceiling tracks supported_speed_count: a 3 on a 2-speed fan is Medium.
+  // The ceiling tracks supported_speed_count: a 3 on a 2-speed fan clamps to
+  // the top of the band, which is HIGH on the wire. (This assertion previously
+  // expected Medium — that expectation WAS issue #30: it pinned the identity
+  // cast that made a 2-speed fan's top level transmit a speed it doesn't have.)
   const auto over_two = fan_command_from_intent(true, 3, kTwoSpeeds);
   QC_CHECK(over_two.speed().has_value());
-  QC_CHECK_EQ(*over_two.speed(), Speed::Medium);
+  QC_CHECK_EQ(*over_two.speed(), Speed::High);
 }
 
 // #19: the clamp must be total. With supported_speed_count == 0 the pre-fix code
@@ -95,6 +98,37 @@ QC_TEST("fan_command", "clamp is total: a zero supported count still yields a va
   // The whole translation stays safe too: a 0 count yields a running command
   // whose speed nibble is valid rather than undefined.
   QC_CHECK(fan_command_from_intent(true, 1, 0).speed().has_value());
+}
+
+// Issue #30, the actuation half. The wire nibbles have fixed meanings (1=LOW
+// 0x9F, 2=MED 0xAF, 3=HIGH 0xBF — the legacy build's byte table, confirmed by
+// the OEM remote's own captures), and a 2-speed QuietCool supports {LOW, HIGH}.
+// The HA band is positional, so on a 2-speed fan the top level must transmit
+// HIGH. The identity cast sent MED (0xAF) — a speed the fan does not have —
+// and the fan stopped instead of running high. The exact-byte checks tie this
+// to the captured wire truth, not just to enum names.
+// Mutation: revert speed_for_level to the identity cast -> level 2 on a
+// 2-speed fan produces 0xAF and every 2-speed case here fails; the 3-speed
+// identity case stays green, proving 3-speed units are unaffected.
+QC_TEST("fan_command", "2-speed fan: band maps to LOW/HIGH on the wire") {
+  const auto high = fan_command_from_intent(true, 2, kTwoSpeeds);
+  QC_CHECK_EQ(*high.speed(), Speed::High);
+  QC_CHECK_EQ(high.outbound_command_byte(), std::uint8_t{0xBF});
+
+  const auto low = fan_command_from_intent(true, 1, kTwoSpeeds);
+  QC_CHECK_EQ(*low.speed(), Speed::Low);
+  QC_CHECK_EQ(low.outbound_command_byte(), std::uint8_t{0x9F});
+
+  // 3-speed units keep the identity mapping: level 2 is genuinely MED there.
+  const auto med = fan_command_from_intent(true, 2, kThreeSpeeds);
+  QC_CHECK_EQ(*med.speed(), Speed::Medium);
+  QC_CHECK_EQ(med.outbound_command_byte(), std::uint8_t{0xAF});
+
+  // A 1-speed fan's single level maps to High by the same top-of-band rule.
+  // No 1-speed unit exists here to verify against; this pins the DOCUMENTED
+  // choice so a change to it is a decision, not an accident.
+  QC_CHECK_EQ(*fan_command_from_intent(true, 1, std::uint8_t{1}).speed(),
+              Speed::High);
 }
 
 }  // namespace

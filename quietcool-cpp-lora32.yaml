@@ -512,16 +512,21 @@ display:
     address: 0x3C
     update_interval: 250ms
     lambda: |-
-      const char *speed_names[] = {"OFF", "LOW", "MED", "HIGH"};
+      // `speed` is a Home Assistant LEVEL (a position in the entity's band),
+      // not the wire nibble: the band's top is HIGH and its bottom LOW on
+      // every fan, so on a 2-speed (LOW/HIGH) unit level 2 must read "HIGH",
+      // never "MED". Mirrors speed_for_level in the C++ adapter (issue #30).
       bool running = id(whole_house_fan).state;
       int speed = id(whole_house_fan).speed;
-      int idx = (speed >= 1 && speed <= 3) ? speed : 0;
+      int count = id(whole_house_fan).get_traits().supported_speed_count();
+      const char *label = "OFF";
+      if (speed >= 1) label = (speed >= count) ? "HIGH" : (speed == 1 ? "LOW" : "MED");
       // The fan entity publishes only confirmed authority (INV-25); when
       // authority is lost the state_known binary sensor goes false and the
       // panel suffixes '?' so it never asserts a stale word as fact.
       char state_str[8];
       snprintf(state_str, sizeof(state_str), "%s%s",
-               running ? speed_names[idx] : "OFF",
+               running ? label : "OFF",
                id(fan_state_known).state ? "" : "?");
 
       // Fan icon animation: pre-rendered mdi:fan rotation frames (see the

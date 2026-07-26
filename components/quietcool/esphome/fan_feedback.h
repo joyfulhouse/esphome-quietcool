@@ -23,6 +23,12 @@ struct FanFeedback final {
   std::optional<std::uint8_t> supported_speed_count;
 };
 
-FanFeedback authority_to_feedback(const ::quietcool::FanState& confirmed);
+// `speed` is a Home Assistant LEVEL (a position in the 1..count band), not the
+// wire nibble: level = min(nibble, count), the inverse of speed_for_level. The
+// mapping uses the report's own capability when it carries one in 1..3, else
+// `current_supported_speed_count` — the entity's value at call time — so a
+// report that narrows the band and carries a speed stays self-consistent.
+FanFeedback authority_to_feedback(const ::quietcool::FanState& confirmed,
+                                  std::uint8_t current_supported_speed_count);
 
 }  // namespace esphome::quietcool

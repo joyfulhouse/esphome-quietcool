@@ -48,7 +48,8 @@ void QuietCoolFan::publish_authority(
   const auto confirmed = publication_gate_.next(authority);
   if (!confirmed) return;
 
-  const auto feedback = authority_to_feedback(confirmed->state);
+  const auto feedback =
+      authority_to_feedback(confirmed->state, supported_speed_count_);
   if (feedback.supported_speed_count)
     supported_speed_count_ = *feedback.supported_speed_count;
   if (feedback.speed) speed = *feedback.speed;
