@@ -54,9 +54,11 @@ void QuietCoolFan::publish_authority(
   // capability is the single source of truth here; the per-report
   // FanFeedback::supported_speed_count is never fresher (promote() folds the
   // same consensus capability into the snapshot before it is published), so
-  // it is deliberately not consulted.
-  supported_speed_count_ = authority_speed_count(authority,
-                                                 supported_speed_count_);
+  // it is deliberately not consulted. authority_speed_count is pure in the
+  // snapshot: a capability-less snapshot (Forget, or a re-bind to a different
+  // fan) resets the count to the compiled default rather than preserving the
+  // previous fan's band (issue #31 review).
+  supported_speed_count_ = authority_speed_count(authority);
   const auto confirmed = publication_gate_.next(authority);
   if (!confirmed) return;
 

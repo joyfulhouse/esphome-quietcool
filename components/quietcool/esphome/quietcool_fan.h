@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quietcool/ports/authority_publication_gate.h"
+#include "fan_feedback.h"
 #include "quietcool_component.h"
 
 #include "esphome/components/fan/fan.h"
@@ -29,7 +30,7 @@ class QuietCoolFan final : public Component,
  private:
   QuietCoolComponent* controller_{nullptr};
   ::quietcool::AuthorityPublicationGate publication_gate_;
-  std::uint8_t supported_speed_count_{3};
+  std::uint8_t supported_speed_count_{kCompiledDefaultSpeedCount};
 };
 
 }  // namespace esphome::quietcool

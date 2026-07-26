@@ -27,6 +27,15 @@ std::optional<PersistenceRequest> save_provisioning_request(
   return std::nullopt;
 }
 
+std::optional<AuthoritySnapshot> published_authority(
+    const CoreEffects& effects) {
+  for (std::size_t index = 0; index < effects.size(); ++index)
+    if (const auto* publish =
+            std::get_if<PublishAuthorityEffect>(&effects[index]))
+      return publish->authority;
+  return std::nullopt;
+}
+
 std::size_t save_provisioning_count(const CoreEffects& effects) {
   std::size_t count = 0;
   for (std::size_t index = 0; index < effects.size(); ++index) {
@@ -111,6 +120,14 @@ QC_TEST("learn", "learning a different fan clears the sticky capability") {
   QC_CHECK(save.has_value());
   QC_CHECK_EQ(save->sender->as_be_u32(), 0xCB004740U);
   QC_CHECK(!save->speed_capability.has_value());
+
+  // The clear must also be PUBLISHED (issue #31 review): the fan entity's
+  // cached speed count is seeded from published snapshots only, and without
+  // this publication the old fan's band would keep mapping Home Assistant
+  // level presses (and get_traits) until the new fan's first confirmed report.
+  const auto published = published_authority(effects);
+  QC_CHECK(published.has_value());
+  QC_CHECK(!published->speed_capability.has_value());
 }
 
 QC_TEST("learn", "re-learning the same fan keeps the sticky capability") {
@@ -123,6 +140,11 @@ QC_TEST("learn", "re-learning the same fan keeps the sticky capability") {
   const auto save = save_provisioning_request(effects);
   QC_CHECK(save.has_value());
   QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Two);
+
+  // Same-fan re-learn republishes the surviving capability unchanged.
+  const auto published = published_authority(effects);
+  QC_CHECK(published.has_value());
+  QC_CHECK_EQ(published->speed_capability.value(), SpeedCapability::Two);
 }
 
 }  // namespace

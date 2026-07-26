@@ -32,15 +32,22 @@ struct FanFeedback final {
 FanFeedback authority_to_feedback(const ::quietcool::FanState& confirmed,
                                   std::uint8_t current_supported_speed_count);
 
+// The compiled default the fan entity boots with before any capability is
+// known. Also what the entity must RETURN to when the binding changes: after
+// Forget or learning a different fan the previous fan's band is meaningless.
+inline constexpr std::uint8_t kCompiledDefaultSpeedCount = 3;
+
 // The entity's supported speed count for a published authority snapshot
 // (issue #31). The snapshot's sticky speed_capability is the single source of
 // truth: promote() folds every confirmed report's capability into it and
 // restore seeds it from NVS, so it is defined strictly whenever
 // FanFeedback::supported_speed_count would be — plus at restore time, before
-// any RF round-trip, which is the window this closes. Returns `current` when
-// the snapshot carries nothing (first ever boot), keeping the function total.
+// any RF round-trip, which is the window this closes. Deliberately a PURE
+// function of the snapshot — no "current count" input — so a stale entity
+// cache cannot survive a capability clear: when the snapshot carries nothing
+// (first ever boot, Forget, or a re-bind to a different fan) the count is the
+// compiled default, not whatever the previous fan taught the entity.
 std::uint8_t authority_speed_count(
-    const ::quietcool::AuthoritySnapshot& authority,
-    std::uint8_t current_supported_speed_count);
+    const ::quietcool::AuthoritySnapshot& authority);
 
 }  // namespace esphome::quietcool

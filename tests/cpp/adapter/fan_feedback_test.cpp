@@ -144,17 +144,20 @@ QC_TEST("fan_feedback", "command and feedback mappings roundtrip on every band")
 QC_TEST("fan_feedback", "authority speed count seeds from the sticky capability") {
   // A restored capability narrows the band with no confirmed state at all.
   QC_CHECK_EQ(
-      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two),
-                            3),
+      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two)),
       2);
-  // No capability: keep the entity's current count (first ever boot).
-  QC_CHECK_EQ(authority_speed_count(restored_snapshot(std::nullopt), 3), 3);
+  // No capability: the COMPILED DEFAULT, never a previously cached count. The
+  // function is pure in the snapshot precisely so that after Forget or after
+  // learning a DIFFERENT fan (both clear the sticky capability) the entity
+  // cannot keep the old fan's band — a stale count of 2 would map a level-2
+  // press on a fresh 3-speed fan to HIGH instead of MED (issue #31 review).
+  QC_CHECK_EQ(authority_speed_count(restored_snapshot(std::nullopt)),
+              kCompiledDefaultSpeedCount);
   // Out-of-band values cannot be produced by the core; defence in depth keeps
   // the function total anyway.
-  QC_CHECK_EQ(authority_speed_count(
-                  restored_snapshot(static_cast<::quietcool::SpeedCapability>(7)),
-                  3),
-              3);
+  QC_CHECK_EQ(authority_speed_count(restored_snapshot(
+                  static_cast<::quietcool::SpeedCapability>(7))),
+              kCompiledDefaultSpeedCount);
 }
 
 // The #31 acceptance property end to end at the mapping layer: immediately
@@ -162,10 +165,21 @@ QC_TEST("fan_feedback", "authority speed count seeds from the sticky capability"
 // command must transmit HIGH (0xBF), not MED (0xAF, which stops the fan).
 QC_TEST("fan_feedback", "level 2 maps to HIGH right after a capability-restored boot") {
   const auto count =
-      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two),
-                            3);
+      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two));
   const auto command = fan_command_from_intent(true, 2, count);
   QC_CHECK_EQ(command.outbound_command_byte(), 0xBF);
+}
+
+// The codex #31-review scenario end to end at the mapping layer: an entity
+// that learned count 2 from a 2-speed fan is re-bound to a 3-speed fan. The
+// rebinding publication carries a cleared capability, and mapping a level-2
+// press against its count must transmit MED (0xAF, correct for the default
+// 3-band), not the old fan's HIGH.
+QC_TEST("fan_feedback", "rebinding publication resets the band to the default") {
+  const auto count = authority_speed_count(restored_snapshot(std::nullopt));
+  QC_CHECK_EQ(count, kCompiledDefaultSpeedCount);
+  QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
+              0xAF);
 }
 
 }  // namespace

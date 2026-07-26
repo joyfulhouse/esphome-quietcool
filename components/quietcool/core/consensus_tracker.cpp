@@ -10,9 +10,22 @@ SpeedCapability capability_of(const FanState& state) {
 }  // namespace
 
 std::optional<Consensus> ConsensusTracker::observe(
-    const RecoveredResponse& candidate, MonotonicMs now_ms) {
+    const RecoveredResponse& candidate, MonotonicMs now_ms,
+    std::optional<std::uint8_t> own_outbound_byte) {
   if (candidate.kind == ResponseKind::Special) return std::nullopt;
-  const auto capability = capability_of(candidate.state);
+  // A frame byte-identical to our own in-flight command may be our echo, whose
+  // outbound marker bits (10) alias SpeedCapability::Two. Harvesting it would
+  // let a bridge confirm its own echo and PERSIST capability Two on a genuine
+  // 3-speed fan (then silently re-aim every Medium command to High). The frame
+  // still groups and counts — a genuine 2-speed fan's confirmation is
+  // byte-identical to the echo and must keep confirming — but its capability
+  // is treated as Unknown; 2-speed capability is instead learned from query
+  // consensus and unsolicited reports, where no local command is in flight.
+  const bool echo_indistinguishable =
+      own_outbound_byte && candidate.state.raw_byte() == *own_outbound_byte;
+  const auto capability = echo_indistinguishable
+                              ? SpeedCapability::Unknown
+                              : capability_of(candidate.state);
   if (!group_) {
     group_ = Group{candidate.state, capability, 1,
                    candidate.quality == RecoveryQuality::Exact, now_ms};

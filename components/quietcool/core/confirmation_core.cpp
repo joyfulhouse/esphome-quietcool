@@ -264,6 +264,10 @@ CoreEffects ConfirmationCore::handle_forget(MonotonicMs now_ms) {
   effects.add(RequestPersistenceEffect{{PersistenceKind::EraseProvisioning,
                                         std::nullopt, std::nullopt,
                                         std::nullopt}});
+  // Same reason as the Learned publication: the fan entity's speed count is
+  // seeded from published snapshots, and the forgotten fan's band must not
+  // keep shaping get_traits() while unprovisioned (issue #31 review).
+  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   return effects;
 }
 
@@ -293,6 +297,13 @@ CoreEffects ConfirmationCore::handle_learning_frame(ByteView input,
     effects.add(RequestPersistenceEffect{
         {PersistenceKind::SaveProvisioning, sender_, std::nullopt,
          authority_.snapshot(now_ms).speed_capability}});
+    // Publish so the fan ENTITY hears the (possibly cleared) capability too:
+    // its cached speed count is seeded from published snapshots only, and
+    // without this the previous fan's band would keep mapping level presses —
+    // and get_traits() — until the new fan's first confirmed report (issue
+    // #31 review). The gate swallows this for state purposes (authority is
+    // invalidated above), exactly like the restore-time publication.
+    effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   } else if (event.kind == LearnEventKind::AmbiguousRejected) {
     // Two distinct fans were heard in one window; refuse and keep whatever was
     // bound before. sender_ is left untouched, so no SaveProvisioning is

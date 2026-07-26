@@ -47,6 +47,13 @@ std::size_t persistence_count(const CoreEffects& effects,
   return count;
 }
 
+// A fan report/echo frame for the provisioned sender: 4 sender bytes, then the
+// state byte twice — the same shape confirm_manual feeds the core.
+FrameBytes report_frame(std::uint8_t raw) {
+  const auto sender = persistence_sender().bytes();
+  return FrameBytes{{sender[0], sender[1], sender[2], sender[3], raw, raw}};
+}
+
 CoreEffects confirm_manual(ConfirmationCore& core, std::uint8_t raw_state,
                            MonotonicMs start_ms) {
   core.request_manual_refresh(start_ms);
@@ -344,6 +351,75 @@ QC_TEST("persistence", "forget clears the sticky capability in RAM") {
   QC_CHECK_EQ(persistence_count(effects, PersistenceKind::EraseProvisioning),
               1U);
   QC_CHECK(!core.snapshot(1).authority.speed_capability.has_value());
+  // The clear is also PUBLISHED so the fan entity's speed count returns to
+  // the compiled default instead of keeping the forgotten fan's band (issue
+  // #31 review).
+  const auto published = published_authority(effects);
+  QC_CHECK(published.has_value());
+  QC_CHECK(!published->speed_capability.has_value());
+}
+
+// Issue #31 review (echo-aliased capability poisoning, fable PoC): a command
+// frame's marker bits (10) read as SpeedCapability::Two, so consensus built
+// from the bridge's OWN echo of its 0xAF Medium command would otherwise
+// persist capability Two on a genuine 3-speed fan — degrading the entity to 2
+// speeds across reboots and silently re-aiming every later Medium command to
+// High. A candidate byte-identical to the transaction's own outbound must
+// still CONFIRM (a genuine 2-speed confirmation is byte-identical to the
+// echo) but contribute no capability evidence.
+QC_TEST("persistence", "own-echo consensus confirms without poisoning capability") {
+  ConfirmationCore core(CoreConfig{59});
+  RestorableState restored;
+  restored.sender = persistence_sender();
+  restored.speed_capability = SpeedCapability::Three;
+  core.restore(restored, 0);
+
+  core.request_state(FanState::command(Speed::Medium, Duration::Continuous), 0);
+  const auto tx = persistence_tx(core.poll(0));
+  QC_CHECK(tx.has_value());
+  QC_CHECK_EQ(tx->payload.bytes[4], 0xAF);  // Three supports Medium: no re-aim
+  core.on_tx_started(tx->token, 0);
+  core.on_tx_complete(tx->token, 400);
+
+  const auto echo = report_frame(0xAF);
+  core.on_frame(ByteView(echo.bytes), 1300);
+  const auto effects = core.on_frame(ByteView(echo.bytes),
+                                     1300 + kMinIndependentCandidateGapMs);
+  const auto snapshot = core.snapshot(1400);
+  QC_CHECK_EQ(snapshot.last_transaction_outcome.value(),
+              TransactionOutcome::Confirmed);
+  QC_CHECK_EQ(persistence_count(effects, PersistenceKind::SaveSpeedCapability),
+              0U);
+  QC_CHECK_EQ(snapshot.authority.speed_capability.value(),
+              SpeedCapability::Three);
+}
+
+// The echo filter must key on the byte match, not on "a transaction exists":
+// a genuine 3-speed report (0xEF, capability bits 11, canonically equal to the
+// requested Medium) heard in the same post-command window still harvests AND
+// persists capability Three. A filter that muted capability for the whole
+// window would leave capability unlearned forever on the command path.
+QC_TEST("persistence", "genuine report capability persists during a command window") {
+  auto core = restored_core();
+  core.request_state(FanState::command(Speed::Medium, Duration::Continuous), 0);
+  const auto tx = persistence_tx(core.poll(0));
+  QC_CHECK(tx.has_value());
+  core.on_tx_started(tx->token, 0);
+  core.on_tx_complete(tx->token, 400);
+
+  const auto report = report_frame(0xEF);
+  core.on_frame(ByteView(report.bytes), 1300);
+  const auto effects = core.on_frame(ByteView(report.bytes),
+                                     1300 + kMinIndependentCandidateGapMs);
+  const auto snapshot = core.snapshot(1400);
+  QC_CHECK_EQ(snapshot.last_transaction_outcome.value(),
+              TransactionOutcome::Confirmed);
+  const auto save =
+      persistence_request(effects, PersistenceKind::SaveSpeedCapability);
+  QC_CHECK(save.has_value());
+  QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Three);
+  QC_CHECK_EQ(snapshot.authority.speed_capability.value(),
+              SpeedCapability::Three);
 }
 
 QC_TEST("persistence", "transaction IDs exhaust without wrapping or reuse") {

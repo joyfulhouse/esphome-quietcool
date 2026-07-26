@@ -273,7 +273,7 @@ QC_TEST("preferences", "restored capability reaches the publisher before any RF"
   QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Two);
 
   // A level-2 press mapped against the seeded count transmits HIGH (0xBF).
-  const auto count = authority_speed_count(*publisher.last, 3);
+  const auto count = authority_speed_count(*publisher.last);
   QC_CHECK_EQ(count, 2);
   QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
               0xBF);
