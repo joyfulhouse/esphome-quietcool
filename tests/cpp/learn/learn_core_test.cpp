@@ -49,12 +49,21 @@ std::optional<RefusalReason> refusal_reason(const CoreEffects& effects) {
   return std::nullopt;
 }
 
+SenderId bound_sender() { return SenderId::from_be_u32(0xCB004739U).value(); }
+
 ConfirmationCore provisioned_core() {
   ConfirmationCore core(CoreConfig{23});
   RestorableState restored;
-  restored.sender = SenderId::from_be_u32(0xCB004739U).value();
+  restored.sender = bound_sender();
   core.restore(restored, 0);
   return core;
+}
+
+std::optional<TxRequest> tx_request(const CoreEffects& effects) {
+  for (std::size_t index = 0; index < effects.size(); ++index)
+    if (const auto* burst = std::get_if<RequestTxBurst>(&effects[index]))
+      return burst->request;
+  return std::nullopt;
 }
 
 // Drives an unprovisioned core through a full, legitimate Learn of fan `id`:
@@ -148,6 +157,129 @@ QC_TEST("learn", "learn proceeds on an unprovisioned core") {
   const auto snapshot = core.snapshot(5);
   QC_CHECK_EQ(snapshot.state, CoordinatorState::LearningAwaitingFirst);
   QC_CHECK(snapshot.learning.active);
+}
+
+// The refusal contract is "touch NOTHING", and the cheap way to violate it is
+// to run one of handle_learn's teardown lines (window_.reset(),
+// recovery_.cancel(), authority_.invalidate(), consensus_.reset()) before the
+// sender_ gate instead of after. The four tests below pin the contract from
+// non-idle trajectories where each of those mutations is observable:
+// a half-collected confirmation window, confirmed authority, and both
+// scheduler-driven recovery wait states (whose poll path only advances when
+// the scheduler still holds the due event — cancelling strands them forever).
+
+QC_TEST("learn", "refused learn leaves an in-flight confirmation window intact") {
+  auto core = provisioned_core();
+  core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
+  const auto cmd = tx_request(core.poll(0));
+  QC_CHECK(cmd.has_value());
+  core.on_tx_started(cmd->token, 0);
+  core.on_tx_complete(cmd->token, 400);
+  const auto response = command(0x39, 0xDF);
+  core.on_frame(ByteView(response), 1105);  // first independent candidate
+
+  const auto effects = core.request_learn(LearnMode::Manual, 1120);
+  QC_CHECK(refusal_reason(effects) == RefusalReason::AlreadyProvisioned);
+  const auto during = core.snapshot(1120);
+  QC_CHECK_EQ(during.state, CoordinatorState::PostCommandListening);
+  QC_CHECK(during.transaction.has_value());
+  QC_CHECK(!during.learning.active);
+
+  // The candidate heard before the refused Learn must still count: the second
+  // sighting completes consensus exactly as if Learn had never been pressed.
+  core.on_frame(ByteView(response), 1105 + kMinIndependentCandidateGapMs);
+  const auto after = core.snapshot(1105 + kMinIndependentCandidateGapMs);
+  QC_CHECK(after.last_transaction_outcome.has_value());
+  QC_CHECK(after.last_transaction_outcome == TransactionOutcome::Confirmed);
+}
+
+QC_TEST("learn", "refused learn does not invalidate confirmed authority") {
+  auto core = provisioned_core();
+  core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
+  const auto cmd = tx_request(core.poll(0));
+  QC_CHECK(cmd.has_value());
+  core.on_tx_started(cmd->token, 0);
+  core.on_tx_complete(cmd->token, 400);
+  const auto response = command(0x39, 0xDF);
+  core.on_frame(ByteView(response), 1105);
+  core.on_frame(ByteView(response), 1105 + kMinIndependentCandidateGapMs);
+  core.poll(2901);  // tail expires -> Idle with confirmed authority
+  const auto before = core.snapshot(2950);
+  QC_CHECK_EQ(before.state, CoordinatorState::Idle);
+  const auto* confirmed_before =
+      std::get_if<ConfirmedStateAuthority>(&before.authority.state);
+  QC_CHECK(confirmed_before != nullptr);
+
+  const auto effects = core.request_learn(LearnMode::Manual, 3000);
+  QC_CHECK(refusal_reason(effects) == RefusalReason::AlreadyProvisioned);
+  const auto after = core.snapshot(3000);
+  const auto* confirmed_after =
+      std::get_if<ConfirmedStateAuthority>(&after.authority.state);
+  QC_CHECK(confirmed_after != nullptr);
+  if (confirmed_before != nullptr && confirmed_after != nullptr) {
+    QC_CHECK_EQ(confirmed_after->revision, confirmed_before->revision);
+    QC_CHECK(confirmed_after->state.speed() == confirmed_before->state.speed());
+  }
+  QC_CHECK_EQ(after.authority.revision, before.authority.revision);
+}
+
+QC_TEST("learn", "refused learn leaves a recovery quiet-wait cycle intact") {
+  auto core = provisioned_core();
+  const auto oem = FrameCodec::encode_query(bound_sender());
+  core.on_frame(ByteView(oem.bytes), 0);  // exact OEM query -> OemHoldoff
+  core.poll(kOemHoldoffMs);
+  QC_CHECK_EQ(core.snapshot(kOemHoldoffMs).state,
+              CoordinatorState::RecoveryQuietWait);
+  const auto before = core.snapshot(kOemHoldoffMs).recovery;
+
+  const auto effects = core.request_learn(LearnMode::Manual, kOemHoldoffMs + 50);
+  QC_CHECK(refusal_reason(effects) == RefusalReason::AlreadyProvisioned);
+  const auto after = core.snapshot(kOemHoldoffMs + 50);
+  QC_CHECK_EQ(after.state, CoordinatorState::RecoveryQuietWait);
+  QC_CHECK(after.recovery.cause.has_value());
+  QC_CHECK_EQ(after.recovery.phase, before.phase);
+  QC_CHECK_EQ(after.recovery.due_ms, before.due_ms);
+  QC_CHECK_EQ(after.recovery.expires_ms, before.expires_ms);
+
+  // The scheduled recovery query must still fire at its due time.
+  core.poll(kOemRecoveryQuietMs);
+  const auto query = tx_request(core.poll(kOemRecoveryQuietMs));
+  QC_CHECK(query.has_value());
+  if (query)
+    QC_CHECK(query->reason == TxReason::RecoveryQueryInitial);
+}
+
+QC_TEST("learn", "refused learn leaves a recovery retry-wait cycle intact") {
+  auto core = provisioned_core();
+  const auto oem = FrameCodec::encode_query(bound_sender());
+  core.on_frame(ByteView(oem.bytes), 0);
+  core.poll(kOemHoldoffMs);
+  core.poll(kOemRecoveryQuietMs);
+  const auto q1 = tx_request(core.poll(kOemRecoveryQuietMs));
+  QC_CHECK(q1.has_value());
+  core.on_tx_started(q1->token, kOemRecoveryQuietMs);
+  core.on_tx_complete(q1->token, kOemRecoveryQuietMs + 100);
+  core.poll(kOemRecoveryQuietMs + 1300);  // miss query 1 -> response tail
+  core.poll(kOemRecoveryQuietMs + 2600);  // tail expires -> RecoveryRetryWait
+  QC_CHECK_EQ(core.snapshot(kOemRecoveryQuietMs + 2600).state,
+              CoordinatorState::RecoveryRetryWait);
+  const auto before = core.snapshot(kOemRecoveryQuietMs + 2600).recovery;
+
+  const auto effects =
+      core.request_learn(LearnMode::Manual, kOemRecoveryQuietMs + 2650);
+  QC_CHECK(refusal_reason(effects) == RefusalReason::AlreadyProvisioned);
+  const auto after = core.snapshot(kOemRecoveryQuietMs + 2650);
+  QC_CHECK_EQ(after.state, CoordinatorState::RecoveryRetryWait);
+  QC_CHECK_EQ(after.recovery.phase, before.phase);
+  QC_CHECK_EQ(after.recovery.due_ms, before.due_ms);
+  QC_CHECK_EQ(after.recovery.queries_started, before.queries_started);
+
+  // The retry must still fire at the preserved due time.
+  core.poll(before.due_ms);
+  const auto q2 = tx_request(core.poll(before.due_ms));
+  QC_CHECK(q2.has_value());
+  if (q2)
+    QC_CHECK(q2->reason == TxReason::RecoveryQueryRetry);
 }
 
 QC_TEST("learn", "forget then learn is the explicit re-learn override") {
