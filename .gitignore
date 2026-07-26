@@ -20,5 +20,3 @@ __pycache__/
 
 # OS
 .DS_Store
-__pycache__/
-.esphome/
