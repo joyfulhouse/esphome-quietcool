@@ -50,13 +50,18 @@ openssl rand -base64 32   # paste the output as quietcool_lora32_api_key
 
 ## 3. Flash over USB
 
-Antenna on first. Then:
+Antenna on first. Then flash the **C++ core build** — the maintained, primary
+firmware for the TTGO LoRa32 V2.1 (SX1278):
 
 ```bash
-.venv/bin/esphome run quietcool-lora32.yaml     # TTGO LoRa32 V2.1
-# or
-.venv/bin/esphome run quietcool-lora-v3.yaml    # Heltec/HiLetgo V3
+.venv/bin/esphome run quietcool-cpp-lora32.yaml   # TTGO LoRa32 V2.1 (SX1278)
 ```
+
+The Heltec/HiLetgo **V3 (SX1262)** board has no C++ build yet, so it runs the
+**legacy YAML build** (`.venv/bin/esphome run quietcool-lora-v3.yaml`) — whose
+pairing differs (two presses, on-OLED prompt); see the "legacy YAML build"
+sections in the [README](README.md#learn-mode--porting-to-your-own-fan). The
+rest of this guide describes the C++ build.
 
 Pick your serial port when prompted. The first compile takes a few minutes;
 every later update can go over the air (same command, choose OTA).
@@ -79,45 +84,55 @@ Home Assistant should auto-discover the device (Settings → Devices & Services
 
 ## 5. Pair with your fan (learn mode)
 
-The firmware ships unprovisioned — no sender ID is hard-coded — and boots
-straight into learn mode: the OLED shows **`LEARN / REMOTE X2`**.
+The firmware ships unprovisioned (`quietcool_sender_id: "0"`) — no sender ID is
+hard-coded. Unlike the legacy build, the C++ build does **not** auto-open a learn
+window at boot and shows **no OLED learn prompt**; you start learning explicitly
+and watch progress in Home Assistant.
 
-1. Stand near the controller with the fan's OEM remote.
-2. Press any speed button (e.g. **Low**) on the remote.
-3. Wait at least one second, then press a button again (e.g. **Off**), within
-   60 seconds of the first press.
-4. The OLED flashes **`LEARNED / ID SAVED`** and the `Remote Sender ID`
-   sensor in HA shows your fan's four-byte ID (always beginning `CB`).
+1. In HA, open the device, enable the **`Learn Remote ID`** button (Configuration
+   section, disabled by default), and press it to open the learn window. (You
+   can also hold the board's PRG button 5–10 s.)
+2. Stand near the controller and **operate the fan you are pairing with its own
+   OEM remote — press a real speed/duration button about three times, roughly a
+   second apart**, all within 60 seconds.
+3. Watch the device **logs**
+   (`.venv/bin/esphome logs quietcool-cpp-lora32.yaml`) and the
+   `Command Confirmation Status` sensor. On success the fan's four-byte ID
+   (always beginning `CB`) is bound and persisted to flash; it survives reboots
+   and OTA.
 
-That's it — the ID is persisted to flash and survives reboots and OTA updates.
-Two *separate* presses are required by design (a two-burst neighbor guard), so
-a stray frame from a neighbor's installation can never pair itself. Full
-details, including re-arming learn later and `Forget Remote ID`, are in the
+**Why three presses, and why operate the fan.** The C++ build binds only after
+**three independent sightings** of the same remote — each at least 600 ms after
+the last one it counted — so a single burst of frames counts once and **two
+presses is not enough**. Operating the fan itself helps, because the fan's own
+~1.2 s status self-reports count as extra sightings. If a *different* `CB` fan
+is heard during the window (a neighbor's, or your other unit), the controller
+**aborts and keeps whatever ID was already bound** rather than risk binding the
+wrong fan — so make sure the fan you want is the one actually transmitting. To
+re-pair later, press `Learn Remote ID` again; `Forget Remote ID` clears the
+stored ID. Full details are in the
 [README's learn-mode section](README.md#learn-mode--porting-to-your-own-fan).
 
 ## 6. Try it
 
 - In HA, turn **QuietCool Fan** on and pick a speed that your fan actually
-  supports. The entity statically exposes Low / Medium / High, while the
-  `Fan Speed Capability` diagnostic learns what the receiver reports after a
-  confirmed exchange; it cannot dynamically hide Medium on a two-speed fan.
-  The fan responds like the OEM remote pressed the button (same frames, same
-  3× burst). The request does not optimistically change the fan entity; wait
-  for `Fan State Known` plus the requested entity state before treating it as
-  physical success.
+  supports. The entity statically exposes Low / Medium / High and cannot hide
+  Medium on a two-speed fan. The fan responds like the OEM remote pressed the
+  button (same frames, same 3× burst). The request does not optimistically
+  change the fan entity; wait for `Fan State Known` plus the requested entity
+  state before treating it as physical success.
 - Press a button on the **OEM remote**: the controller records it in RF
   diagnostics, cancels conflicting local work, and never echoes it over RF.
   It deliberately does not update the safety-facing fan entity from the
   command alone, because hearing the command does not prove that the fan
   accepted it. Press **Refresh Fan State** to request query-consensus evidence.
   A downstream HA automation is a separate explicit command source.
-- The **Fan Timer** select arms the OEM countdown at the fan's current speed —
-  pick 1 / 2 / 4 / 8 / 12 hours. `None` is a safe no-op because the protocol
-  has no proven non-actuating “clear timer” command; explicitly select a fan
-  speed to send continuous mode instead. The select and OLED countdown update
-  only after this controller's own timer command is query-confirmed. A passive
-  command or a manual Refresh report showing an active timer has unknown age
-  and cannot authorize a countdown.
+- **Timers.** The C++ build does not yet expose a Fan Timer *select* entity;
+  send timed modes from the OEM remote. The read-only `Timer Remaining` sensor
+  and the OLED countdown reflect a timer only after this controller's own
+  exchange is query-confirmed (gated by `Timer State Known`); a passively heard
+  report showing an active timer has unknown age and cannot authorize a
+  countdown.
 
 ## 7. Optional: temperatures on the OLED
 
@@ -147,28 +162,30 @@ learn its own remote. The pattern is in
 
 ## Entity reference
 
+These are the entities on the **C++ build** (`quietcool-cpp-lora32.yaml`). The
+legacy YAML build exposes a different, larger diagnostic set (a Fan Timer
+select, `Remote Sender ID`, TX/RX counters, `Last TX Command`, and more).
+
 | Entity | Type | Purpose |
 | --- | --- | --- |
 | `QuietCool Fan` | fan | Off / Low / Medium / High — the only fan control |
-| `Fan Timer` | select | OEM timer at the current speed: 1 / 2 / 4 / 8 / 12 h; `None` sends no RF; published only while timer state is known |
-| `Timer Remaining` | sensor | Confirmed countdown in minutes (also rendered as `HH:MM:SS` on the OLED) |
+| `Timer Remaining` | sensor | Confirmed countdown in minutes (also on the OLED) |
 | `Fan State Known` | binary sensor (diagnostic) | On only when the fan entity is backed by correlated physical evidence |
 | `Fan Confirmed Off` | binary sensor (diagnostic) | Atomic Off assertion; false combines running and unknown |
-| `Timer State Known` | binary sensor (diagnostic) | On only when timer metadata/countdown is backed by correlated physical evidence |
+| `Timer State Known` | binary sensor (diagnostic) | On only when timer-program metadata is backed by correlated physical evidence |
+| `Fan Timer Remaining Known` | binary sensor (diagnostic) | On only when the remaining-time countdown is correlated evidence |
+| `Command Confirmation Status` | text sensor | Pending, confirmed, mismatch, refused, or bounded failure |
+| `Fan Evidence Source` | text sensor | Which exchange last produced authoritative state (boot / manual / recovery query, post-command consensus, …) |
 | `Refresh Fan State` | button | Non-energizing status query using response consensus; active timers remain unknown-age |
-| `Learn Remote ID` | button (config, disabled by default) | Re-arm a 120 s learn window |
-| `Forget Remote ID` | button (config, disabled by default) | Erase the stored ID and re-enter learn mode |
-| `Remote Sender ID` | text sensor | The learned four-byte ID (`CB …`) |
-| `TX Count`, `RX Valid Count`, `RX Rejected Count` | sensors | RF diagnostics |
-| `Last TX Command`, `Last Valid RX Frame` | text sensors | RF debugging |
+| `Learn Remote ID` | button (config, disabled by default) | Open a learn window (see §5) |
+| `Forget Remote ID` | button (config, disabled by default) | Erase the stored ID and return to learn mode |
 | `Battery Voltage` / `Battery Level` | sensors | On-board LiPo monitoring |
-| `WiFi Signal`, `Uptime`, `IP Address`, `Restart`, `Status LED` | misc | Housekeeping (`Status LED` under Configuration) |
+| `WiFi Signal`, `Uptime`, `IP Address`, `Restart` | misc | Housekeeping |
 
 The `Learn Remote ID` and `Forget Remote ID` buttons live in the device's
-**Configuration** section and ship **disabled by default** (pairing normally
-happens through the automatic first-boot learn window, so they're one-time
-tools). To use one, enable it first: device page → the entity → gear icon →
-*Enabled*.
+**Configuration** section and ship **disabled by default**. On the C++ build
+pairing is a deliberate action, so enable `Learn Remote ID` and press it to
+start (see §5): device page → the entity → gear icon → *Enabled*.
 
 ### Closed-loop confirmation entities
 
@@ -183,15 +200,14 @@ diagnostics expose confirmation and state knowledge:
 
 | Entity | Meaning |
 | --- | --- |
-| `Last Confirmed Fan State` | Last state reported by the fan itself |
-| `Command Confirmation Status` | Pending, confirmed, mismatch, or bounded failure |
-| `Fan Speed Capability` | Capability metadata reported by the receiver (e.g. `2-speed`) |
+| `Command Confirmation Status` | Pending, confirmed, mismatch, refused, or bounded failure |
+| `Fan Evidence Source` | Which exchange last produced authoritative state |
 | `Fan State Known` | Whether the fan entity currently represents correlated physical state |
 | `Fan Confirmed Off` | Atomic true-only-for-authoritatively-confirmed-Off signal |
-| `Timer State Known` | Whether timer metadata, select, and countdown currently represent correlated physical state |
+| `Timer State Known` | Whether timer-program metadata currently represents correlated physical state |
 
-`Last TX Command` still records only that a command was attempted;
-`Last Confirmed Fan State` is the fan's own answer. If your controller is
+The fan entity holds the last query-confirmed state, and `Fan Evidence Source`
+records how it was obtained. If your controller is
 mounted far from the fan, confirmation may intermittently time out (the fan's
 replies are much weaker than its reception). The bounded command/re-fire
 schedule still runs, but without confirmation the physical outcome is unknown;
@@ -256,23 +272,26 @@ to finish, clears obsolete queued work, and executes the latest desired action.
 
 ## Troubleshooting
 
-- **Fan doesn't react to HA commands** — check the antenna, then check
-  `Remote Sender ID`: if it reads `unset`, learn mode hasn't completed and TX
-  deliberately refuses (watch `TX Count` — it won't increment). Distance
+- **Fan doesn't react to HA commands** — check the antenna, then confirm the
+  controller is paired: if it never learned a remote, TX deliberately refuses
+  (the device log shows the refusal and `Fan State Known` stays off). Distance
   matters less than you'd think (+17 dBm reaches across a house), but metal
-  ducting between controller and fan receiver doesn't help. An incremented
-  `TX Count` proves only that a three-frame burst was sent; check
-  `Command Confirmation Status` for whether the fan actually confirmed it.
-- **Learn never confirms** — the two presses must be more than ~0.6 s and less
-  than 60 s apart, and each must be a real speed/off/timer button. If the
-  first-boot window (15 minutes) has lapsed, press `Learn Remote ID` in HA
-  (under Configuration; enable the entity first — it ships disabled) or hold
-  the board's PRG button for 5–10 s to re-arm.
+  ducting between controller and fan receiver doesn't help. Sending a command
+  only proves a burst went out; check `Command Confirmation Status` for whether
+  the fan actually confirmed it.
+- **Learn never confirms** — the C++ build needs **three** independent sightings
+  of the same remote, each ≥ ~0.6 s apart and all within 60 s, and each must be
+  a real speed/off button (not a bare status ping). **Two presses is not
+  enough.** Make sure you pressed `Learn Remote ID` first (it ships disabled
+  under Configuration — enable it, or hold the board's PRG button 5–10 s), and
+  that no *other* `CB` fan is transmitting nearby — a second sender aborts the
+  window. Operating the target fan itself helps: its ~1.2 s self-reports count
+  toward the three.
 - **HA entity doesn't follow the OEM remote** — this is intentional: a heard
-  command is diagnostics-only, not proof of fan actuation. `RX Valid Count` and
-  `Last Valid RX Frame` should still update, and **Refresh Fan State** can seek
-  authoritative consensus. If the counter does not increment, the remote may
-  be unlearned or out of RX range.
+  command is diagnostics-only, not proof of fan actuation. Use **Refresh Fan
+  State** to seek authoritative consensus. If nothing changes even after a
+  Refresh, the remote may be unlearned or out of RX range (the device log shows
+  received frames).
 - **Blank OLED on the V3 board** — the V3's display is powered through Vext;
   the config drives it, but early clones vary. See the `PIN CONFIDENCE` notes
   in `quietcool-lora-v3.yaml` and [docs/hardware.md](docs/hardware.md).
@@ -280,4 +299,4 @@ to finish, clears obsolete queued work, and executes the latest desired action.
   (mDNS across VLANs). Use the device's IP directly and reserve it in DHCP.
 
 Still stuck? Open a [GitHub issue](https://github.com/joyfulhouse/esphome-quietcool/issues)
-with the device log (`.venv/bin/esphome logs quietcool-lora32.yaml`).
+with the device log (`.venv/bin/esphome logs quietcool-cpp-lora32.yaml`).

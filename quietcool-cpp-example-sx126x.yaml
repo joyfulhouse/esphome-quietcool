@@ -1,6 +1,9 @@
-# Stage-2 compile-only example, SX126x variant (Heltec V3 / SX1262). Built
-# from quietcool-cpp-example.yaml by applying its own documented SX126x
-# selection steps. Not a deployment or flashing target.
+# Compile-only example, SX126x variant (Heltec V3 / SX1262). Built from
+# quietcool-cpp-example.yaml by applying its documented SX126x selection steps.
+# Not a deployment or flashing target — there is no deployable C++ config for
+# this board yet, so V3 hardware currently runs the legacy build
+# (quietcool-lora-v3.yaml). The primary deployable C++ config is
+# quietcool-cpp-lora32.yaml (TTGO LoRa32 / SX1278).
 esphome:
   name: quietcool-cpp-example-sx126x
   friendly_name: "QuietCool C++ Example SX126x"

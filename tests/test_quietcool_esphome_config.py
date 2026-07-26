@@ -9,10 +9,10 @@ V3_CONFIG = ROOT / "quietcool-lora-v3.yaml"
 SECRETS = ROOT / "secrets.yaml"
 README = ROOT / "README.md"
 CONFIRMED_FAN_HEADER = (
-    ROOT / "components" / "quietcool_confirmed_fan" / "quietcool_confirmed_fan.h"
+    ROOT / "components" / "quietcool_legacy_yaml" / "quietcool_legacy_yaml.h"
 )
 CONFIRMED_FAN_PLATFORM = (
-    ROOT / "components" / "quietcool_confirmed_fan" / "fan.py"
+    ROOT / "components" / "quietcool_legacy_yaml" / "fan.py"
 )
 
 DISPLAY_TEMPERATURE_SENSORS = (
@@ -674,7 +674,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         for config_name, text in (("SX1278", self.text), ("SX1262", self.v3_text)):
             with self.subTest(config=config_name):
                 fan_block = top_level_block(text, "fan")
-                self.assertIn("platform: quietcool_confirmed_fan", fan_block)
+                self.assertIn("platform: quietcool_legacy_yaml", fan_block)
                 self.assertNotIn("platform: template", fan_block)
                 self.assertNotIn("on_state:", fan_block)
                 for key, script_id in (

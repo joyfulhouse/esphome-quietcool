@@ -1,5 +1,7 @@
-# Stage-2 compile-only example. This file is not a deployment or flashing
-# target; it shows the intended config-and-wiring-only ownership shape.
+# Compile-only example: not a deployment or flashing target. It shows the
+# minimal config-and-wiring-only shape of the C++ build. For a full, flashable
+# configuration (network, display, secrets, Home Assistant entities), use the
+# primary deployable config, quietcool-cpp-lora32.yaml.
 esphome:
   name: quietcool-cpp-example
   friendly_name: "QuietCool C++ Example"

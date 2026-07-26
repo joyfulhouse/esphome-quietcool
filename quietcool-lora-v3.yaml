@@ -1,3 +1,14 @@
+# ============================================================================
+# LEGACY YAML BUILD (Heltec/HiLetgo V3 / SX1262).
+#
+# No C++ build ships for this board yet: the C++ core build currently provides
+# a deployable config for the TTGO LoRa32 / SX1278 only
+# (`quietcool-cpp-lora32.yaml`); `quietcool-cpp-example-sx126x.yaml` is a
+# compile-only SX126x reference, not a deployment target. V3 users stay on this
+# legacy YAML build (Arduino framework, the `quietcool_legacy_yaml` component)
+# for now. See README.md.
+# ============================================================================
+#
 # QuietCool Fan Controller - Heltec WiFi LoRa 32 V3 / HiLetgo "ESP32 LoRa V3
 # SX1262 0.96in OLED" port (ESP32-S3 + Semtech SX1262; same design, two
 # vendor names). NOT YET FLASHED - this is a bring-up config for a board
@@ -197,7 +208,7 @@ external_components:
   - source:
       type: local
       path: components
-    components: [quietcool_confirmed_fan]
+    components: [quietcool_legacy_yaml]
 
 # =============================================================================
 # Board: ESP32-S3, Heltec WiFi LoRa 32 V3 (HiLetgo's "ESP32 LoRa V3 SX1262"
@@ -2303,7 +2314,7 @@ interval:
 # =============================================================================
 # Fan Entity
 #
-# The local quietcool_confirmed_fan platform is confirmation-driven. control()
+# The local quietcool_legacy_yaml platform is confirmation-driven. control()
 # routes a request to one command script but deliberately does NOT mutate or
 # publish the fan entity. Only authoritative, query-correlated closed-loop
 # consensus publishes state. Passive RF and estimated timer expiry fail the
@@ -2316,7 +2327,7 @@ interval:
 # send_off decides whether that is a new transaction or joins an active one.
 # =============================================================================
 fan:
-  - platform: quietcool_confirmed_fan
+  - platform: quietcool_legacy_yaml
     name: "QuietCool Fan"
     id: quietcool_fan
     restore_mode: NO_RESTORE
