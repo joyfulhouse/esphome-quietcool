@@ -177,6 +177,7 @@ select, `Remote Sender ID`, TX/RX counters, `Last TX Command`, and more).
 | `Fan Confirmed Off` | binary sensor (diagnostic) | Atomic Off assertion; false combines running and unknown |
 | `Timer State Known` | binary sensor (diagnostic) | On only when timer-program metadata is backed by correlated physical evidence |
 | `Fan Timer Remaining Known` | binary sensor (diagnostic) | On only when the remaining-time countdown is correlated evidence |
+| `Controller Fault` | binary sensor (diagnostic, `device_class: problem`) | **On = the controller has degraded and is terminal until reboot.** Control and observation have stopped; the `*_Known` flags drop and `Command Confirmation Status` reads `unavailable`. Power-cycle or reboot the device to clear it. |
 | `Command Confirmation Status` | text sensor | Pending, confirmed, mismatch, refused, or bounded failure |
 | `Fan Evidence Source` | text sensor | Which exchange last produced authoritative state (boot / manual / recovery query, post-command consensus, …) |
 | `Refresh Fan State` | button | Non-energizing status query using response consensus; active timers remain unknown-age |

@@ -53,8 +53,10 @@ extra.</sub>
   presses on the YAML build, three on the C++ core build). No packet sniffing or
   firmware extraction needed to onboard; the ID is persisted in NVS and survives
   reboots and OTA. See [Learn mode](#learn-mode--porting-to-your-own-fan).
-- **Home Assistant native API** — a proper `fan` entity plus diagnostics
-  (TX/RX counters, last command, learned sender ID, battery voltage/level).
+- **Home Assistant native API** — a proper `fan` entity plus diagnostics: the
+  `*_Known` evidence flags, atomic `Fan Confirmed Off`, `Command Confirmation
+  Status`, `Fan Evidence Source`, a `Controller Fault` `problem` sensor that
+  flags a degraded (reboot-required) controller, and battery voltage/level.
 - **Bi-directional diagnostics, query-confirmed state** — the controller also
   *listens* and records strictly validated OEM traffic without echoing it over
   RF. A passively heard OEM command cancels conflicting local work and is

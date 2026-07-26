@@ -209,6 +209,17 @@ binary_sensor:
     controller_id: quietcool_controller
     kind: confirmed_off
     name: "Fan Confirmed Off"
+  - platform: quietcool
+    id: controller_fault
+    controller_id: quietcool_controller
+    kind: controller_fault
+    device_class: problem
+    # Raised and latched (until reboot) if the controller degrades — e.g. an
+    # effect- or callback-queue overflow (#9/M2). While set, control and
+    # observation have stopped: the known-flags above also drop and Command
+    # Confirmation Status reads "unavailable". It is the one dedicated,
+    # actionable signal that the controller has died; reboot to clear.
+    name: "Controller Fault"
 
 text_sensor:
   - platform: quietcool
