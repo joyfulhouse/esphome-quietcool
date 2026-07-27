@@ -334,7 +334,10 @@ fan's ID from its OEM remote through the existing receive path.
    its normal (unprovisioned/OFF) layout; TX still refuses while unprovisioned
    regardless. See "Manual re-learn and forget" below to re-arm afterward.
 3. Press a command on the OEM remote, wait more than 600 ms, then press the
-   remote again within 60 seconds. Two separate button presses are the
+   remote again within 60 seconds. Learn on any build can only bind a sender it
+   actually hears, so keep the target fan's remote transmitting while the
+   window is open — if another QuietCool within RF range is the only sender
+   heard, it is the one that binds. Two separate button presses are the
    required workflow: only a real state-command frame (a speed/duration
    button press) can start or confirm a candidate, so the OEM's three 45 ms
    repeats within one press cannot confirm themselves, and the passive `66
@@ -411,12 +414,19 @@ procedure differs from the legacy YAML build above in four ways:
 - **No OLED learn prompt.** This build renders no `LEARN` / `REMOTE X2` screen.
   Watch pairing progress in the device logs and on the `Learn Remote ID` button
   entity instead.
-- **Trigger the intended fan while learning.** Start Learn and then operate the
-  target fan's own remote, so that fan is guaranteed to be among the senders
-  heard — its ~1.2 s status self-reports then help reach the three-sighting bar.
-  If you do not, and a lone foreign fan on the shared band is the only sender
-  heard, the abort-on-second-sender guard has nothing to disambiguate against
-  and cannot protect you.
+- **Trigger the intended fan while learning — this is mandatory, not a tip.**
+  Start Learn and then immediately operate the target fan's own remote, so that
+  fan is guaranteed to be among the senders heard — its ~1.2 s status
+  self-reports then help reach the three-sighting bar. The abort-on-second-sender
+  guard can only protect you when the intended fan is among the senders heard:
+  if the target stays silent for the whole window and a lone foreign fan on the
+  shared band is the only sender heard, the guard has nothing to disambiguate
+  against and the controller **will bind the foreign fan** (issue #17). The
+  realistic exposure is narrow — a unit already provisioned (compiled seed or
+  earlier learn) never learns on its own, so the exposed case is first-time
+  pairing of an unprovisioned unit within RF range of another active QuietCool —
+  but that is exactly the situation a new installation is in, so keep the target
+  fan transmitting for the whole window.
 
 
 ## Provenance & license

@@ -97,7 +97,9 @@ and watch progress in Home Assistant.
    section, disabled by default), and press it to open the learn window.
 2. Stand near the controller and **operate the fan you are pairing with its own
    OEM remote — press a real speed/duration button about three times, roughly a
-   second apart**, all within 60 seconds.
+   second apart**, all within 60 seconds. Do this immediately and keep at it
+   for the whole window: Learn binds whichever fan it hears, so the target fan
+   must be transmitting while the window is open.
 3. Watch the device **logs**
    (`.venv/bin/esphome logs quietcool-cpp-lora32.yaml`) and the
    `Command Confirmation Status` sensor. On success the fan's four-byte ID
@@ -107,13 +109,20 @@ and watch progress in Home Assistant.
 **Why three presses, and why operate the fan.** The C++ build binds only after
 **three independent sightings** of the same remote — each at least 600 ms after
 the last one it counted — so a single burst of frames counts once and **two
-presses is not enough**. Operating the fan itself helps, because the fan's own
-~1.2 s status self-reports count as extra sightings. If a *different* `CB` fan
-is heard during the window (a neighbor's, or your other unit), the controller
-**aborts and keeps whatever ID was already bound** rather than risk binding the
-wrong fan — so make sure the fan you want is the one actually transmitting. To
-re-pair later, press `Learn Remote ID` again; `Forget Remote ID` clears the
-stored ID. Full details are in the
+presses is not enough**. Operating the fan itself is required, not just
+helpful: the fan's own ~1.2 s status self-reports count as extra sightings,
+and — more importantly — the safety guard depends on it. If a *different* `CB`
+fan is heard during the window (a neighbor's, or your other unit), the
+controller **aborts and keeps whatever ID was already bound** rather than risk
+binding the wrong fan. But that guard can only fire when your fan is actually
+heard: if the target fan stays silent for the whole window and a lone foreign
+fan is the only sender heard, there is no second observation to trip the
+abort, and the controller **will bind the foreign fan**. A unit that is
+already paired never learns on its own, so the exposed case is exactly this
+first pairing — an unprovisioned unit within RF range of another active
+QuietCool — which is why step 2 is part of the procedure and not a
+convenience. To re-pair later, press `Learn Remote ID` again; `Forget Remote
+ID` clears the stored ID. Full details are in the
 [README's learn-mode section](README.md#learn-mode--porting-to-your-own-fan).
 
 ## 6. Try it
