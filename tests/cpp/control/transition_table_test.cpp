@@ -24,6 +24,11 @@ bool computed_transition_is_justified(const TransitionRule& rule) {
     case ActionId::HandleLearnExpiry:
     case ActionId::HandleRadioRecovered:
       return true;
+    case ActionId::HandleLearnRequest:
+      // Owns its resulting state (issue #16): LearningAwaitingFirst when the
+      // core is unprovisioned, unchanged on the AlreadyProvisioned refusal. A
+      // fixed next-state would overwrite the refusal into a learn window.
+      return true;
     case ActionId::IssueCommandLease:
       // Owns its resulting state: CommandLeaseIssued on success, Idle on an
       // encode-failure refusal (issue #11 wedge fix).

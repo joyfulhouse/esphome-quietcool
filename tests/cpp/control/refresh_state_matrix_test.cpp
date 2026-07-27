@@ -167,11 +167,22 @@ RefreshFixture fixture_for(CoordinatorState state) {
       core.on_frame(ByteView(frame.bytes),300);
       core.on_frame(ByteView(frame.bytes),360); now_ms=360; break;
     }
-    case CoordinatorState::LearningAwaitingFirst:
-      core.request_learn(LearnMode::Manual,0); break;
+    // Since issue #16 learning states are only reachable while unprovisioned
+    // (request_learn refuses when a sender is bound), so these two fixtures
+    // start from a fresh core instead of the provisioned one.
+    case CoordinatorState::LearningAwaitingFirst: {
+      ConfirmationCore fresh(CoreConfig{97});
+      fresh.request_learn(LearnMode::Manual,0);
+      QC_CHECK_EQ(fresh.snapshot(0).state,state);
+      return {std::move(fresh),0,true};
+    }
     case CoordinatorState::LearningAwaitingSecond: {
-      core.request_learn(LearnMode::Manual,0); const auto frame=refresh_frame(0x9F);
-      core.on_frame(ByteView(frame.bytes),1); now_ms=1; break;
+      ConfirmationCore fresh(CoreConfig{97});
+      fresh.request_learn(LearnMode::Manual,0);
+      const auto frame=refresh_frame(0x9F);
+      fresh.on_frame(ByteView(frame.bytes),1);
+      QC_CHECK_EQ(fresh.snapshot(1).state,state);
+      return {std::move(fresh),1,true};
     }
     case CoordinatorState::RadioRecovery:
       core.request_state(FanState::command(Speed::Low,Duration::Continuous),0);
@@ -207,12 +218,16 @@ QC_TEST("INV-09", "Refresh is inert in every reachable non-Idle state") {
     QC_CHECK_EQ(after.recovery.due_ms,before.recovery.due_ms);
     QC_CHECK_EQ(after.learning.active,before.learning.active);
     QC_CHECK(refresh_refusal(effects).has_value());
-    const auto expected=state==CoordinatorState::Unprovisioned
+    // Learning states refuse as Unprovisioned, not Learning: since issue #16 a
+    // learn window only ever exists on an unprovisioned core, and the refresh
+    // handler checks the missing sender first. RefusalReason::Learning is
+    // retained in the enum but is no longer reachable via the public API.
+    const auto expected=(state==CoordinatorState::Unprovisioned ||
+                         state==CoordinatorState::LearningAwaitingFirst ||
+                         state==CoordinatorState::LearningAwaitingSecond)
         ? RefusalReason::Unprovisioned
         : state==CoordinatorState::OemHoldoff ? RefusalReason::Holdoff
-        : (state==CoordinatorState::LearningAwaitingFirst ||
-           state==CoordinatorState::LearningAwaitingSecond)
-            ? RefusalReason::Learning : RefusalReason::Busy;
+                                              : RefusalReason::Busy;
     QC_CHECK_EQ(*refresh_refusal(effects),expected);
     ++invoked;
   }

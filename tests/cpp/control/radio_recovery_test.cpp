@@ -269,14 +269,17 @@ QC_TEST("radio_recovery", "OEM and learning preempt bounded reset") {
                 CoordinatorState::OemHoldoff);
   }
   {
+    // Issue #16: on a provisioned unit a Learn no longer preempts anything —
+    // it is refused, and the bounded reset keeps running with its transaction.
     auto fixture = command_lease();
     fixture.core.poll(kTxLeaseStartWatchdogMs);
     fixture.core.request_learn(LearnMode::Manual,
                                kTxLeaseStartWatchdogMs + 1);
     const auto snapshot = fixture.core.snapshot(kTxLeaseStartWatchdogMs + 1);
-    QC_CHECK_EQ(snapshot.state, CoordinatorState::LearningAwaitingFirst);
-    QC_CHECK_EQ(snapshot.last_transaction_outcome.value(),
-                TransactionOutcome::CancelledForLearning);
+    QC_CHECK_EQ(snapshot.state, CoordinatorState::RadioRecovery);
+    QC_CHECK(!snapshot.last_transaction_outcome.has_value());
+    QC_CHECK(snapshot.transaction.has_value());
+    QC_CHECK(!snapshot.learning.active);
   }
 }
 

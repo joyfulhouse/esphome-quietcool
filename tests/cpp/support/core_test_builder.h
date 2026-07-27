@@ -49,6 +49,25 @@ class ConfirmationCoreTestBuilder final {
     return core;
   }
 
+  // Force-enters LearningAwaitingFirst with the sender still bound and the
+  // learn machine armed. Unreachable through the public API since issue #16
+  // (request_learn refuses while a sender is bound), but kept constructible so
+  // the ambiguity latch's keep-the-binding behaviour (#6) stays covered as
+  // defence in depth: if a future change ever reopens a learn window on a
+  // provisioned unit, the two-fan refusal must still protect the binding.
+  static ConfirmationCore make_provisioned_learning(MonotonicMs now_ms) {
+    ConfirmationCore core(CoreConfig{0});
+    RestorableState restored;
+    // A test-only sender, deliberately NOT a production fan ID.
+    restored.sender = SenderId::from_be_u32(0xCB0011AAU).value();
+    core.handle_restore(restored, 0);
+    core.learn_.start(LearnMode::Manual, now_ms);
+    core.state_ = CoordinatorState::LearningAwaitingFirst;
+    core.context_ = LearningContext{LearnMode::Manual,
+                                    core.learn_.snapshot().deadline_ms};
+    return core;
+  }
+
   static void set_next_transaction_id(ConfirmationCore& core,
                                       std::uint64_t next) {
     core.transaction_ids_ = MonotonicIdAllocator<TransactionId>(next);

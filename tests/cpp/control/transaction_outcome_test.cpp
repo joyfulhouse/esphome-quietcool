@@ -113,11 +113,18 @@ QC_TEST("transaction_outcomes", "every terminal outcome has a named core path") 
     note(TransactionOutcome::YieldedToPossibleOemCommand);
   }
   {
+    // CancelledForLearning is unreachable by design since issue #16: a live
+    // transaction implies a bound sender, and a bound sender refuses Learn
+    // before it can cancel anything. The enum member is retained (it names a
+    // persisted/telemetry value), and this block pins the replacement
+    // behaviour: the refused Learn leaves the transaction running.
     auto core = outcome_core();
     core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
     core.request_learn(LearnMode::Manual, 1);
-    check_outcome(core, TransactionOutcome::CancelledForLearning, 1);
-    note(TransactionOutcome::CancelledForLearning);
+    const auto snapshot = core.snapshot(1);
+    QC_CHECK(!snapshot.last_transaction_outcome.has_value());
+    QC_CHECK(snapshot.transaction.has_value());
+    QC_CHECK_EQ(snapshot.state, CoordinatorState::CommandPending);
   }
   {
     auto core = outcome_core();
@@ -131,7 +138,15 @@ QC_TEST("transaction_outcomes", "every terminal outcome has a named core path") 
     note(TransactionOutcome::RadioUnavailable);
   }
 
-  for (const bool outcome_reached : reached) QC_CHECK(outcome_reached);
+  // CancelledForLearning is the one outcome with no core path left: since
+  // issue #16 Learn is refused while provisioned, and only a provisioned core
+  // can own a transaction. It stays in the enum as a persisted/telemetry name.
+  for (std::size_t index = 0; index < reached.size(); ++index) {
+    if (index ==
+        static_cast<std::size_t>(TransactionOutcome::CancelledForLearning))
+      continue;
+    QC_CHECK(reached[index]);
+  }
 }
 
 }  // namespace
