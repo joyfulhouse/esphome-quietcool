@@ -32,6 +32,31 @@ _INCLUDE_USE = re.compile(r"!include\s+(\S+\.yaml)")
 _FILE_REF = re.compile(r'(?m)^\s*(?:-\s*)?file:\s*"([^"]+)"')
 _PATH_REF = re.compile(r"(?m)^\s*path:\s*(\S+)\s*$")
 _SUBSTITUTION_REF = re.compile(r"\$\{(\w+)\}")
+# A workflow job key (`  core:`), a step's `run:`, and a block scalar header.
+_JOB_KEY = re.compile(r"^ {2}([\w-]+):\s*$")
+_RUN_KEY = re.compile(r"^(\s*)(?:-\s+)?run:(.*)$")
+_BLOCK_SCALAR = re.compile(r"^[|>][+-]?\d*$")
+_CODE_FENCE = re.compile(r"^\s*```")
+_MAKE_HOST_SUITE = re.compile(r"make\s+-C\s+tests/cpp\s+([\w-]+)")
+
+# This module's own identity, derived rather than spelled out, so a rename
+# cannot orphan the "CI actually runs this suite" gate below.
+_TEST_MODULE = f"{Path(__file__).resolve().parent.name}.{Path(__file__).stem}"
+
+# The host C++ gates the workflow must run, paired with the words the README's
+# ci-coverage block uses for each. The pairing IS the binding: the README's
+# first and most safety-relevant sentence ("runs the host C++ suites") was
+# previously attached to nothing, so the entire `core` job could be deleted
+# with this suite green and the claim still published. That is the defect
+# docs/claude/2026-07-24-post-cutover-audit.md recorded as finding (b) — "CI
+# does not run the host suite, so the regression tests are not a gate" —
+# coming back unnoticed. Adding or dropping a host suite must update this
+# table and the README together.
+HOST_SUITE_GATES = (
+    ("test", "plain"),
+    ("test-adapter", "adapter"),
+    ("test-sanitized", "ASan/UBSan"),
+)
 
 
 def _git_output(*args: str) -> bytes | None:
@@ -129,12 +154,95 @@ def _checked_in_configs(test: unittest.TestCase) -> tuple[Path, ...]:
     return configs
 
 
-def _esphome_targets(source: Path) -> tuple[set[str], set[str]]:
-    """(config-validated, compiled) targets named by a workflow or checklist."""
+def _workflow_jobs(source: Path) -> dict[str, tuple[str, ...]]:
+    """{job name: the shell commands that job actually runs}.
+
+    Structural, not textual. Everything `CiCoverageTest` claims about CI is
+    derived from what CI *executes*, so a step that is commented out simply is
+    not in the result. Reading the workflow as raw text made the single most
+    ordinary way of disabling a step — commenting it out — invisible to the
+    gate, while the README kept publishing the claim that step backed.
+
+    Comments are removed with `_strip_comments` (a bare `#` split). Its worst
+    case is over-truncation, which can only DROP a command and fail loudly;
+    under-stripping would let a dead gate pass silently, which is the failure
+    direction that matters here.
+    """
+    lines = _strip_comments(source.read_text()).splitlines()
+    jobs: dict[str, list[str]] = {}
+    current: list[str] | None = None  # the job whose steps we are reading
+    in_jobs = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if line.strip() and not line[:1].isspace():  # a top-level key
+            in_jobs = line.startswith("jobs:")
+            current = None
+            continue
+        if in_jobs:
+            job = _JOB_KEY.match(line)
+            if job:
+                current = jobs.setdefault(job.group(1), [])
+                continue
+        if current is None:  # not inside a job's body
+            continue
+        run = _RUN_KEY.match(line)
+        if not run:
+            continue
+        indent, value = len(run.group(1)), run.group(2).strip()
+        if not _BLOCK_SCALAR.match(value):
+            if value:
+                current.append(value)
+            continue
+        while index < len(lines):  # a `run: |` block runs every line in it
+            nested = lines[index]
+            if nested.strip() and len(nested) - len(nested.lstrip()) <= indent:
+                break
+            if nested.strip():
+                current.append(nested.strip())
+            index += 1
+    return {name: tuple(commands) for name, commands in jobs.items()}
+
+
+def _workflow_commands(source: Path) -> tuple[str, ...]:
+    """Every shell command the workflow runs, across all jobs."""
+    return tuple(
+        command
+        for commands in _workflow_jobs(source).values()
+        for command in commands
+    )
+
+
+def _checklist_commands(source: Path) -> tuple[str, ...]:
+    """The commands a Markdown checklist asks a contributor to run.
+
+    Only fenced code blocks count, and a line commented out inside the fence
+    is not something the checklist asks anyone to run — the same rule the
+    workflow parse applies, for the same reason.
+    """
+    fenced: list[str] = []
+    inside = False
+    for line in source.read_text().splitlines():
+        if _CODE_FENCE.match(line):
+            inside = not inside
+            continue
+        if inside:
+            fenced.append(line)
+    return tuple(
+        command
+        for command in _strip_comments("\n".join(fenced)).splitlines()
+        if command.strip()
+    )
+
+
+def _esphome_targets(commands: tuple[str, ...]) -> tuple[set[str], set[str]]:
+    """(config-validated, compiled) targets named by executed commands."""
     validated: set[str] = set()
     compiled: set[str] = set()
-    for verb, target in _ESPHOME_INVOCATION.findall(source.read_text()):
-        (validated if verb == "config" else compiled).add(target)
+    for command in commands:
+        for verb, target in _ESPHOME_INVOCATION.findall(command):
+            (validated if verb == "config" else compiled).add(target)
     return validated, compiled
 
 
@@ -3127,6 +3235,14 @@ class CiCoverageTest(unittest.TestCase):
     the CONTRIBUTING pre-PR checklist) must agree with what the workflow
     actually runs. Anything CI does not compile must be compiled by the
     documented local gate instead — a target may not be silently ungated.
+
+    "What the workflow actually runs" means the commands it *executes*, parsed
+    per job (`_workflow_jobs`), never the file as text. A first version matched
+    raw text, so commenting a step out — the ordinary way to disable one — left
+    every assertion here satisfied by a dead gate. For the same reason the
+    claims cover more than `esphome` invocations: the host C++ suites and this
+    very regression suite are gated too, since a guard CI never runs gates
+    nothing.
     """
 
     def setUp(self) -> None:
@@ -3135,7 +3251,118 @@ class CiCoverageTest(unittest.TestCase):
             str(path.relative_to(ROOT)).replace("\\", "/")
             for path in self.configs
         )
-        self.validated, self.compiled = _esphome_targets(CI_WORKFLOW)
+        self.jobs = _workflow_jobs(CI_WORKFLOW)
+        self.commands = _workflow_commands(CI_WORKFLOW)
+        self.validated, self.compiled = _esphome_targets(self.commands)
+
+    def test_workflow_parses_into_jobs_that_run_commands(self) -> None:
+        # Every other gate in this class is derived from this parse, so a
+        # parser that quietly stopped seeing steps would make all of them
+        # vacuous rather than failing. Assert the shape it must keep finding.
+        self.assertGreaterEqual(
+            len(self.jobs), 3, f"workflow parsed into {sorted(self.jobs)}"
+        )
+        for job, commands in sorted(self.jobs.items()):
+            with self.subTest(job=job):
+                self.assertTrue(commands, f"job {job!r} runs no commands")
+        self.assertGreaterEqual(len(self.commands), 15)
+
+    def test_commented_out_workflow_steps_are_not_counted_as_gates(
+        self,
+    ) -> None:
+        # Commenting a step out is how CI steps are ordinarily disabled. A
+        # raw-text scan still sees one, so a disabled gate used to keep
+        # satisfying every coverage assertion below. Pin the property here so
+        # the structural parse cannot regress to text matching.
+        #
+        # BOTH shapes must be covered, because they fail differently: a whole
+        # `run:` step stops looking like a step at all, while a line inside a
+        # `run: |` block is still collected and only comment stripping drops
+        # it. Probing just the first would leave the second unguarded.
+        text = CI_WORKFLOW.read_text()
+        for step in (
+            "run: esphome config quietcool-cpp-lora32.yaml",  # a whole step
+            "cp secrets.yaml.example legacy/secrets.yaml",  # inside `run: |`
+        ):
+            with self.subTest(step=step):
+                self.assertIn(
+                    step, text, "workflow no longer runs the probed step"
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    probe = Path(tmp) / "ci.yml"
+                    probe.write_text(text.replace(step, f"# {step}"))
+                    commands = _workflow_commands(probe)
+                self.assertEqual(
+                    [command for command in commands if step in command],
+                    [],
+                    f"the commented-out step {step!r} is still counted as a "
+                    "command CI runs",
+                )
+
+    def test_commented_out_checklist_commands_are_not_counted_as_gates(
+        self,
+    ) -> None:
+        # Same property for the local gate: CONTRIBUTING.md is the ONLY thing
+        # compiling the config people actually flash, so a commented-out
+        # compile line must not satisfy `test_targets_ci_skips_...`.
+        text = CONTRIBUTING.read_text()
+        step = "esphome compile quietcool-cpp-lora32.yaml"
+        self.assertIn(step, text, "checklist no longer runs the probed step")
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "CONTRIBUTING.md"
+            probe.write_text(text.replace(step, f"# {step}"))
+            _, compiled = _esphome_targets(_checklist_commands(probe))
+        self.assertNotIn(
+            "quietcool-cpp-lora32.yaml",
+            compiled,
+            "a commented-out checklist command is still counted as a gate",
+        )
+
+    def test_ci_runs_every_host_cpp_suite_the_readme_claims(self) -> None:
+        # Binds the ci-coverage block's first sentence to the `core` job.
+        # Without this, deleting that job left the suite green while the
+        # README still advertised a gate over the confirmation core.
+        run_by_ci: set[str] = set()
+        for command in self.commands:
+            run_by_ci.update(_MAKE_HOST_SUITE.findall(command))
+        self.assertEqual(
+            run_by_ci,
+            {target for target, _ in HOST_SUITE_GATES},
+            "the host C++ suites ci.yml runs must be exactly the set the "
+            "README's ci-coverage block describes",
+        )
+        block = _ci_coverage_block(self)
+        for target, claim in HOST_SUITE_GATES:
+            with self.subTest(suite=target):
+                self.assertIn(
+                    claim,
+                    block,
+                    f"ci.yml runs `make -C tests/cpp {target}` but the "
+                    f"README ci-coverage block never says {claim!r}",
+                )
+
+    def test_ci_runs_this_regression_suite(self) -> None:
+        # Everything this class enforces is only a gate if CI runs this file.
+        # Nothing asserted that, so the `Config regression tests` step could
+        # be dropped and all of these guards would silently stop gating.
+        package, _, _ = _TEST_MODULE.partition(".")
+        runners = ("pytest", "unittest")
+        found = [
+            command
+            for command in self.commands
+            if any(runner in command for runner in runners)
+            and (
+                _TEST_MODULE in command
+                or _TEST_MODULE.replace(".", "/") in command
+                or re.search(rf"(?:^|\s){package}(?:[/\s]|$)", command)
+                or command.split()[-1] in runners
+            )
+        ]
+        self.assertTrue(
+            found,
+            f"no ci.yml step runs {_TEST_MODULE}; every gate in "
+            "CiCoverageTest would enforce nothing",
+        )
 
     def test_workflow_only_runs_configs_that_exist(self) -> None:
         # A relocation that misses ci.yml leaves the workflow pointing at a
@@ -3207,7 +3434,9 @@ class CiCoverageTest(unittest.TestCase):
     ) -> None:
         # No target may be ungated everywhere: if CI does not build it, the
         # pre-PR checklist must.
-        checklist_validated, checklist_compiled = _esphome_targets(CONTRIBUTING)
+        checklist_validated, checklist_compiled = _esphome_targets(
+            _checklist_commands(CONTRIBUTING)
+        )
         for name in sorted(set(self.names) - self.compiled):
             with self.subTest(config=name):
                 self.assertIn(name, checklist_compiled)
@@ -3219,7 +3448,12 @@ class CiCoverageTest(unittest.TestCase):
         # ESPHome resolves `!secret` against the top-level config's own
         # directory, so the legacy relocation needed a second copy under
         # legacy/. Derive that requirement instead of remembering it.
-        workflow = CI_WORKFLOW.read_text()
+        #
+        # Checked per JOB, not per file: jobs do not share a filesystem, so
+        # provisioning secrets in one job does nothing for a config another
+        # job validates. Reading the workflow as one flat string could not
+        # tell the two apart.
+        checked = 0
         for config, name in zip(self.configs, self.names):
             if not _secret_names(config):
                 continue
@@ -3227,13 +3461,21 @@ class CiCoverageTest(unittest.TestCase):
             expected = (
                 "secrets.yaml" if rel_dir == "." else f"{rel_dir}/secrets.yaml"
             )
-            with self.subTest(config=name):
-                self.assertIn(
-                    f"cp secrets.yaml.example {expected}",
-                    workflow,
-                    f"ci.yml runs esphome on {name}, which reads !secret, but "
-                    f"never provisions {expected}",
-                )
+            provision = f"cp secrets.yaml.example {expected}"
+            for job, commands in sorted(self.jobs.items()):
+                validated, compiled = _esphome_targets(commands)
+                if name not in validated | compiled:
+                    continue
+                checked += 1
+                with self.subTest(config=name, job=job):
+                    self.assertTrue(
+                        any(provision in command for command in commands),
+                        f"ci.yml job {job!r} runs esphome on {name}, which "
+                        f"reads !secret, but never provisions {expected}",
+                    )
+        # Every secret-reading config is run by some job; zero pairs would
+        # mean this test silently checked nothing.
+        self.assertGreater(checked, 0, "no job runs a config needing secrets")
 
     def test_every_secret_name_used_by_a_config_ships_in_the_example(
         self,
