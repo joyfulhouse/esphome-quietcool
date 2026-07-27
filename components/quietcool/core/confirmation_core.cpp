@@ -226,6 +226,17 @@ CoreEffects ConfirmationCore::handle_manual_refresh(ActionId action,
   return {};
 }
 CoreEffects ConfirmationCore::handle_learn(LearnMode mode, MonotonicMs now_ms) {
+  // Re-learning a bound unit requires an explicit override: Forget, then Learn
+  // (issue #16). While any sender is bound — learned or a compiled-in seed —
+  // a Learn request is refused before it touches ANYTHING: no learn window
+  // opens, no transaction is cancelled, no lease is revoked, authority and the
+  // binding stay exactly as they were, and no SaveProvisioning can follow. This
+  // makes an accidental Learn press on a provisioned unit inert instead of
+  // opening a window in which the binding could be replaced. Forget erases the
+  // sender (and suppresses the compiled seed), after which Learn proceeds as
+  // for any fresh device.
+  if (sender_)
+    return refuse(RefusalReason::AlreadyProvisioned);
   CoreEffects effects;
   if (live_tx_) {
     effects.add(RevokeTxLease{live_tx_->token});
@@ -258,7 +269,10 @@ CoreEffects ConfirmationCore::handle_forget(MonotonicMs now_ms) {
   // The binding is gone, so the fan-bound sticky capability goes with it —
   // in RAM as well as in NVS (EraseProvisioning below). Forget may precede
   // learning a DIFFERENT fan, and the old fan's capability must not re-aim
-  // that fan's commands in the meantime (issue #31).
+  // that fan's commands in the meantime (issue #31). Since issue #16 refused
+  // Learn on a bound unit, Forget is the ONLY route to another fan, which
+  // makes this the clear that matters in production: every fan that Learn
+  // subsequently binds starts from an empty band and re-proves it.
   authority_.clear_confirmed_capability();
   authority_.invalidate(AuthorityLossReason::Unprovisioned, now_ms);
   state_ = CoordinatorState::Unprovisioned;
@@ -290,6 +304,13 @@ CoreEffects ConfirmationCore::handle_learning_frame(ByteView input,
     // fan did not change. The SaveProvisioning below carries the surviving
     // value so NVS is re-bound atomically with the sender: the adapter must
     // not re-persist the old fan's capability under the new sender.
+    //
+    // Since issue #16, Learn is refused while any sender is bound, so a window
+    // only ever opens unbound and this comparison always takes the clearing
+    // arm — Forget, the sole route here, has already cleared the value. Both
+    // arms are kept (and covered from a force-built provisioned learn window)
+    // so that the rule stays correct on its own terms: it is the change of
+    // BINDING, not the pressing of Learn, that invalidates a fan's band.
     if (!(sender_ == event.sender)) authority_.clear_confirmed_capability();
     sender_ = event.sender;
     recovery_.cancel();

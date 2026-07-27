@@ -91,6 +91,12 @@ void QuietCoolComponent::request_manual_refresh() {
 
 void QuietCoolComponent::request_learn(::quietcool::LearnMode mode) {
   if (degraded_) return;
+  // The learn ambiguity abort (issue #6) only protects pairing when the
+  // intended fan is among the senders heard; a lone foreign fan binds
+  // unopposed (issue #17), so the operator must keep the target transmitting.
+  ESP_LOGW(kTag,
+           "Learn window opening: operate the target fan's own remote for the "
+           "whole window so the intended fan is among the senders heard");
   const auto now_ms = clock_.now_ms();
   apply_effects(core_.request_learn(mode, now_ms), now_ms);
 }
