@@ -54,9 +54,26 @@ substitutions:
   display_outdoor_entity: "sensor.quietcool_display_outdoor"
   display_attic_entity: "sensor.quietcool_display_attic"
 
-  # Path to the C++ component tree, relative to this file. The components ship
-  # in this repository, so a fresh clone builds with no path edits.
+  # Where this repository's C++ tree and binary assets live.
+  #
+  # ⚠️ ESPHome resolves both of these against the MAIN config's directory
+  # (CORE.relative_config_path -> CORE.config_dir), NOT against this file's
+  # directory. Building this file directly, the two are the same and the
+  # defaults below are correct with no edits.
+  #
+  # Including this file as a package from a config in ANOTHER directory is
+  # supported, but that wrapper MUST override both to point at wherever this
+  # repository is checked out relative to it — e.g. for a wrapper that sits
+  # beside an `external/esphome-quietcool` submodule:
+  #
+  #   substitutions:
+  #     cpp_components_root: "external/esphome-quietcool/components"
+  #     assets_root: "external/esphome-quietcool"
+  #
+  # (`!secret` needs no such treatment: ESPHome falls back to the main
+  # config's secrets.yaml when an included file's directory has none.)
   cpp_components_root: "components"
+  assets_root: "."
 
 esphome:
   name: ${device_name}
@@ -383,7 +400,7 @@ font:
     id: font_temp_small
     size: 11
     glyphs: "0123456789°F-"
-  - file: "fonts/materialdesignicons-webfont.ttf"
+  - file: "${assets_root}/fonts/materialdesignicons-webfont.ttf"
     id: font_icons
     size: 13
     glyphs: [
@@ -407,55 +424,55 @@ font:
 image:
   - platform: file
     id: fan_frame_0
-    file: "images/fan_frame_0.png"
+    file: "${assets_root}/images/fan_frame_0.png"
     type: BINARY
   - platform: file
     id: fan_frame_1
-    file: "images/fan_frame_1.png"
+    file: "${assets_root}/images/fan_frame_1.png"
     type: BINARY
   - platform: file
     id: fan_frame_2
-    file: "images/fan_frame_2.png"
+    file: "${assets_root}/images/fan_frame_2.png"
     type: BINARY
   - platform: file
     id: fan_frame_3
-    file: "images/fan_frame_3.png"
+    file: "${assets_root}/images/fan_frame_3.png"
     type: BINARY
   - platform: file
     id: fan_frame_4
-    file: "images/fan_frame_4.png"
+    file: "${assets_root}/images/fan_frame_4.png"
     type: BINARY
   - platform: file
     id: fan_frame_5
-    file: "images/fan_frame_5.png"
+    file: "${assets_root}/images/fan_frame_5.png"
     type: BINARY
   - platform: file
     id: fan_frame_6
-    file: "images/fan_frame_6.png"
+    file: "${assets_root}/images/fan_frame_6.png"
     type: BINARY
   - platform: file
     id: fan_frame_7
-    file: "images/fan_frame_7.png"
+    file: "${assets_root}/images/fan_frame_7.png"
     type: BINARY
   - platform: file
     id: fan_frame_8
-    file: "images/fan_frame_8.png"
+    file: "${assets_root}/images/fan_frame_8.png"
     type: BINARY
   - platform: file
     id: fan_frame_9
-    file: "images/fan_frame_9.png"
+    file: "${assets_root}/images/fan_frame_9.png"
     type: BINARY
   - platform: file
     id: fan_frame_10
-    file: "images/fan_frame_10.png"
+    file: "${assets_root}/images/fan_frame_10.png"
     type: BINARY
   - platform: file
     id: fan_frame_11
-    file: "images/fan_frame_11.png"
+    file: "${assets_root}/images/fan_frame_11.png"
     type: BINARY
   - platform: file
     id: fan_off_frame
-    file: "images/fan_off.png"
+    file: "${assets_root}/images/fan_off.png"
     type: BINARY
 
 # RF activity instrumentation. Added 2026-07-25 while diagnosing why the C++
