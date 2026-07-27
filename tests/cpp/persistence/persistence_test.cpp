@@ -37,6 +37,15 @@ std::optional<AuthoritySnapshot> published_authority(
   return std::nullopt;
 }
 
+std::optional<CoreEvent> core_event(const CoreEffects& effects,
+                                    CoreEventKind kind) {
+  for (std::size_t index = 0; index < effects.size(); ++index) {
+    const auto* publish = std::get_if<PublishCoreEvent>(&effects[index]);
+    if (publish && publish->event.kind == kind) return publish->event;
+  }
+  return std::nullopt;
+}
+
 std::size_t persistence_count(const CoreEffects& effects,
                               PersistenceKind kind) {
   std::size_t count = 0;
@@ -420,6 +429,73 @@ QC_TEST("persistence", "genuine report capability persists during a command wind
   QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Three);
   QC_CHECK_EQ(snapshot.authority.speed_capability.value(),
               SpeedCapability::Three);
+}
+
+// Issue #31 review: the worst-case CONFIRMING-PROMOTE reduction emits four
+// effects — SaveRememberedSpeed, SaveSpeedCapability, PublishAuthority and
+// TransactionFinished — which is exactly CoreEffects::kCapacity. Its production
+// trajectory is the FIRST command to a freshly LEARNED fan: nothing is
+// remembered and no capability is known, so one genuine confirming report
+// changes both, and the transaction closes in the same reduction.
+//
+// CoreEffects::add() fails closed on the fifth effect and every caller ignores
+// its return, so anything that grows this path drops an effect in silence. The
+// other tests here read the outcome out of the SNAPSHOT, which is written
+// before the effect is appended — so a dropped TransactionFinished leaves them
+// green while Home Assistant is never told the command finished. Pin the whole
+// batch instead: the exact count, and every one of the four read back out of
+// the effects.
+QC_TEST("persistence", "confirming promote of a learned fan fills the effect batch") {
+  ConfirmationCore core(CoreConfig{59});  // unprovisioned: nothing remembered
+  core.request_learn(LearnMode::Manual, 0);
+  // kLearnMinSightings independent sightings bind the fan. The beacon carries
+  // the outbound command marker (learnable_sender demands it), so binding
+  // teaches the core nothing about remembered speed or capability — the two
+  // values the confirming report below must both move.
+  const auto beacon = report_frame(0x9F);
+  for (std::uint8_t sighting = 0; sighting < kLearnMinSightings; ++sighting)
+    core.on_frame(ByteView(beacon.bytes), 1 + sighting * kLearnSightingGapMs);
+  const MonotonicMs learned_ms = 1 + (kLearnMinSightings - 1) * kLearnSightingGapMs;
+  const auto bound = core.snapshot(learned_ms);
+  QC_CHECK_EQ(bound.state, CoordinatorState::Idle);
+  QC_CHECK(!bound.authority.remembered_speed.has_value());
+  QC_CHECK(!bound.authority.speed_capability.has_value());
+
+  core.request_state(FanState::command(Speed::High, Duration::Continuous),
+                     learned_ms);
+  const auto tx = persistence_tx(core.poll(learned_ms));
+  QC_CHECK(tx.has_value());
+  QC_CHECK_EQ(tx->payload.bytes[4], 0xBF);
+  core.on_tx_started(tx->token, learned_ms);
+  const MonotonicMs completed_ms = learned_ms + 400;
+  core.on_tx_complete(tx->token, completed_ms);
+
+  // 0xFF: capability Three in bits 11 — not the command-marker bits, so the
+  // echo filter leaves the capability evidence intact — HIGH, continuous. It is
+  // semantically the requested state, so the policy confirms and promotes.
+  const auto report = report_frame(0xFF);
+  core.on_frame(ByteView(report.bytes), completed_ms + 900);
+  const auto effects =
+      core.on_frame(ByteView(report.bytes),
+                    completed_ms + 900 + kMinIndependentCandidateGapMs);
+
+  QC_CHECK_EQ(effects.size(), std::size_t{4});
+  const auto speed_save =
+      persistence_request(effects, PersistenceKind::SaveRememberedSpeed);
+  QC_CHECK(speed_save.has_value());
+  QC_CHECK_EQ(speed_save->remembered_speed.value(), Speed::High);
+  const auto capability_save =
+      persistence_request(effects, PersistenceKind::SaveSpeedCapability);
+  QC_CHECK(capability_save.has_value());
+  QC_CHECK_EQ(capability_save->speed_capability.value(), SpeedCapability::Three);
+  const auto published = published_authority(effects);
+  QC_CHECK(published.has_value());
+  QC_CHECK_EQ(published->remembered_speed.value(), Speed::High);
+  QC_CHECK_EQ(published->speed_capability.value(), SpeedCapability::Three);
+  // Appended last, so it is the first casualty of an overflow.
+  const auto finished = core_event(effects, CoreEventKind::TransactionFinished);
+  QC_CHECK(finished.has_value());
+  QC_CHECK_EQ(finished->outcome.value(), TransactionOutcome::Confirmed);
 }
 
 QC_TEST("persistence", "transaction IDs exhaust without wrapping or reuse") {
