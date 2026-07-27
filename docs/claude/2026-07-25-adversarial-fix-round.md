@@ -158,8 +158,7 @@ stopped and refused to execute a spec because it contradicted the code.
 4. **"#6 broke the documented pairing flow" (Codex #24, amplified by the
    orchestrator).** Codex claimed the #6 Learn change contradicted the pairing
    procedure in the README. The README documents a *different build* —
-   `legacy/quietcool-lora32.yaml`, the legacy YAML state machine, which never
-   compiles
+   `quietcool-lora32.yaml`, the legacy YAML state machine, which never compiles
    `components/quietcool/` at all. The C++ core and the documented procedure were
    never the same artifact. The orchestrator amplified the claim rather than
    catching it; the implementing agent stopped, read the actual build the README

@@ -6,8 +6,7 @@ adapter correctness, adversarial hardening, DRY/simplification,
 performance/memory, test-evidence quality) plus an independent Codex
 (gpt-5.6-sol, xhigh) covering all dimensions for cross-check.
 
-Reviewed artifact: the C++ core integration branch (since merged into
-`main`) at HEAD `13a1b3e` **plus the
+Reviewed artifact: worktree `feat/cpp-core` HEAD `13a1b3e` **plus the
 uncommitted crash fixes** (5 modified sources, 3 untracked files).
 Host suite green at **147/147** at time of audit.
 
@@ -87,8 +86,7 @@ suspect looks innocent.
 **(b) CI does not run the host suite, so the regression tests are not a gate.**
 `.github/workflows/ci.yml` runs `python -m unittest
 tests.test_quietcool_esphome_config` and `esphome config`/`compile` against
-`quietcool-lora32.yaml` and `quietcool-lora-v3.yaml` (now under `legacy/`) —
-**the pre-port YAML
+`quietcool-lora32.yaml` and `quietcool-lora-v3.yaml` — **the pre-port YAML
 targets**. It never invokes `make -C tests/cpp test` and never compiles either
 C++ example.
 
@@ -495,8 +493,7 @@ it into the next necessary reflash if a future feature hits a limit.
 
 ## Remediation status (2026-07-24, after the audit)
 
-All repository-side findings are fixed and committed on the C++ core
-integration branch (since merged into `main`).
+All repository-side findings are fixed and committed on `feat/cpp-core`.
 **Nothing was flashed** — the live controller still runs the 11:26 build, and
 every change below takes effect at the next deliberate flash.
 
@@ -631,7 +628,7 @@ Established while checking whether both units run the latest build. They are
 |---|---|---|
 | Address | `10.100.8.46` | `10.100.2.62` (mDNS resolves) |
 | Config | `quietcool-cpp-lora32.yaml` | `quietcool-lora32-upstairs.yaml` |
-| Track | **C++ component** | **YAML** — wraps `legacy/quietcool-lora32.yaml` as a package |
+| Track | **C++ component** | **YAML** — wraps `quietcool-lora32.yaml` as a package |
 | Sender ID | `0xCB004739` (provisioned) | `0x00000000` — learns from its own remote |
 | Running | ESPHome 2026.7.0, built 11:26:36 | not yet banner-checked |
 | Rollback rigging | yes, now verified | **none** |

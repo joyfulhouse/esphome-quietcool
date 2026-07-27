@@ -3122,37 +3122,83 @@ class RepoLayoutTest(unittest.TestCase):
         self.assertIn("legacy/quietcool-lora32.yaml", readme)
         self.assertIn("legacy/quietcool-lora-v3.yaml", readme)
 
-    def test_no_tracked_file_carries_stale_local_references(self) -> None:
-        # The 2026-07 repo-clarity purge removed machine-local absolute
-        # paths, the long-merged development branch name, and the old
-        # component name from every tracked file. Keep them out: each one
-        # points a clone at state that exists only on the original
-        # development machine. The patterns are assembled from fragments so
-        # this test does not flag itself.
+    def test_no_tracked_file_carries_a_machine_local_path(self) -> None:
+        # An absolute path into the original development machine points a
+        # clone at a directory it cannot have, and no document — however
+        # historical — is improved by keeping one. The pattern is assembled
+        # from fragments so this test does not flag itself.
+        pattern = b"/Users/" + b"bryanli"
+        for rel, data in self._tracked_contents():
+            with self.subTest(file=rel):
+                self.assertNotIn(
+                    pattern,
+                    data,
+                    f"{rel} contains the machine-local path "
+                    f"{pattern.decode()!r}",
+                )
+
+    def test_maintained_files_do_not_name_the_pre_relocation_layout(
+        self,
+    ) -> None:
+        # The merged development branch and the pre-rename component name
+        # describe a repository layout that no longer exists, so a *current*
+        # document naming either is stale. Assembled from fragments so this
+        # test does not flag itself.
         forbidden = (
-            b"/Users/" + b"bryanli",  # machine-local absolute paths
             b"feat/" + b"cpp-core",  # merged development branch
             b"quietcool_confirmed" + b"_fan",  # renamed quietcool_legacy_yaml
         )
+        # Dated session records under docs/claude/ are exempt. They are
+        # historical documents: each states the day it was written and
+        # describes the repository as it stood then. Editing one so a lint
+        # passes falsifies the record — an audit names the branch it actually
+        # reviewed, and a design contract names the component that existed
+        # when it was written. Executable tooling in the same directory is
+        # NOT exempt; only the prose records are.
+        exempt = [
+            rel
+            for rel, _ in self._tracked_contents()
+            if rel.startswith("docs/claude/") and rel.endswith(".md")
+        ]
+        # If the directory is renamed or emptied the exemption must fail
+        # loudly rather than quietly protect nothing.
+        self.assertTrue(exempt, "no dated session records found to exempt")
+        for rel in exempt:
+            with self.subTest(exempt=rel):
+                # Keep the exemption honest: it covers dated records, so
+                # every exempted file must actually carry its date, in the
+                # filename or in a `Date:` line near the top.
+                head = (ROOT / rel).read_text()[:400]
+                self.assertRegex(
+                    Path(rel).name + "\n" + head,
+                    r"20\d\d-\d\d-\d\d",
+                    f"{rel} is exempted as a dated record but carries no date",
+                )
+        for rel, data in self._tracked_contents():
+            if rel in exempt:
+                continue
+            for pattern in forbidden:
+                with self.subTest(file=rel, pattern=pattern.decode()):
+                    self.assertNotIn(
+                        pattern,
+                        data,
+                        f"{rel} still names the pre-relocation layout: "
+                        f"{pattern.decode()!r}",
+                    )
+
+    def _tracked_contents(self) -> list[tuple[str, bytes]]:
         tracked = _tracked_files()
         if tracked is None:
             self.skipTest("not a git checkout; cannot enumerate tracked files")
         # An implausibly short listing means enumeration rotted, not that
         # the repo shrank.
         self.assertGreater(len(tracked), 20)
-        for rel in tracked:
-            path = ROOT / rel
-            if not path.is_file():  # e.g. submodule gitlink entries
-                continue
-            data = path.read_bytes()
-            for pattern in forbidden:
-                with self.subTest(file=rel, pattern=pattern.decode()):
-                    self.assertNotIn(
-                        pattern,
-                        data,
-                        f"{rel} still contains the stale reference "
-                        f"{pattern.decode()!r}",
-                    )
+        return [
+            (rel, (ROOT / rel).read_bytes())
+            for rel in tracked
+            # e.g. submodule gitlink entries
+            if (ROOT / rel).is_file()
+        ]
 
 
 class SecretsProvisioningTest(unittest.TestCase):

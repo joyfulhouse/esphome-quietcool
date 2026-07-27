@@ -27,15 +27,46 @@ SECRETS = next(
     _SECRETS_CANDIDATES[0],
 )
 
+_EXAMPLE = _REPO_ROOT / "secrets.yaml.example"
+_KEY_NAME = "quietcool_lora32_api_key"
+_ANY_API_KEY = re.compile(r"^\w*api_key:\s*[\"']?([A-Za-z0-9+/=]+)", re.M)
+
 SPEEDS = {"off": None, "low": 1, "medium": 2, "high": 3}
 
 
+def _placeholder_keys() -> set[str]:
+    """The fake API keys shipped in secrets.yaml.example.
+
+    Read from the example rather than hardcoded, so the check cannot drift
+    away from what a fresh checkout actually contains.
+    """
+    try:
+        return set(_ANY_API_KEY.findall(_EXAMPLE.read_text()))
+    except OSError:
+        return set()
+
+
 def api_key() -> str:
-    text = SECRETS.read_text()
-    m = re.search(r"^quietcool_lora32_api_key:\s*[\"']?([A-Za-z0-9+/=]+)", text, re.M)
+    if not SECRETS.is_file():
+        raise SystemExit(
+            f"no secrets file found at {SECRETS}; set QUIETCOOL_SECRETS to the "
+            f"secrets.yaml holding this device's real {_KEY_NAME}"
+        )
+    m = re.search(rf"^{_KEY_NAME}:\s*[\"']?([A-Za-z0-9+/=]+)", SECRETS.read_text(), re.M)
     if not m:
-        raise SystemExit("could not read quietcool_lora32_api_key from secrets.yaml")
-    return m.group(1)
+        raise SystemExit(f"could not read {_KEY_NAME} from {SECRETS}")
+    key = m.group(1)
+    if key in _placeholder_keys():
+        # `cp secrets.yaml.example secrets.yaml` is what CI and CONTRIBUTING.md
+        # tell you to do, so the repository's own secrets.yaml normally holds
+        # placeholders. Connecting with one fails deep inside the noise
+        # handshake; say so here instead.
+        raise SystemExit(
+            f"{SECRETS} still holds the {_KEY_NAME} placeholder from "
+            f"secrets.yaml.example — that is not a real credential. Set "
+            f"QUIETCOOL_SECRETS to the secrets.yaml for the device at {HOST}."
+        )
+    return key
 
 
 async def main() -> None:
