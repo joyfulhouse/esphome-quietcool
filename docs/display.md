@@ -4,8 +4,12 @@
 
 - **Left** — an animated `mdi:fan` glyph (12 pre-rendered rotation frames, spin
   rate proportional to speed; a static `fan-off` glyph when off), the state word
-  (OFF/LOW/MED/HIGH), and an **HH:MM:SS** timer countdown when a timer is running.
-  On the legacy YAML build (`legacy/quietcool-lora32.yaml`), Learn mode replaces the two text
+  (OFF/LOW/MED/HIGH), and a timer countdown when a timer is running. The two
+  builds differ here: the C++ core build (`quietcool-cpp-lora32.yaml`) shows
+  **H:MM**, because the core publishes remaining *minutes* and only for a
+  locally anchored, confirmed timer; the frozen legacy YAML build
+  (`legacy/quietcool-lora32.yaml`) shows **HH:MM:SS**.
+  On the legacy build, Learn mode also replaces the two text
   rows with `LEARN / REMOTE X2` (and briefly `LEARNED / ID SAVED` on success).
   The C++ core build (`components/quietcool/`) renders no learn prompt — its
   pairing progress is visible in the logs and the `Learn Remote ID` button
@@ -35,10 +39,13 @@ are pre-rendered from the `mdi:fan` glyph by `tools/generate_fan_frames.py` into
 
 ## Preview renderer
 
-`tools/render_display.py` is a pixel-accurate Pillow mirror of the display
-lambda (every draw call is tagged `KEEP IN SYNC` in both files). It renders the
-full state matrix into `docs/display-previews/` and asserts layout sanity (no
-zone overlap, no clipping). Regenerate after display edits:
+`tools/render_display.py` is a pixel-accurate Pillow mirror of the **frozen
+legacy** build's display lambda (every draw call is tagged `KEEP IN SYNC` in
+both that file and `legacy/quietcool-lora32.yaml`). The zone geometry it
+previews is shared with the C++ build, but its countdown is the legacy
+HH:MM:SS one, so it is not a preview of the C++ build's H:MM row. It renders
+the full state matrix into `docs/display-previews/` and asserts layout sanity
+(no zone overlap, no clipping). Regenerate after display edits:
 
 ```bash
 .venv/bin/python tools/generate_fan_frames.py   # if the fan icon changed
