@@ -47,10 +47,11 @@ on the [legacy YAML track](#legacy-yaml-track-frozen) for now.
 
 The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
 `sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
-knobs). CI validates and compiles all checked-in targets. The V3 has not been
-run on real hardware yet — a few pins (status-LED polarity, the VBAT ADC
-divider, and the RX filter bandwidth) are noted inline as `PIN CONFIDENCE`
-items to confirm on first bring-up. See [docs/hardware.md](docs/hardware.md).
+knobs). CI validates and compiles the V3 config on every change. That is a
+build gate, not evidence of on-air behavior: the V3 has not been run on real
+hardware yet — a few pins (status-LED polarity, the VBAT ADC divider, and the
+RX filter bandwidth) are noted inline as `PIN CONFIDENCE` items to confirm on
+first bring-up. See [docs/hardware.md](docs/hardware.md).
 
 Both need a **433 MHz antenna** connected before transmitting.
 
@@ -80,6 +81,17 @@ Then adopt the device in Home Assistant (ESPHome integration) and teach it your
 fan via [Learn mode](#learn-mode--porting-to-your-own-fan). The full
 step-by-step walkthrough — flashing, HA adoption, pairing, display setup,
 troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
+
+<!-- ci-coverage:begin -->
+**What CI gates.** Every push and pull request runs the host C++ suites (plain,
+adapter, and ASan/UBSan) and `esphome config` on every checked-in
+configuration. It then compiles `quietcool-cpp-example.yaml`,
+`quietcool-cpp-example-sx126x.yaml`, `legacy/quietcool-lora32.yaml`, and
+`legacy/quietcool-lora-v3.yaml`. CI does **not compile**
+`quietcool-cpp-lora32.yaml` or `quietcool-cpp-diag.yaml`: their display and
+entity lambdas are built only by the pre-PR checklist in
+[CONTRIBUTING.md](CONTRIBUTING.md), so compile locally before you flash.
+<!-- ci-coverage:end -->
 
 ## Features
 

@@ -33,7 +33,29 @@ FONTS_DIR = ROOT / "fonts"
 IMAGES_DIR = ROOT / "images"
 PREVIEWS_DIR = ROOT / "docs" / "display-previews"
 
-ROBOTO_TTF = ROOT / ".esphome" / "font" / "Roboto@400@False@v1.ttf"
+ROBOTO_CACHE_NAME = "Roboto@400@False@v1.ttf"
+
+
+def _roboto_candidates(root: Path) -> tuple[Path, ...]:
+    """Where ESPHome may have cached the downloaded `gfonts://Roboto`.
+
+    ESPHome writes its build cache next to the TOP-LEVEL config it was given,
+    so validating a root C++ config populates `.esphome/`, while validating the
+    frozen legacy config (moved under `legacy/` in the 2026-07 repo-clarity
+    relocation) populates `legacy/.esphome/`. Either one is a usable cache.
+    """
+    return tuple(
+        base / ".esphome" / "font" / ROBOTO_CACHE_NAME
+        for base in (root, root / "legacy")
+    )
+
+
+def _resolve_roboto(root: Path) -> Path:
+    candidates = _roboto_candidates(root)
+    return next((path for path in candidates if path.is_file()), candidates[0])
+
+
+ROBOTO_TTF = _resolve_roboto(ROOT)
 MDI_TTF = FONTS_DIR / "materialdesignicons-webfont.ttf"
 
 # =============================================================================
@@ -644,7 +666,13 @@ def build_rotation_strip() -> Image.Image:
 
 def main() -> None:
     if not ROBOTO_TTF.exists():
-        raise SystemExit(f"Roboto TTF not found at {ROBOTO_TTF} - run `esphome config` once to populate the build cache.")
+        searched = " or ".join(str(path) for path in _roboto_candidates(ROOT))
+        raise SystemExit(
+            f"Roboto TTF not found at {searched} - run "
+            "`esphome config quietcool-cpp-lora32.yaml` (or "
+            "`esphome config legacy/quietcool-lora32.yaml`) once to populate "
+            "the build cache."
+        )
     if not MDI_TTF.exists():
         raise SystemExit(f"MDI TTF not found at {MDI_TTF} - see fonts/ in the README.")
     missing_frames = [

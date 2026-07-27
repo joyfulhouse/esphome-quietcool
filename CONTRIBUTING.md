@@ -3,16 +3,27 @@
 - Run the checks before opening a PR:
   ```bash
   make -C tests/cpp test            # C++ core + adapter host suites
-  cp secrets.yaml.example secrets.yaml
-  cp secrets.yaml.example legacy/secrets.yaml
+  make -C tests/cpp test-sanitized  # same suites under ASan/UBSan
+  cp -n secrets.yaml.example secrets.yaml         # -n: never clobber real credentials
+  cp -n secrets.yaml.example legacy/secrets.yaml  # ESPHome reads !secret from the config's own dir
   .venv/bin/python -m unittest tests.test_quietcool_esphome_config -v
   .venv/bin/esphome config quietcool-cpp-example.yaml
   .venv/bin/esphome compile quietcool-cpp-example.yaml
+  .venv/bin/esphome config quietcool-cpp-lora32.yaml
+  .venv/bin/esphome compile quietcool-cpp-lora32.yaml
+  .venv/bin/esphome config quietcool-cpp-diag.yaml
+  .venv/bin/esphome compile quietcool-cpp-diag.yaml
   .venv/bin/esphome config legacy/quietcool-lora32.yaml
   .venv/bin/esphome compile legacy/quietcool-lora32.yaml
   .venv/bin/esphome config legacy/quietcool-lora-v3.yaml
   .venv/bin/esphome compile legacy/quietcool-lora-v3.yaml
   ```
+- CI does not compile `quietcool-cpp-lora32.yaml` (the config people actually
+  flash) or `quietcool-cpp-diag.yaml` — it only validates them, so the two
+  `compile` lines above are the *only* gate on their display and entity
+  lambdas. Run them, and keep the README's "What CI gates" block truthful if
+  you change `.github/workflows/ci.yml`; `CiCoverageTest` in the Python suite
+  fails if the workflow, the README block, and this checklist disagree.
 - The V3 remains an unverified hardware port, so successful config validation
   and compilation are not evidence of on-air RF parity.
 - The on-air state commands (Off `90/A0/B0`, plus `9F/AF/BF`), the 3×/45 ms
