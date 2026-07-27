@@ -10,6 +10,7 @@ constexpr std::uint32_t kPreferenceMagic = 0x51435032U;
 constexpr std::uint16_t kAdapterSchemaVersion = 1;
 constexpr std::uint8_t kHasSender = 1U << 0U;
 constexpr std::uint8_t kHasRememberedSpeed = 1U << 1U;
+constexpr std::uint8_t kHasSpeedCapability = 1U << 2U;
 constexpr std::uint32_t kFnvOffset = 2166136261U;
 constexpr std::uint32_t kFnvPrime = 16777619U;
 
@@ -47,6 +48,11 @@ EspHomePreferencesAdapter::StoredRecord EspHomePreferencesAdapter::encode(
     record.flags |= kHasRememberedSpeed;
     record.remembered_speed =
         static_cast<std::uint8_t>(*restored.remembered_speed);
+  }
+  if (restored.speed_capability) {
+    record.flags |= kHasSpeedCapability;
+    record.speed_capability =
+        static_cast<std::uint8_t>(*restored.speed_capability);
   }
   record.checksum = checksum(record);
   return record;
@@ -103,6 +109,11 @@ void EspHomePreferencesAdapter::apply_compiled_seed(
   if ((record.flags & kHasRememberedSpeed) != 0)
     candidate.remembered_speed =
         static_cast<::quietcool::Speed>(record.remembered_speed);
+  // A capability byte outside {1, 2, 3} fails restorable_state_is_valid below,
+  // which fails the whole record closed into safe_suppressed_state.
+  if ((record.flags & kHasSpeedCapability) != 0)
+    candidate.speed_capability =
+        static_cast<::quietcool::SpeedCapability>(record.speed_capability);
   if (!::quietcool::restorable_state_is_valid(candidate)) {
     restored_ = safe_suppressed_state();
     return restored_;
@@ -123,6 +134,13 @@ bool EspHomePreferencesAdapter::apply(
       if (!request.sender) return false;
       restored_.sender = request.sender;
       restored_.seed_policy = ::quietcool::SeedPolicy::AllowCompiledSeed;
+      // Provisioning re-binds the record to a fan, and the capability is a
+      // property of that fan: take whatever the core's sticky value is NOW
+      // (nullopt after learning a different fan, the retained value after
+      // re-learning the same one). Keeping the previous restored_ value here
+      // re-persisted the OLD fan's capability under the NEW sender, which
+      // then survived reboots and mis-aimed commands (issue #31).
+      restored_.speed_capability = request.speed_capability;
       durable = true;
       break;
     case ::quietcool::PersistenceKind::EraseProvisioning:
@@ -132,6 +150,14 @@ bool EspHomePreferencesAdapter::apply(
     case ::quietcool::PersistenceKind::SaveRememberedSpeed:
       if (!request.remembered_speed) return false;
       restored_.remembered_speed = request.remembered_speed;
+      break;
+    case ::quietcool::PersistenceKind::SaveSpeedCapability:
+      // Non-durable like SaveRememberedSpeed: losing it merely reopens the
+      // boot window until the next confirmed report. EraseProvisioning above
+      // resets restored_ wholesale, so Forget also erases the capability — a
+      // stale capability must not survive re-learning a different fan.
+      if (!request.speed_capability) return false;
+      restored_.speed_capability = request.speed_capability;
       break;
   }
   return ::quietcool::restorable_state_is_valid(restored_) &&

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 
 // Core-level guards for the Learn path.
 //
@@ -16,13 +17,52 @@
 // steps: Forget, then Learn. The assertions that protect the binding are that
 // a refused Learn emits no persistence effect of any kind, opens no window,
 // and leaves the core commanding the same fan.
+//
+// Issue #31: the sticky speed capability is a property of the BOUND fan, so a
+// change of binding drops it. #16 and #31 compose into one rule with two
+// halves, both pinned below:
+//   * a REFUSED Learn changes no binding, so it must not disturb the
+//     capability either — "touch NOTHING" now covers the sticky value;
+//   * the only route to another fan is Forget then Learn, and Forget already
+//     clears the capability, so the fan that comes back from Learn always
+//     starts with an empty band and re-proves it from its own reports.
+// The bound-while-learning arms of that rule are unreachable through the
+// public API since #16 and are covered through the test builder, exactly as
+// #6's ambiguity latch is.
 
 namespace quietcool {
 namespace {
 
+constexpr std::array<std::uint8_t, 6> frame_from(std::uint32_t sender_be,
+                                                 std::uint8_t state) {
+  return {static_cast<std::uint8_t>((sender_be >> 24) & 0xFFU),
+          static_cast<std::uint8_t>((sender_be >> 16) & 0xFFU),
+          static_cast<std::uint8_t>((sender_be >> 8) & 0xFFU),
+          static_cast<std::uint8_t>(sender_be & 0xFFU), state, state};
+}
+
 constexpr std::array<std::uint8_t, 6> command(std::uint8_t id,
                                               std::uint8_t state) {
-  return {0xCB, 0x00, 0x47, id, state, state};
+  return frame_from(0xCB004700U | id, state);
+}
+
+std::optional<PersistenceRequest> save_provisioning_request(
+    const CoreEffects& effects) {
+  for (std::size_t index = 0; index < effects.size(); ++index) {
+    const auto* request = std::get_if<RequestPersistenceEffect>(&effects[index]);
+    if (request && request->request.kind == PersistenceKind::SaveProvisioning)
+      return request->request;
+  }
+  return std::nullopt;
+}
+
+std::optional<AuthoritySnapshot> published_authority(
+    const CoreEffects& effects) {
+  for (std::size_t index = 0; index < effects.size(); ++index)
+    if (const auto* publish =
+            std::get_if<PublishAuthorityEffect>(&effects[index]))
+      return publish->authority;
+  return std::nullopt;
 }
 
 std::size_t save_provisioning_count(const CoreEffects& effects) {
@@ -51,10 +91,12 @@ std::optional<RefusalReason> refusal_reason(const CoreEffects& effects) {
 
 SenderId bound_sender() { return SenderId::from_be_u32(0xCB004739U).value(); }
 
-ConfirmationCore provisioned_core() {
+ConfirmationCore provisioned_core(
+    std::optional<SpeedCapability> capability = std::nullopt) {
   ConfirmationCore core(CoreConfig{23});
   RestorableState restored;
   restored.sender = bound_sender();
+  restored.speed_capability = capability;
   core.restore(restored, 0);
   return core;
 }
@@ -66,14 +108,23 @@ std::optional<TxRequest> tx_request(const CoreEffects& effects) {
   return std::nullopt;
 }
 
-// Drives an unprovisioned core through a full, legitimate Learn of fan `id`:
-// window open plus three independent sightings (issue #6 evidence bar).
-void learn_fan(ConfirmationCore& core, std::uint8_t id, MonotonicMs base_ms) {
-  core.request_learn(LearnMode::Manual, base_ms);
-  const auto frame = command(id, 0x9F);
+// Feeds an already-open learn window the three independent sightings of one
+// fan that the issue #6 evidence bar demands (kLearnMinSightings, spaced by
+// more than kLearnSightingGapMs). Returns the effects of the binding frame.
+CoreEffects learn_frames(ConfirmationCore& core,
+                         const std::array<std::uint8_t, 6>& frame,
+                         MonotonicMs base_ms) {
   core.on_frame(ByteView(frame), base_ms + 1);
   core.on_frame(ByteView(frame), base_ms + 602);
-  core.on_frame(ByteView(frame), base_ms + 1203);
+  return core.on_frame(ByteView(frame), base_ms + 1203);
+}
+
+// Drives an unprovisioned core through a full, legitimate Learn of fan `id`:
+// window open plus three independent sightings.
+CoreEffects learn_fan(ConfirmationCore& core, std::uint8_t id,
+                      MonotonicMs base_ms) {
+  core.request_learn(LearnMode::Manual, base_ms);
+  return learn_frames(core, command(id, 0x9F), base_ms);
 }
 
 QC_TEST("learn", "ambiguous relearn keeps the bound fan and writes no NVS") {
@@ -304,6 +355,111 @@ QC_TEST("learn", "forget then learn is the explicit re-learn override") {
   const auto learned = core.on_frame(ByteView(frame), 1205);
   QC_CHECK_EQ(save_provisioning_count(learned), std::size_t{1});
   QC_CHECK_EQ(core.snapshot(1205).state, CoordinatorState::Idle);
+}
+
+// Issues #16 x #31, half one. A Learn press on a provisioned unit is refused
+// before it touches anything, and the sticky capability is part of "anything":
+// the band of the fan we are still bound to must survive the press, both in
+// the snapshot (it re-aims commands and feeds get_traits) and in NVS (nothing
+// is written at all). Clearing here would narrow a 3-speed fan's entity to two
+// levels — putting MED out of reach — on the strength of a misplaced press.
+QC_TEST("learn", "a refused learn does not disturb the sticky capability") {
+  auto core = provisioned_core(SpeedCapability::Two);
+  QC_CHECK_EQ(core.snapshot(0).authority.speed_capability.value(),
+              SpeedCapability::Two);
+
+  const auto effects = core.request_learn(LearnMode::Manual, 10);
+  QC_CHECK(refusal_reason(effects) == RefusalReason::AlreadyProvisioned);
+  // The refusal is the ONLY effect: no persistence, and no publication that
+  // could re-seed the entity's speed count from a half-torn-down authority.
+  QC_CHECK_EQ(effects.size(), std::size_t{1});
+  QC_CHECK_EQ(persistence_count(effects), std::size_t{0});
+  QC_CHECK(!published_authority(effects).has_value());
+  const auto snapshot = core.snapshot(10);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::Idle);
+  QC_CHECK_EQ(snapshot.authority.speed_capability.value(),
+              SpeedCapability::Two);
+
+  // No window opened, so a foreign fan's burst is ordinary traffic: it cannot
+  // bind, and therefore cannot clear the bound fan's band either.
+  core.on_frame(ByteView(command(0x40, 0x9F)), 20);
+  QC_CHECK_EQ(core.snapshot(20).authority.speed_capability.value(),
+              SpeedCapability::Two);
+}
+
+// Issues #16 x #31, half two. Since #16 the ONLY route to another fan is
+// Forget then Learn, so this is the production re-pair trajectory: Forget
+// drops the old fan's band (and publishes the drop, because the entity's
+// speed count is seeded from published snapshots only), and the Learn that
+// follows binds the new fan with an empty band it must re-prove from its own
+// reports. The SaveProvisioning has to carry that emptiness: the adapter
+// re-encodes the whole record under the new sender, so a stale value here
+// would outlive reboots and mis-aim the new fan's commands.
+QC_TEST("learn", "forget then learn a different fan drops the old fan's capability") {
+  auto core = provisioned_core(SpeedCapability::Two);
+
+  const auto forgotten = core.request_forget(1);
+  QC_CHECK(!core.snapshot(1).authority.speed_capability.has_value());
+  const auto forget_publish = published_authority(forgotten);
+  QC_CHECK(forget_publish.has_value());
+  QC_CHECK(!forget_publish->speed_capability.has_value());
+
+  const auto learned = learn_fan(core, 0x40, 2);  // a different fan
+  QC_CHECK_EQ(core.snapshot(1205).state, CoordinatorState::Idle);
+  QC_CHECK(!core.snapshot(1205).authority.speed_capability.has_value());
+
+  const auto save = save_provisioning_request(learned);
+  QC_CHECK(save.has_value());
+  QC_CHECK_EQ(save->sender->as_be_u32(), 0xCB004740U);
+  QC_CHECK(!save->speed_capability.has_value());
+
+  const auto published = published_authority(learned);
+  QC_CHECK(published.has_value());
+  QC_CHECK(!published->speed_capability.has_value());
+}
+
+// The binding-time half of the #31 rule, driven from a force-built provisioned
+// learn window. Unreachable through the public API since #16 — Forget always
+// runs first and has already cleared the band — so both arms are pinned here
+// as defence in depth, the same way #6's ambiguity latch is above: if a future
+// change ever reopens a learn window on a provisioned unit, binding a
+// DIFFERENT fan must still drop the old fan's band, and re-binding the SAME
+// fan must still keep it (the fan did not change).
+QC_TEST("learn", "binding a different fan clears the sticky capability") {
+  auto core = ConfirmationCoreTestBuilder::make_provisioned_learning(
+      0, SpeedCapability::Two);
+  const auto effects = learn_frames(core, command(0x40, 0x9F), 0);
+  QC_CHECK_EQ(core.snapshot(1203).state, CoordinatorState::Idle);
+  QC_CHECK(!core.snapshot(1203).authority.speed_capability.has_value());
+
+  const auto save = save_provisioning_request(effects);
+  QC_CHECK(save.has_value());
+  QC_CHECK_EQ(save->sender->as_be_u32(), 0xCB004740U);
+  QC_CHECK(!save->speed_capability.has_value());
+
+  const auto published = published_authority(effects);
+  QC_CHECK(published.has_value());
+  QC_CHECK(!published->speed_capability.has_value());
+}
+
+QC_TEST("learn", "re-binding the same fan keeps the sticky capability") {
+  auto core = ConfirmationCoreTestBuilder::make_provisioned_learning(
+      0, SpeedCapability::Two);
+  const auto same = frame_from(
+      ConfirmationCoreTestBuilder::provisioned_learning_sender().as_be_u32(),
+      0x9F);
+  const auto effects = learn_frames(core, same, 0);
+  QC_CHECK_EQ(core.snapshot(1203).state, CoordinatorState::Idle);
+  QC_CHECK_EQ(core.snapshot(1203).authority.speed_capability.value(),
+              SpeedCapability::Two);
+
+  const auto save = save_provisioning_request(effects);
+  QC_CHECK(save.has_value());
+  QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Two);
+
+  const auto published = published_authority(effects);
+  QC_CHECK(published.has_value());
+  QC_CHECK_EQ(published->speed_capability.value(), SpeedCapability::Two);
 }
 
 }  // namespace

@@ -79,7 +79,22 @@ CoreEffects ConfirmationCore::reduce(const ReducerInput &input) {
     if (rule->action == ActionId::TrackCandidate) {
       const auto &candidate =
           std::get<LocalResponseCandidate>(*current->classified);
-      reached_consensus = consensus_.observe(candidate.response, current->now_ms);
+      // Only a POST-COMMAND window can contain an echo of one of our state
+      // frames: it is the only window a state burst of ours opens, and its
+      // outbound byte is exactly what the bridge last transmitted (re-aim
+      // happens at issue_command, before TX). Every other listening state was
+      // opened by a 0x66 query burst, so a state report heard there cannot be
+      // ours whatever its byte and keeps full capability weight — which is how
+      // a boot or manual query still narrows the band unambiguously (issue #31
+      // review: echo-aliased capability poisoning).
+      const auto own_outbound =
+          state_ == CoordinatorState::PostCommandListening && transaction_
+              ? std::optional<std::uint8_t>(
+                    transaction_->snapshot()
+                        .outbound_command.outbound_command_byte())
+              : std::nullopt;
+      reached_consensus =
+          consensus_.observe(candidate.response, current->now_ms, own_outbound);
       const auto fixed =
           TransitionTable::fixed_next_state(rule->next, rule->state);
       if (!reached_consensus) {

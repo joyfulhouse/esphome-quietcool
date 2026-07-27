@@ -8,8 +8,8 @@ namespace {
 
 AcceptedObservation accepted(FanState state, EvidenceSource source,
                              MonotonicMs observed_ms) {
-  return {state, SpeedCapability::Three, source,
-          EvidenceConfidence::ExactBackedConsensus, observed_ms, 2,
+  return {state, SpeedCapability::Three, CapabilityEvidence::Unambiguous,
+          source, EvidenceConfidence::ExactBackedConsensus, observed_ms, 2,
           std::nullopt, std::nullopt, std::nullopt, false};
 }
 
@@ -72,6 +72,111 @@ QC_TEST("authority", "manual revalidation keeps previous only diagnostically") {
   QC_CHECK(std::holds_alternative<RevalidatingStateAuthority>(snapshot.state));
   QC_CHECK(std::get<RevalidatingStateAuthority>(snapshot.state).previous.has_value());
   QC_CHECK(snapshot.revision > revision);
+}
+
+// Issue #31: capability describes the bound fan, not authority freshness, so
+// it must survive every invalidation and only move on confirmed evidence.
+QC_TEST("authority", "confirmed capability is sticky across invalidation") {
+  AuthorityStore authority;
+  AcceptedObservation value{FanState::observed(0x9F).value(),
+                            SpeedCapability::Two,
+                            CapabilityEvidence::Unambiguous,
+                            EvidenceSource::ManualQueryConsensus,
+                            EvidenceConfidence::ExactBackedConsensus,
+                            100,
+                            2,
+                            std::nullopt,
+                            std::nullopt,
+                            std::nullopt,
+                            false};
+  authority.promote(value, 100);
+  QC_CHECK_EQ(authority.snapshot(100).speed_capability.value(),
+              SpeedCapability::Two);
+
+  authority.invalidate(AuthorityLossReason::ExternalStateTraffic, 200);
+  QC_CHECK_EQ(authority.snapshot(200).speed_capability.value(),
+              SpeedCapability::Two);
+
+  // A report carrying no capability must not clobber the sticky value.
+  value.capability = SpeedCapability::Unknown;
+  authority.promote(value, 300);
+  QC_CHECK_EQ(authority.snapshot(300).speed_capability.value(),
+              SpeedCapability::Two);
+
+  // restore_hint reseeds wholesale: no persisted capability means none.
+  RestorableState restored;
+  authority.restore_hint(restored, 400);
+  QC_CHECK(!authority.snapshot(400).speed_capability.has_value());
+}
+
+QC_TEST("authority", "restore seeds the sticky capability") {
+  AuthorityStore authority;
+  RestorableState restored;
+  restored.speed_capability = SpeedCapability::Two;
+  authority.restore_hint(restored, 0);
+  QC_CHECK_EQ(authority.snapshot(0).speed_capability.value(),
+              SpeedCapability::Two);
+  // And it survives the immediate boot-time invalidations too.
+  authority.invalidate(AuthorityLossReason::Unprovisioned, 1);
+  QC_CHECK_EQ(authority.snapshot(1).speed_capability.value(),
+              SpeedCapability::Two);
+}
+
+// The ONLY sanctioned clear: the fan binding itself changed (Forget, or
+// learning a different fan). Freshness invalidations must never do this.
+QC_TEST("authority", "clear_confirmed_capability drops the sticky value") {
+  AuthorityStore authority;
+  auto value = accepted(FanState::observed(0x9F).value(),
+                        EvidenceSource::ManualQueryConsensus, 100);
+  value.capability = SpeedCapability::Two;
+  authority.promote(value, 100);
+  QC_CHECK_EQ(authority.snapshot(100).speed_capability.value(),
+              SpeedCapability::Two);
+  authority.clear_confirmed_capability();
+  QC_CHECK(!authority.snapshot(200).speed_capability.has_value());
+  // And a later confirmed report re-establishes it from evidence, not memory.
+  authority.promote(accepted(FanState::observed(0xDF).value(),
+                             EvidenceSource::ManualQueryConsensus, 300), 300);
+  QC_CHECK_EQ(authority.snapshot(300).speed_capability.value(),
+              SpeedCapability::Three);
+}
+
+// Issue #31 review: capability evidence that could be our own echo is admitted
+// only into an EMPTY slot. That is the whole reason a 2-speed fan — whose
+// confirming report is byte-identical to the command by construction — can
+// still teach its band, while an echo can never demote a fan whose capability
+// is already known from a frame that could not have been ours.
+QC_TEST("authority", "echo-ranked capability fills an empty slot but never overwrites") {
+  {
+    AuthorityStore authority;
+    auto value = accepted(FanState::observed(0x9F).value(),
+                          EvidenceSource::PostCommandConsensus, 100);
+    value.capability = SpeedCapability::Two;
+    value.capability_evidence = CapabilityEvidence::PossiblyOwnEcho;
+    authority.promote(value, 100);
+    QC_CHECK_EQ(authority.snapshot(100).speed_capability.value(),
+                SpeedCapability::Two);
+  }
+  {
+    AuthorityStore authority;
+    // Known Three from an unambiguous frame; an echo-ranked Two must bounce.
+    authority.promote(accepted(FanState::observed(0xDF).value(),
+                               EvidenceSource::BootQueryConsensus, 100), 100);
+    auto echo = accepted(FanState::observed(0x9F).value(),
+                         EvidenceSource::PostCommandConsensus, 200);
+    echo.capability = SpeedCapability::Two;
+    echo.capability_evidence = CapabilityEvidence::PossiblyOwnEcho;
+    authority.promote(echo, 200);
+    QC_CHECK_EQ(authority.snapshot(200).speed_capability.value(),
+                SpeedCapability::Three);
+    // ...and the mis-learned case self-heals: an unambiguous frame always wins.
+    auto genuine = accepted(FanState::observed(0x9F).value(),
+                            EvidenceSource::ManualQueryConsensus, 300);
+    genuine.capability = SpeedCapability::Two;
+    authority.promote(genuine, 300);
+    QC_CHECK_EQ(authority.snapshot(300).speed_capability.value(),
+                SpeedCapability::Two);
+  }
 }
 
 QC_TEST("authority", "restore creates diagnostic hint and no authority") {

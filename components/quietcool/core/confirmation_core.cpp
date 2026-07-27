@@ -36,6 +36,15 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
     state_ = CoordinatorState::Unprovisioned;
     context_ = UnprovisionedContext{};
   }
+  // Publish the restored snapshot (issue #31): restore previously produced no
+  // PublishAuthorityEffect at all, so the fan entity never saw the restored
+  // speed_capability and ran on its unknown-capability assumption until the
+  // boot query's reply — which lands after the API has already listed the
+  // entity, freezing the wrong band in Home Assistant's cache for the session.
+  // The publication gate swallows this for STATE purposes (authority is Unknown
+  // here), but the adapter seeds its supported speed count from it before the
+  // gate runs.
+  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   return effects;
 }
 CoreEffects ConfirmationCore::handle_radio_ready(MonotonicMs) {
@@ -257,11 +266,24 @@ CoreEffects ConfirmationCore::handle_forget(MonotonicMs now_ms) {
   consensus_.reset();
   recovery_.cancel();
   learn_.cancel();
+  // The binding is gone, so the fan-bound sticky capability goes with it —
+  // in RAM as well as in NVS (EraseProvisioning below). Forget may precede
+  // learning a DIFFERENT fan, and the old fan's capability must not re-aim
+  // that fan's commands in the meantime (issue #31). Since issue #16 refused
+  // Learn on a bound unit, Forget is the ONLY route to another fan, which
+  // makes this the clear that matters in production: every fan that Learn
+  // subsequently binds starts from an empty band and re-proves it.
+  authority_.clear_confirmed_capability();
   authority_.invalidate(AuthorityLossReason::Unprovisioned, now_ms);
   state_ = CoordinatorState::Unprovisioned;
   context_ = UnprovisionedContext{};
-  effects.add(RequestPersistenceEffect{
-      {PersistenceKind::EraseProvisioning, std::nullopt, std::nullopt}});
+  effects.add(RequestPersistenceEffect{{PersistenceKind::EraseProvisioning,
+                                        std::nullopt, std::nullopt,
+                                        std::nullopt}});
+  // Same reason as the Learned publication: the fan entity's speed count is
+  // seeded from published snapshots, and the forgotten fan's band must not
+  // keep shaping get_traits() while unprovisioned (issue #31 review).
+  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   return effects;
 }
 
@@ -275,13 +297,36 @@ CoreEffects ConfirmationCore::handle_learning_frame(ByteView input,
     context_ =
         LearningContext{learn_.snapshot().mode, learn_.snapshot().deadline_ms};
   } else if (event.kind == LearnEventKind::Learned) {
+    // Re-binding to a DIFFERENT fan discards the sticky capability: it
+    // described the previous fan, and left in place it would re-aim the new
+    // fan's commands (and get_traits) against the wrong band until the first
+    // confirmed report (issue #31). Re-learning the SAME fan keeps it — the
+    // fan did not change. The SaveProvisioning below carries the surviving
+    // value so NVS is re-bound atomically with the sender: the adapter must
+    // not re-persist the old fan's capability under the new sender.
+    //
+    // Since issue #16, Learn is refused while any sender is bound, so a window
+    // only ever opens unbound and this comparison always takes the clearing
+    // arm — Forget, the sole route here, has already cleared the value. Both
+    // arms are kept (and covered from a force-built provisioned learn window)
+    // so that the rule stays correct on its own terms: it is the change of
+    // BINDING, not the pressing of Learn, that invalidates a fan's band.
+    if (!(sender_ == event.sender)) authority_.clear_confirmed_capability();
     sender_ = event.sender;
     recovery_.cancel();
     authority_.invalidate(AuthorityLossReason::SenderChanged, now_ms);
     state_ = CoordinatorState::Idle;
     context_ = IdleContext{};
     effects.add(RequestPersistenceEffect{
-        {PersistenceKind::SaveProvisioning, sender_, std::nullopt}});
+        {PersistenceKind::SaveProvisioning, sender_, std::nullopt,
+         authority_.snapshot(now_ms).speed_capability}});
+    // Publish so the fan ENTITY hears the (possibly cleared) capability too:
+    // its cached speed count is seeded from published snapshots only, and
+    // without this the previous fan's band would keep mapping level presses —
+    // and get_traits() — until the new fan's first confirmed report (issue
+    // #31 review). The gate swallows this for state purposes (authority is
+    // invalidated above), exactly like the restore-time publication.
+    effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   } else if (event.kind == LearnEventKind::AmbiguousRejected) {
     // Two distinct fans were heard in one window; refuse and keep whatever was
     // bound before. sender_ is left untouched, so no SaveProvisioning is

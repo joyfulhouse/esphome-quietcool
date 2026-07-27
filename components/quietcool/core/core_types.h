@@ -128,13 +128,30 @@ enum class EvidenceSource : std::uint8_t {
   ExternalDiagnostic, RestoredHint
 };
 enum class EvidenceConfidence : std::uint8_t { ExactBackedConsensus, RecoveredOnlyConsensus };
+// How much a reported SpeedCapability may be trusted (issue #31 review). A
+// command frame and a 2-speed fan's report are byte-identical by construction —
+// both carry marker bits 10, which is also the encoding of SpeedCapability::Two
+// — so a frame matching our own in-flight command is PossiblyOwnEcho: real
+// evidence of a 2-speed fan, or no evidence at all if it was our own echo. The
+// rank exists because the two failure modes are wildly asymmetric. Discarding
+// such evidence makes capability Two unlearnable from a SUCCESSFUL command — a
+// confirmed command never opens a fallback query, and outside a response window
+// a report classifies as ExternalPriorityState, which invalidates rather than
+// promotes — so a 2-speed fan driven only by commands would never confirm or
+// persist its band, and every boot would fall back to the conservative
+// unknown-capability assumption instead of to proof. Trusting it blindly is the
+// worse half: an echo can then DEMOTE a fan already known to have three speeds,
+// narrowing its entity to two levels across reboots and putting MED out of
+// reach on a fan that has it. So PossiblyOwnEcho evidence is used, but never in
+// preference to a frame that could not have been ours.
+enum class CapabilityEvidence : std::uint8_t { Unambiguous, PossiblyOwnEcho };
 enum class AuthorityLossReason : std::uint8_t {
   Boot, Unprovisioned, LocalCommandPending, ManualRevalidationPending,
   ExactOemQuery, ExternalStateTraffic, AmbiguousOemYield, ContradictoryTail,
   ConsensusTimeout, TransactionExhausted, EstimatedTimerDeadline,
   LearningStarted, SenderChanged, RadioUnavailable, RestoredUnverified
 };
-enum class PersistenceKind : std::uint8_t { SaveProvisioning, EraseProvisioning, SaveRememberedSpeed };
+enum class PersistenceKind : std::uint8_t { SaveProvisioning, EraseProvisioning, SaveRememberedSpeed, SaveSpeedCapability };
 enum class CoreEventKind : std::uint8_t {
   Diagnostic, RequestAccepted, RequestRefused, CandidateObserved,
   ConsensusReached, AuthorityChanged, TransactionFinished, OemPriority,

@@ -42,6 +42,7 @@ class CommandTransaction final {
   bool may_emit_another_command() const;
   RefireCount remaining_refires() const;
   void reaim_off_to(Speed reported_speed);
+  void reaim_to_capability(SpeedCapability capability);
   void finish(TransactionOutcome outcome);
   bool mark_fallback_used();
   TransactionSnapshot snapshot() const;
