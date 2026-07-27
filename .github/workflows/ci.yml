@@ -42,11 +42,12 @@ jobs:
       - name: esphome config (C++ / SX126x)
         run: esphome config quietcool-cpp-example-sx126x.yaml
       # The primary deployable config and the diagnostic harness that packages
-      # it used to be absent from CI entirely, while the README claimed CI
-      # covered every checked-in target. They are validated here; they are NOT
-      # compiled, so their display/entity lambdas are only ever built by the
-      # pre-PR checklist in CONTRIBUTING.md. Closing that remaining gap costs a
-      # third ESP-IDF build — do it deliberately, not by editing the README.
+      # it used to be absent from this workflow entirely, while the README
+      # claimed CI covered every checked-in target. They are validated here;
+      # they are NOT compiled, so their display/entity lambdas are only ever
+      # built by the pre-PR checklist in CONTRIBUTING.md. Closing that
+      # remaining gap costs a third ESP-IDF build — do it deliberately, not by
+      # editing the README.
       - name: esphome config (C++ / primary deployable)
         run: esphome config quietcool-cpp-lora32.yaml
       - name: esphome config (C++ / loop-stack diagnostic)

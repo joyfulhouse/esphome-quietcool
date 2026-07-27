@@ -47,8 +47,9 @@ on the [legacy YAML track](#legacy-yaml-track-frozen) for now.
 
 The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
 `sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
-knobs). CI validates and compiles the V3 config on every change. That is a
-build gate, not evidence of on-air behavior: the V3 has not been run on real
+knobs). The CI workflow runs `esphome config` and `esphome compile` on the V3
+config (see [below](#what-githubworkflowsciyml-runs)). That says the config
+builds, not that the radio behaves: the V3 has not been run on real
 hardware yet — a few pins (status-LED polarity, the VBAT ADC divider, and the
 RX filter bandwidth) are noted inline as `PIN CONFIDENCE` items to confirm on
 first bring-up. See [docs/hardware.md](docs/hardware.md).
@@ -82,16 +83,29 @@ fan via [Learn mode](#learn-mode--porting-to-your-own-fan). The full
 step-by-step walkthrough — flashing, HA adoption, pairing, display setup,
 troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
 
-<!-- ci-coverage:begin -->
-**What CI gates.** Every push and pull request runs the host C++ suites (plain,
-adapter, and ASan/UBSan) and `esphome config` on every checked-in
-configuration. It then compiles `quietcool-cpp-example.yaml`,
-`quietcool-cpp-example-sx126x.yaml`, `legacy/quietcool-lora32.yaml`, and
-`legacy/quietcool-lora-v3.yaml`. CI does **not compile**
-`quietcool-cpp-lora32.yaml` or `quietcool-cpp-diag.yaml`: their display and
-entity lambdas are built only by the pre-PR checklist in
-[CONTRIBUTING.md](CONTRIBUTING.md), so compile locally before you flash.
-<!-- ci-coverage:end -->
+### What `.github/workflows/ci.yml` runs
+
+The workflow declares three jobs. Below is every check they run; setup steps
+(checkout, `setup-python`, `pip install esphome`, and copying
+`secrets.yaml.example` into place) are omitted.
+
+| Job | Checks it runs |
+| --- | --- |
+| `core` | `make -C tests/cpp test`, `make -C tests/cpp test-adapter`, `make -C tests/cpp test-sanitized` (the third builds the same host suites under ASan/UBSan) |
+| `component` | `esphome config` on `quietcool-cpp-example.yaml`, `quietcool-cpp-example-sx126x.yaml`, `quietcool-cpp-lora32.yaml`, `quietcool-cpp-diag.yaml`; then `esphome compile` on `quietcool-cpp-example.yaml` and `quietcool-cpp-example-sx126x.yaml` |
+| `legacy-yaml` | `python -m unittest tests.test_quietcool_esphome_config`; then `esphome config` **and** `esphome compile` on `legacy/quietcool-lora32.yaml` and `legacy/quietcool-lora-v3.yaml` |
+
+Two things are worth spelling out, and the table claims nothing beyond them:
+
+- The workflow never runs `esphome compile` on `quietcool-cpp-lora32.yaml` —
+  the config you actually flash — or on `quietcool-cpp-diag.yaml`. Their
+  display and entity lambdas are compiled only when someone runs the pre-PR
+  checklist in [CONTRIBUTING.md](CONTRIBUTING.md) by hand. **Compile locally
+  before you flash.**
+- Whether any of these jobs has to pass before a change reaches `main` is a
+  GitHub branch-protection setting, which is not stored in this repository.
+  Read the table as "what the workflow file runs", not as a guarantee about
+  what gets merged.
 
 ## Features
 
