@@ -25,6 +25,15 @@ bool restorable_state_is_valid(const RestorableState& restored) {
   if (restored.remembered_speed &&
       !speed_from_value(static_cast<std::uint8_t>(*restored.remembered_speed)))
     return false;
+  if (restored.speed_capability) {
+    switch (*restored.speed_capability) {
+      case SpeedCapability::One: case SpeedCapability::Two:
+      case SpeedCapability::Three:break;
+      // Unknown is deliberately invalid here: only a CONFIRMED capability is
+      // ever persisted, so a stored Unknown means a corrupt or forged record.
+      default:return false;
+    }
+  }
   if (!restored.observation_hint) return true;
   const auto& hint = *restored.observation_hint;
   if (hint.canonical_state > 0x3FU) return false;
@@ -47,7 +56,8 @@ AuthorityStore::AuthorityStore()
       timer_(UnknownTimerAuthority{TimerLossReason::Unknown, 0}) {}
 
 AuthoritySnapshot AuthorityStore::snapshot(MonotonicMs) const {
-  return {state_, timer_, remembered_speed_, last_diagnostic_, revision_};
+  return {state_, timer_, remembered_speed_, confirmed_capability_,
+          last_diagnostic_, revision_};
 }
 
 std::optional<PriorAuthoritySnapshot> AuthorityStore::capture_prior(
@@ -88,6 +98,24 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
       accepted.observed_ms, accepted.independent_candidates,
       accepted.transaction, accepted.attempt, revision_};
   if (accepted.state.speed()) remembered_speed_ = accepted.state.speed();
+  // Sticky: overwritten by every confirmed report that carries a capability,
+  // never cleared by invalidate() — the capability describes the bound fan,
+  // not the freshness of the current authority claim (issue #31). It is
+  // cleared only through clear_confirmed_capability(), when the binding
+  // itself changes (Forget, or learning a different fan).
+  //
+  // Evidence that could be our own echo (marker bits 10, byte-identical to the
+  // frame we just transmitted) is admitted only into an EMPTY slot. That is
+  // what lets a 2-speed fan's confirming report — indistinguishable from an
+  // echo by construction — teach the band on a fresh unit, while making it
+  // impossible for an echo to demote a fan whose capability is already known
+  // from an unambiguous frame (issue #31 review). If a fresh unit ever does
+  // mis-learn Two from a pure echo, the next unambiguous report (any query
+  // reply, or the fan's answer to the re-aimed command) overwrites it.
+  if (accepted.capability != SpeedCapability::Unknown &&
+      (accepted.capability_evidence == CapabilityEvidence::Unambiguous ||
+       !confirmed_capability_))
+    confirmed_capability_ = accepted.capability;
   const auto duration = accepted.state.duration();
   const auto duration_anchor = duration_ms(duration);
   if (duration == Duration::Off || duration == Duration::Continuous) {
@@ -115,6 +143,10 @@ void AuthorityStore::invalidate(AuthorityLossReason reason, MonotonicMs now_ms) 
   set_unknown(reason, TimerLossReason::StateInvalidated, now_ms);
 }
 
+void AuthorityStore::clear_confirmed_capability() {
+  confirmed_capability_.reset();
+}
+
 void AuthorityStore::record_diagnostic(FanState state) { last_diagnostic_ = state; }
 
 TimerExpiryDecision AuthorityStore::timer_estimate_expired(MonotonicMs now_ms) {
@@ -135,6 +167,7 @@ void AuthorityStore::restore_hint(const RestorableState& restored,
                                   MonotonicMs now_ms) {
   last_diagnostic_.reset();
   remembered_speed_ = restored.remembered_speed;
+  confirmed_capability_ = restored.speed_capability;
   restored_hint_ = restored.observation_hint;
   ++revision_;
   state_ = UnknownStateAuthority{AuthorityLossReason::RestoredUnverified,

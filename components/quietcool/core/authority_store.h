@@ -18,12 +18,17 @@ struct RestorableState final {
   SeedPolicy seed_policy{SeedPolicy::AllowCompiledSeed};
   std::optional<Speed> remembered_speed;
   std::optional<RestoredObservationHint> observation_hint;
+  // Deliberately first-class rather than an observation_hint: the hint requires
+  // a canonical fan state and on/off state is intentionally not persisted,
+  // while the speed capability is a property of the bound fan (issue #31).
+  std::optional<SpeedCapability> speed_capability;
 };
 bool restorable_state_is_valid(const RestorableState& restored);
 struct PersistenceRequest final {
   PersistenceKind kind;
   std::optional<SenderId> sender;
   std::optional<Speed> remembered_speed;
+  std::optional<SpeedCapability> speed_capability;
 };
 enum class TimerExpiryStatus : std::uint8_t { NotDue, Due };
 struct TimerExpiryDecision final {
@@ -89,6 +94,10 @@ using TimerAuthority = std::variant<UnknownTimerAuthority,
 struct AcceptedObservation final {
   FanState state;
   SpeedCapability capability;
+  // Rank of `capability` (issue #31 review). PossiblyOwnEcho may only FILL an
+  // empty sticky slot; it may never overwrite a capability already learned
+  // from a frame that could not have been our own transmission.
+  CapabilityEvidence capability_evidence;
   EvidenceSource source;
   EvidenceConfidence confidence;
   MonotonicMs observed_ms;
@@ -102,6 +111,10 @@ struct AuthoritySnapshot final {
   StateAuthority state;
   TimerAuthority timer;
   std::optional<Speed> remembered_speed;
+  // Sticky confirmed speed capability of the bound fan (issue #31). Unlike the
+  // state variants it survives invalidate(): capability is a property of the
+  // fan, not of authority freshness.
+  std::optional<SpeedCapability> speed_capability;
   std::optional<FanState> last_diagnostic;
   std::uint64_t revision;
 };
@@ -116,6 +129,11 @@ class AuthorityStore final {
   void bind_manual_query_token(TxToken token);
   void promote(const AcceptedObservation& accepted, MonotonicMs now_ms);
   void invalidate(AuthorityLossReason reason, MonotonicMs now_ms);
+  // The one sanctioned way to drop the sticky capability: the fan BINDING
+  // itself is going away (Forget) or moving to a different fan (Learn). A
+  // capability describes the bound fan, so it must not outlive the binding —
+  // but authority-freshness invalidations must never touch it (issue #31).
+  void clear_confirmed_capability();
   void record_diagnostic(FanState state);
   TimerExpiryDecision timer_estimate_expired(MonotonicMs now_ms);
   std::optional<MonotonicMs> timer_deadline() const;
@@ -126,6 +144,7 @@ class AuthorityStore final {
   StateAuthority state_;
   TimerAuthority timer_;
   std::optional<Speed> remembered_speed_;
+  std::optional<SpeedCapability> confirmed_capability_;
   std::optional<FanState> last_diagnostic_;
   std::optional<RestoredObservationHint> restored_hint_;
   std::uint64_t revision_{0};

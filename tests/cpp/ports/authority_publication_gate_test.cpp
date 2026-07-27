@@ -13,6 +13,7 @@ AuthoritySnapshot unknown_authority() {
       UnknownTimerAuthority{TimerLossReason::Unknown, 0},
       std::nullopt,
       std::nullopt,
+      std::nullopt,
       0,
   };
 }
@@ -33,6 +34,7 @@ AuthoritySnapshot confirmed_authority(std::uint64_t revision, Speed speed) {
       NoActiveTimerAuthority{
           false, EvidenceSource::ManualQueryConsensus, 100},
       speed,
+      std::nullopt,
       state,
       revision,
   };

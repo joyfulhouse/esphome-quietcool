@@ -5,6 +5,12 @@ namespace quietcool {
 CoreEffects ConfirmationCore::issue_command(MonotonicMs now_ms) {
   if (!sender_ || !transaction_ || !transaction_->may_emit_another_command())
     return {};
+  // Every attempt's frame is built here, so this is the single choke point for
+  // re-aiming a command whose speed the fan turned out not to support: a
+  // request frozen before capability was known (issue #31), or a retry after
+  // capability arrived mid-transaction, both pass through the corrected byte.
+  if (const auto capability = authority_.snapshot(now_ms).speed_capability)
+    transaction_->reaim_to_capability(*capability);
   const auto tx = transaction_->snapshot();
   const auto payload = FrameCodec::encode_state(*sender_, tx.outbound_command);
   if (!payload) {

@@ -38,13 +38,20 @@ FanState ConfirmationCore::safe_tail_state() const {
 void ConfirmationCore::promote_authority(const AcceptedObservation &accepted,
                                          MonotonicMs now_ms,
                                          CoreEffects &effects) {
-  const auto before = authority_.snapshot(now_ms).remembered_speed;
+  const auto before = authority_.snapshot(now_ms);
   authority_.promote(accepted, now_ms);
-  const auto after = authority_.snapshot(now_ms).remembered_speed;
-  if (after != before)
-    effects.add(RequestPersistenceEffect{
-        {PersistenceKind::SaveRememberedSpeed, std::nullopt, after}});
-  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
+  const auto after = authority_.snapshot(now_ms);
+  if (after.remembered_speed != before.remembered_speed)
+    effects.add(RequestPersistenceEffect{{PersistenceKind::SaveRememberedSpeed,
+                                          std::nullopt, after.remembered_speed,
+                                          std::nullopt}});
+  // Persist only on change: capability is confirmed by every report, so an
+  // unconditional save here would write NVS once per promote (issue #31).
+  if (after.speed_capability != before.speed_capability)
+    effects.add(RequestPersistenceEffect{{PersistenceKind::SaveSpeedCapability,
+                                          std::nullopt, std::nullopt,
+                                          after.speed_capability}});
+  effects.add(PublishAuthorityEffect{after});
 }
 CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
                                               ActionId action,
@@ -67,11 +74,17 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
   if (!transaction_ ||
       (state_ != CoordinatorState::PostCommandListening &&
        state_ != CoordinatorState::FallbackResponseListening)) {
-    AcceptedObservation accepted{value.state, value.capability,
-                                 source,      value.confidence,
-                                 now_ms,      value.independent_candidates,
-                                 {},          {},
-                                 {},          false};
+    AcceptedObservation accepted{value.state,
+                                 value.capability,
+                                 value.capability_evidence,
+                                 source,
+                                 value.confidence,
+                                 now_ms,
+                                 value.independent_candidates,
+                                 {},
+                                 {},
+                                 {},
+                                 false};
     promote_authority(accepted, now_ms, effects);
     recovery_.note_consensus();
     recovery_.cancel();
@@ -137,6 +150,7 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
   const auto promote = [&](bool local) {
     AcceptedObservation accepted{value.state,
                                  value.capability,
+                                 value.capability_evidence,
                                  source,
                                  value.confidence,
                                  now_ms,

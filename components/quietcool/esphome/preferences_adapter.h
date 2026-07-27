@@ -4,6 +4,7 @@
 
 #include "esphome/core/preferences.h"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace esphome::quietcool {
@@ -26,10 +27,23 @@ class EspHomePreferencesAdapter final {
     std::uint8_t flags;
     std::uint8_t seed_policy;
     std::uint8_t remembered_speed;
-    std::uint8_t reserved;
+    // Repurposed reserved byte (issue #31); gated by kHasSpeedCapability, so
+    // the layout and schema version are unchanged. Old firmware ignores the
+    // unknown flag bit, and — critically — a schema-version bump would make a
+    // ROLLBACK read the record as not intact and boot fail-closed into
+    // SuppressCompiledSeed, i.e. unprovisioned. Never bump for this field.
+    std::uint8_t speed_capability;
     std::uint32_t sender_be;
     std::uint32_t checksum;
   };
+  // Layout pin: the record is persisted as raw bytes, so any size or offset
+  // drift silently orphans every fielded unit's NVS record.
+  static_assert(sizeof(StoredRecord) == 20, "StoredRecord layout is persisted");
+  static_assert(offsetof(StoredRecord, flags) == 8 &&
+                    offsetof(StoredRecord, speed_capability) == 11 &&
+                    offsetof(StoredRecord, sender_be) == 12 &&
+                    offsetof(StoredRecord, checksum) == 16,
+                "StoredRecord layout is persisted");
 
   static std::uint32_t checksum(const StoredRecord& record);
   static bool intact(const StoredRecord& record);

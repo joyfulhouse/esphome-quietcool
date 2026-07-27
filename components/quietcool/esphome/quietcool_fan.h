@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quietcool/ports/authority_publication_gate.h"
+#include "fan_feedback.h"
 #include "quietcool_component.h"
 
 #include "esphome/components/fan/fan.h"
@@ -29,7 +30,12 @@ class QuietCoolFan final : public Component,
  private:
   QuietCoolComponent* controller_{nullptr};
   ::quietcool::AuthorityPublicationGate publication_gate_;
-  std::uint8_t supported_speed_count_{3};
+  // The entity's whole speed-band state, fed the sticky capability of every
+  // published snapshot. Holding the band pair in one host-tested value keeps
+  // the two counts — the one Home Assistant caches and the one an inbound level
+  // is mapped against — from drifting apart, and keeps the listed band from
+  // widening under a connection that cannot be re-listed (issue #31 review).
+  FanSpeedBands bands_;
 };
 
 }  // namespace esphome::quietcool

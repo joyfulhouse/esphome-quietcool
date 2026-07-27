@@ -1,6 +1,23 @@
 #include "command_transaction.h"
 
 namespace quietcool {
+namespace {
+
+// The wire nibbles have FIXED meanings (1=LOW, 2=MED, 3=HIGH) and a fan
+// supports a SUBSET of them: a 2-speed fan is {LOW, HIGH}, a 1-speed fan is
+// {HIGH} (its single position is the top of the band, matching
+// speed_for_level). Unknown filters nothing — no confirmed capability means
+// no ground to second-guess the request.
+bool speed_supported(Speed speed, SpeedCapability capability) {
+  switch (capability) {
+    case SpeedCapability::Unknown: case SpeedCapability::Three:return true;
+    case SpeedCapability::Two:return speed != Speed::Medium;
+    case SpeedCapability::One:return speed == Speed::High;
+    default:return true;
+  }
+}
+
+}  // namespace
 
 CommandTransaction CommandTransaction::begin(
     TransactionId id, FanState requested,
@@ -37,6 +54,23 @@ RefireCount CommandTransaction::remaining_refires() const {
 
 void CommandTransaction::reaim_off_to(Speed reported_speed) {
   if (!requested_.is_on()) outbound_ = FanState::command(reported_speed, Duration::Off);
+}
+
+void CommandTransaction::reaim_to_capability(SpeedCapability capability) {
+  // Issue #31: a command created before the fan's capability was known can
+  // carry a speed the fan lacks (MED on a 2-speed fan stops it, issue #30) —
+  // permanently, because the FanState byte is frozen at command time. Re-aim
+  // every attempt to the top of the band once capability is confirmed.
+  // For an ON command the REQUESTED state is rewritten too: the corrected
+  // speed is what the fan will report, and confirmation compares the report
+  // against requested_ — leaving Medium there would misread the fan's High
+  // report as an OEM override and yield. OFF requests stay as-is (semantic
+  // equality for OFF ignores the speed nibble, mirroring reaim_off_to).
+  const auto speed = outbound_.speed();
+  if (!speed || speed_supported(*speed, capability)) return;
+  outbound_ = FanState::command(Speed::High, outbound_.duration());
+  if (requested_.is_on())
+    requested_ = FanState::command(Speed::High, requested_.duration());
 }
 
 void CommandTransaction::finish(TransactionOutcome outcome) {
