@@ -152,12 +152,29 @@ bool EspHomePreferencesAdapter::apply(
       restored_.remembered_speed = request.remembered_speed;
       break;
     case ::quietcool::PersistenceKind::SaveSpeedCapability:
-      // Non-durable like SaveRememberedSpeed: losing it merely reopens the
-      // boot window until the next confirmed report. EraseProvisioning above
-      // resets restored_ wholesale, so Forget also erases the capability — a
-      // stale capability must not survive re-learning a different fan.
+      // Durable, like SaveProvisioning. ESPHome's ESP32 backend does not write
+      // flash from ESPPreferenceObject::save; it STAGES the bytes in RAM, and
+      // nothing reaches flash until sync(), which the preferences component's
+      // interval syncer calls on a default 60 s flash_write_interval. A
+      // capability learned seconds after boot would otherwise be lost to an
+      // ungraceful power cut — the exact event issue #31 exists to survive —
+      // and losing it reopens the unknown-capability window on a fan whose
+      // band was already proven.
+      //
+      // This is NOT a flash write per confirmed report. Every report confirms
+      // the capability, but two independent filters stand in the way: the core
+      // emits this request only when the sticky capability CHANGES
+      // (ConfirmationCore::promote_authority), and save_if_changed below
+      // commits only when the ENCODED RECORD changes, so a report agreeing
+      // with what is already stored costs nothing even if that first filter
+      // regresses. Both halves are pinned by the adapter suite.
+      //
+      // EraseProvisioning above resets restored_ wholesale, so Forget also
+      // erases the capability — a stale capability must not survive
+      // re-learning a different fan.
       if (!request.speed_capability) return false;
       restored_.speed_capability = request.speed_capability;
+      durable = true;
       break;
   }
   return ::quietcool::restorable_state_is_valid(restored_) &&
@@ -170,12 +187,28 @@ bool EspHomePreferencesAdapter::save_if_changed(bool durable) {
   const bool changed =
       !stored_record_known_ ||
       std::memcmp(&stored_, &record, sizeof(StoredRecord)) != 0;
-  if (changed && !preference_.save(&record)) return false;
   if (changed) {
+    if (!preference_.save(&record)) return false;
     stored_ = record;
     stored_record_known_ = true;
+    if (durable) durable_commit_pending_ = true;
   }
-  return !durable || global_preferences->sync();
+  // sync() commits the whole NVS handle, so calling it for a request that
+  // staged nothing would put a flash erase/write cycle behind a no-op — and
+  // SaveSpeedCapability, now durable, is re-asserted for as long as the fan
+  // keeps reporting. Gating on durable_commit_pending_ rather than on
+  // `durable` alone makes "a flash commit happens only when the stored record
+  // actually changed" true HERE, independently of the core's own change
+  // filter.
+  //
+  // It is the pending FLAG and not `changed` that gates it, because a sync()
+  // may fail: the record is staged and stored_ already matches it, so an
+  // identical durable request would otherwise find nothing changed and report
+  // success over a value still living only in RAM. The flag keeps the retry.
+  if (!durable || !durable_commit_pending_) return true;
+  if (!global_preferences->sync()) return false;
+  durable_commit_pending_ = false;
+  return true;
 }
 
 }  // namespace esphome::quietcool
