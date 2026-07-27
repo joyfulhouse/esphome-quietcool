@@ -9,7 +9,15 @@
 // corrupt capability value, and that Forget erases the capability (it may
 // precede re-learning a DIFFERENT fan).
 //
-// The last test drives the REAL component through the real adapter and core:
+// They also pin the two halves of the capability's DURABILITY, which are in
+// tension: the value must reach flash immediately (a staged-only save is lost
+// to exactly the ungraceful power cut #31 exists to survive), and it must
+// reach flash only when the stored record actually changes (every confirmed
+// report re-confirms the capability, so an unconditional commit would put a
+// flash erase/write cycle behind each one). The stub NVS models the RAM stage
+// and simulate_power_loss() so a test can tell those apart.
+//
+// Several tests drive the REAL component through the real adapter and core:
 // a persisted capability must reach the authority publisher during setup(),
 // before any RF round-trip — the #9 lesson ("verify the config binds the
 // fix") applied to #31's window.
@@ -77,6 +85,12 @@ bool save_capability(EspHomePreferencesAdapter& adapter,
                                           capability});
 }
 
+bool save_remembered_speed(EspHomePreferencesAdapter& adapter,
+                           ::quietcool::Speed speed) {
+  return adapter.apply(PersistenceRequest{
+      PersistenceKind::SaveRememberedSpeed, std::nullopt, speed, std::nullopt});
+}
+
 // Byte-level mirror of the persisted record. Field-for-field identical to the
 // adapter's private StoredRecord (whose layout is pinned by static_asserts in
 // preferences_adapter.h); used to hand-craft records the way OLD firmware
@@ -127,6 +141,96 @@ QC_TEST("preferences", "capability round-trips through the stored record") {
   QC_CHECK_EQ(restored.sender->as_be_u32(), kSenderBe);
   QC_CHECK_EQ(restored.speed_capability.value(), SpeedCapability::Two);
   QC_CHECK_EQ(restored.seed_policy, SeedPolicy::AllowCompiledSeed);
+}
+
+// The durability half. ESPHome's ESP32 backend only STAGES a save in RAM;
+// nothing reaches flash until sync(), which the preferences component's
+// interval syncer calls on a default 60 s flash_write_interval. A capability
+// learned seconds after boot and merely staged is therefore lost to exactly
+// the ungraceful power cut issue #31 exists to survive, which reopens the
+// unknown-capability window on a fan whose band was already proven.
+//
+// Reverting SaveSpeedCapability to a non-durable write fails this test at the
+// has_value() line below.
+QC_TEST("preferences", "a learned capability survives a power cut inside the flash interval") {
+  ScopedPreferences preferences;
+  {
+    EspHomePreferencesAdapter adapter(kPreferenceKey, 0);
+    adapter.load();
+    QC_CHECK(provision(adapter));
+    QC_CHECK(save_capability(adapter, SpeedCapability::Two));
+    // Staged AFTER the last commit, and deliberately non-durable: losing a
+    // remembered speed costs one OEM-faithful byte on the next command, not a
+    // reopened band window. It is the contrast that proves this harness can
+    // tell a committed value from a staged one.
+    QC_CHECK(save_remembered_speed(adapter, ::quietcool::Speed::High));
+  }
+  // The power cut lands before the interval syncer's next pass.
+  preferences.get().simulate_power_loss();
+
+  EspHomePreferencesAdapter reborn(kPreferenceKey, 0);
+  const auto restored = reborn.load();
+  QC_CHECK(restored.speed_capability.has_value());
+  QC_CHECK_EQ(restored.speed_capability.value(), SpeedCapability::Two);
+  QC_CHECK(restored.sender.has_value());
+  QC_CHECK(!restored.remembered_speed.has_value());
+}
+
+// The other half, and the reason durability is not simply "sync on every
+// durable request": the fan re-confirms its capability on EVERY report, and a
+// flash erase/write cycle per report would wear NVS out. Two independent
+// filters stop it — the core emits SaveSpeedCapability only on a change
+// (ConfirmationCore::promote_authority), and the adapter commits only when the
+// ENCODED RECORD changes. This pins the adapter's filter directly, by handing
+// it the re-assertions the core's filter would normally absorb.
+QC_TEST("preferences", "a re-asserted capability costs no flash write") {
+  ScopedPreferences preferences;
+  EspHomePreferencesAdapter adapter(kPreferenceKey, 0);
+  adapter.load();
+  QC_CHECK(provision(adapter));
+  QC_CHECK(save_capability(adapter, SpeedCapability::Two));
+
+  const auto syncs = preferences.get().sync_count();
+  const auto writes = preferences.get().write_count(kPreferenceKey);
+  for (int report = 0; report < 64; ++report)
+    QC_CHECK(save_capability(adapter, SpeedCapability::Two));
+  // Not one staged byte and not one commit, for 64 confirmed reports.
+  QC_CHECK_EQ(preferences.get().write_count(kPreferenceKey), writes);
+  QC_CHECK_EQ(preferences.get().sync_count(), syncs);
+
+  // A capability that actually changes still reaches flash at once.
+  QC_CHECK(save_capability(adapter, SpeedCapability::Three));
+  QC_CHECK_EQ(preferences.get().write_count(kPreferenceKey), writes + 1);
+  QC_CHECK_EQ(preferences.get().sync_count(), syncs + 1);
+  preferences.get().simulate_power_loss();
+  EspHomePreferencesAdapter reborn(kPreferenceKey, 0);
+  QC_CHECK_EQ(reborn.load().speed_capability.value(), SpeedCapability::Three);
+}
+
+// Suppressing the commit when the record is unchanged must not swallow a
+// commit that FAILED. After a failed sync the record is staged and stored_
+// already matches it, so an unchanged-record shortcut would report success
+// over a capability still living only in RAM — durable in name only. The
+// adapter tracks the outstanding commit instead of inferring it from
+// `changed`, so the next durable request flushes it.
+QC_TEST("preferences", "a failed flash commit is retried by the next durable request") {
+  ScopedPreferences preferences;
+  EspHomePreferencesAdapter adapter(kPreferenceKey, 0);
+  adapter.load();
+  QC_CHECK(provision(adapter));
+
+  preferences.get().set_sync_result(false);
+  QC_CHECK(!save_capability(adapter, SpeedCapability::Two));  // staged only
+  preferences.get().set_sync_result(true);
+  // The same capability again: nothing about the record changed, but its
+  // commit is still owed.
+  QC_CHECK(save_capability(adapter, SpeedCapability::Two));
+
+  preferences.get().simulate_power_loss();
+  EspHomePreferencesAdapter reborn(kPreferenceKey, 0);
+  const auto restored = reborn.load();
+  QC_CHECK(restored.speed_capability.has_value());
+  QC_CHECK_EQ(restored.speed_capability.value(), SpeedCapability::Two);
 }
 
 QC_TEST("preferences", "old record without the capability flag loads cleanly") {
@@ -365,11 +469,69 @@ QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches 
       fan_command_from_intent(true, 2, bands.command()).outbound_command_byte(),
       0xBF);
 
-  // And it is durable, so the next boot never reopens the window.
+  // And it is durable, so the next boot never reopens the window — including
+  // the boot that follows a power cut inside the 60 s flash_write_interval,
+  // which is the cut this whole persistence path exists to survive.
+  preferences.get().simulate_power_loss();
   EspHomePreferencesAdapter reader(kPreferenceKey, 0);
   const auto reloaded = reader.load().speed_capability;
   QC_CHECK(reloaded.has_value());
   QC_CHECK_EQ(reloaded.value(), SpeedCapability::Two);
+}
+
+// The no-flash-write-per-report property through the REAL core and component,
+// which is where the claim has to hold: the fan re-confirms its capability on
+// every exchange. This drives four full command/confirm rounds against a fan
+// whose capability is already stored and requires that not one byte is staged
+// and not one commit is issued. Together with the adapter-level test above it
+// covers both filters — the core's (promote_authority emits only on a change)
+// and the adapter's (commit only when the encoded record changes).
+QC_TEST("preferences", "repeated confirmations of a known capability cost no flash write") {
+  ScopedPreferences preferences;
+  {
+    EspHomePreferencesAdapter writer(kPreferenceKey, 0);
+    writer.load();
+    QC_CHECK(provision(writer));
+    QC_CHECK(save_capability(writer, SpeedCapability::Two));
+  }
+
+  host_test::set_millis(0);
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
+  CapturingPublisher publisher;
+  component.set_authority_publisher(&publisher);
+  component.setup();
+  QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
+
+  // One LOW command, confirmed by a 2-speed report (0x9F both halves).
+  const auto round = [&]() {
+    component.request_state(::quietcool::FanState::command(
+        ::quietcool::Speed::Low, ::quietcool::Duration::Continuous));
+    QC_CHECK(loop_to(component,
+                     ::quietcool::CoordinatorState::PostCommandListening, 2000));
+    const auto sent = radio.packets().back();
+    QC_CHECK_EQ(sent.bytes[4], 0x9F);
+    confirm_with(component, {sent.bytes[0], sent.bytes[1], sent.bytes[2],
+                             sent.bytes[3], 0x9F, 0x9F});
+    QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
+  };
+
+  // A warm-up round settles the one field a confirmed report legitimately
+  // changes on a fresh boot — remembered_speed, which is deliberately
+  // non-durable — so the counters below isolate the capability.
+  round();
+  const auto syncs = preferences.get().sync_count();
+  const auto writes = preferences.get().write_count(kPreferenceKey);
+  const auto publications = publisher.publications;
+
+  for (int repeat = 0; repeat < 4; ++repeat) round();
+
+  // The reports really were processed and really did re-confirm Two...
+  QC_CHECK(publisher.publications > publications);
+  QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Two);
+  // ...and none of them staged a byte or commanded a commit.
+  QC_CHECK_EQ(preferences.get().write_count(kPreferenceKey), writes);
+  QC_CHECK_EQ(preferences.get().sync_count(), syncs);
 }
 
 // Issue #31 review (opus-xhigh and codex): the band and the level are published

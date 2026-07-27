@@ -79,13 +79,19 @@ a two-speed receiver, whose OEM remote skips Medium.
 Both public base files now incorporate that closed-loop controller and publish
 `Last Confirmed Fan State`, `Command Confirmation Status`, and
 `Fan Speed Capability`, plus the `Fan State Known`, `Fan Confirmed Off`, and
-`Timer State Known` binary diagnostics. The fan entity still statically exposes all three speed
-choices (ESPHome entities are fixed at compile time); on a two-speed
-installation, `Fan Speed Capability` will report `2-speed` after the first
-confirmed command — use only the speeds your OEM control supports rather than
-interpreting the entity's Medium option as detected hardware capability. When
-deploying to multiple fans, confirmation state and capability remain local to
-each device's learned sender ID.
+`Timer State Known` binary diagnostics. On the **legacy YAML builds**
+(`quietcool-lora32.yaml`, `quietcool-lora-v3.yaml`) the fan entity statically
+exposes all three speed choices, because those entities are fixed at compile
+time; on a two-speed installation `Fan Speed Capability` will report `2-speed`
+after the first confirmed command — use only the speeds your OEM control
+supports rather than interpreting the entity's Medium option as detected
+hardware capability. The **C++ build** (`quietcool-cpp-*.yaml`) does not have
+that caveat: its speed band follows the confirmed capability, Medium cannot be
+commanded until three speeds are confirmed, and the capability is persisted so
+later boots start from the fan's real band (see
+[INSTALL.md](../INSTALL.md#6-try-it)). When deploying to multiple fans,
+confirmation state and capability remain local to each device's learned sender
+ID on either build.
 
 The custom fan control path is confirmation-driven: an HA command does not
 publish its requested state before the receiver answers. The native ESPHome Fan

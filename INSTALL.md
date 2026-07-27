@@ -138,12 +138,19 @@ replaced by whichever lone fan happened to transmit. Full details are in the
 
 ## 6. Try it
 
-- In HA, turn **QuietCool Fan** on and pick a speed that your fan actually
-  supports. The entity statically exposes Low / Medium / High and cannot hide
-  Medium on a two-speed fan. The fan responds like the OEM remote pressed the
-  button (same frames, same 3× burst). The request does not optimistically
-  change the fan entity; wait for `Fan State Known` plus the requested entity
-  state before treating it as physical success.
+- In HA, turn **QuietCool Fan** on and pick a speed. Until the fan has proved
+  how many speeds it has, the entity lists three but **Medium is unreachable** —
+  a speed press can only transmit Low or High, because Medium *stops* a
+  two-speed fan. The first confirmed report settles it: a two-speed fan narrows
+  the listed speeds to two, and a three-speed fan unlocks Medium. The confirmed
+  capability is written to flash immediately, so every later boot lists the
+  fan's real speeds from the first Home Assistant connection instead of
+  re-learning them. Within one session the listed count only ever narrows;
+  widening it again takes a reboot, because Home Assistant caches the count
+  when it connects. The fan responds like the OEM remote pressed the button
+  (same frames, same 3× burst). The request does not optimistically change the
+  fan entity; wait for `Fan State Known` plus the requested entity state before
+  treating it as physical success.
 - Press a button on the **OEM remote**: the controller records it in RF
   diagnostics, cancels conflicting local work, and never echoes it over RF.
   It deliberately does not update the safety-facing fan entity from the
@@ -191,7 +198,7 @@ select, `Remote Sender ID`, TX/RX counters, `Last TX Command`, and more).
 
 | Entity | Type | Purpose |
 | --- | --- | --- |
-| `QuietCool Fan` | fan | Off / Low / Medium / High — the only fan control |
+| `QuietCool Fan` | fan | Off / Low / High, plus Medium once the fan confirms three speeds — the only fan control |
 | `Timer Remaining` | sensor | Confirmed countdown in minutes (also on the OLED) |
 | `Fan State Known` | binary sensor (diagnostic) | On only when the fan entity is backed by correlated physical evidence |
 | `Fan Confirmed Off` | binary sensor (diagnostic) | Atomic Off assertion; false combines running and unknown |

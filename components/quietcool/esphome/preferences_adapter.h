@@ -59,6 +59,12 @@ class EspHomePreferencesAdapter final {
   StoredRecord stored_{};
   bool preference_ready_{false};
   bool stored_record_known_{false};
+  // A durable change is staged in RAM but not yet committed to flash — set
+  // when a durable request stages one, cleared by the sync() that commits it.
+  // Without it, a sync() that FAILED could never be retried: stored_ already
+  // holds the staged record, so the next identical durable request would see
+  // no change and return success over a value that is still only in RAM.
+  bool durable_commit_pending_{false};
 };
 
 }  // namespace esphome::quietcool

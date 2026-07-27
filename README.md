@@ -132,9 +132,14 @@ Three things are worth spelling out, and the table claims nothing beyond them:
   finish and then sends one automatic status query, so HA authority recovers
   in seconds instead of waiting for a manual Refresh; while authority is lost
   the OLED suffixes the state word with `?`.
-- **Direct RF fan control** — Off / Low / Medium / High (where supported by
-  the fan model) on the fan entity, transmitted as the exact OEM frames. On the
-  C++ build timer modes are set from the OEM remote (the legacy YAML build
+- **Direct RF fan control** — Off / Low / Medium / High on the fan entity,
+  transmitted as the exact OEM frames. On the C++ build the entity's speed band
+  tracks the fan's *confirmed* capability rather than being fixed at compile
+  time: Medium can only be commanded once three speeds have been confirmed
+  (commanding it stops a two-speed fan), a confirmed two-speed fan narrows the
+  listed speeds to two, and the capability is persisted to flash so later boots
+  list the right band from the first Home Assistant connection. On the C++
+  build timer modes are set from the OEM remote (the legacy YAML build
   additionally exposes a speed-aware timer *select* in Home Assistant covering
   the fan's full 1 / 2 / 4 / 8 / 12-hour range). Either way, `Timer State Known`
   and the read-only `Timer Remaining` sensor present a countdown only when it is
