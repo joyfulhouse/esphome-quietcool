@@ -10,11 +10,13 @@
 // method also sets the entity's speed count, and that value feeds the command
 // path's clamp band.
 //
-// The mapping is now two pure free functions — authority_speed_count() for the
-// band and authority_to_feedback() for what to display inside it; these tests
-// drive them directly. Inputs to the latter are OBSERVED FanStates (confirmed
-// states always are), encoded raw as: bits 7-6 capability, bits 5-4 speed
-// (1..3), bits 3-0 duration.
+// The mapping is now pure free functions — entity_speed_count() and
+// command_speed_count() for the two bands, authority_to_feedback() for what to
+// display inside the entity one — plus FanSpeedBands, which holds the entity
+// band's monotonic latch. These tests drive them directly. Inputs to
+// authority_to_feedback are OBSERVED FanStates (confirmed states always are),
+// encoded raw as: bits 7-6 capability, bits 5-4 speed (1..3), bits 3-0
+// duration.
 
 #include "quietcool/esphome/fan_feedback.h"
 
@@ -164,71 +166,214 @@ QC_TEST("fan_feedback", "command and feedback mappings roundtrip on every band")
   }
 }
 
-// Issue #31: the entity's speed count is seeded from the snapshot's sticky
-// speed_capability BEFORE the publication gate, so it is right at the
-// restore-time publication — the one the gate swallows for state purposes.
-::quietcool::AuthoritySnapshot restored_snapshot(
-    std::optional<::quietcool::SpeedCapability> capability) {
-  return {::quietcool::UnknownStateAuthority{
-              ::quietcool::AuthorityLossReason::RestoredUnverified, 0,
-              std::nullopt, std::nullopt},
-          ::quietcool::UnknownTimerAuthority{
-              ::quietcool::TimerLossReason::RestoredUnverified, 0},
-          std::nullopt,
-          capability,
-          std::nullopt,
-          0};
+// ---------------------------------------------------------------------------
+// Issue #31 and its review: the two bands.
+//
+// entity_speed_count() is what get_traits() lists and what a published level is
+// rendered against; command_speed_count() is what an inbound Home Assistant
+// level is mapped against on the way to the wire. Both are pure in the sticky
+// capability, so the adapter caches no count of its own; FanSpeedBands adds the
+// one piece of state they need — the latch that stops the listed band widening
+// under a connection that cannot be re-listed.
+// ---------------------------------------------------------------------------
+
+using Capability = ::quietcool::SpeedCapability;
+constexpr std::optional<Capability> kUnlearned{};
+
+QC_TEST("fan_feedback", "both bands read the sticky capability, not a cached count") {
+  // A restored or confirmed capability sets both bands with no confirmed state
+  // at all — the restore-time publication the gate swallows.
+  QC_CHECK_EQ(entity_speed_count(Capability::One), 1);
+  QC_CHECK_EQ(entity_speed_count(Capability::Two), 2);
+  QC_CHECK_EQ(entity_speed_count(Capability::Three), 3);
+  QC_CHECK_EQ(command_speed_count(Capability::One), 1);
+  QC_CHECK_EQ(command_speed_count(Capability::Two), 2);
+  QC_CHECK_EQ(command_speed_count(Capability::Three), 3);
+
+  // No capability: each band's own UNLEARNED default, never a previously cached
+  // count. Both functions are pure in the capability precisely so that after
+  // Forget or after learning a DIFFERENT fan (both clear the sticky capability)
+  // the entity cannot keep the old fan's band (issue #31 review).
+  QC_CHECK_EQ(entity_speed_count(kUnlearned), kUnlearnedEntitySpeedCount);
+  QC_CHECK_EQ(command_speed_count(kUnlearned), kUnlearnedCommandSpeedCount);
+
+  // Out-of-band values cannot be produced by the core; defence in depth keeps
+  // both functions total anyway.
+  QC_CHECK_EQ(entity_speed_count(static_cast<Capability>(7)),
+              kUnlearnedEntitySpeedCount);
+  QC_CHECK_EQ(command_speed_count(static_cast<Capability>(7)),
+              kUnlearnedCommandSpeedCount);
 }
 
-QC_TEST("fan_feedback", "authority speed count seeds from the sticky capability") {
-  // A restored capability narrows — or widens — the band with no confirmed
-  // state at all.
-  QC_CHECK_EQ(
-      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two)),
-      2);
-  QC_CHECK_EQ(authority_speed_count(
-                  restored_snapshot(::quietcool::SpeedCapability::Three)),
-              3);
-  QC_CHECK_EQ(
-      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::One)),
-      1);
-  // No capability: the UNKNOWN-CAPABILITY band, never a previously cached
-  // count. The function is pure in the snapshot precisely so that after Forget
-  // or after learning a DIFFERENT fan (both clear the sticky capability) the
-  // entity cannot keep the old fan's band (issue #31 review).
-  QC_CHECK_EQ(authority_speed_count(restored_snapshot(std::nullopt)),
-              kUnknownCapabilitySpeedCount);
-  // Out-of-band values cannot be produced by the core; defence in depth keeps
-  // the function total anyway.
-  QC_CHECK_EQ(authority_speed_count(restored_snapshot(
-                  static_cast<::quietcool::SpeedCapability>(7))),
-              kUnknownCapabilitySpeedCount);
+// Issue #31 review (opus-xhigh), the finding itself. Home Assistant reads
+// supported_speed_count once per API connection, at ListEntities, and caches it
+// until it reconnects — the device cannot re-list. So the band it lists while
+// nothing is known must be at least as wide as every band the fan can later
+// prove, or learning WIDENS the entity: Home Assistant keeps sending levels
+// from the narrower band it cached, its "100%" arrives as a middle level of the
+// wider band and maps to MED, and HIGH becomes unreachable for the whole
+// session (on a fan that turns out to have two speeds, MED stops it).
+// Mutation: narrow kUnlearnedEntitySpeedCount to 2 and the Three leg fails.
+QC_TEST("fan_feedback", "the unlearned entity band is at least every learnable band") {
+  const auto unlearned = entity_speed_count(kUnlearned);
+  for (const auto capability :
+       {Capability::One, Capability::Two, Capability::Three}) {
+    QC_CHECK(entity_speed_count(capability) <= unlearned);
+  }
+}
+
+// The same property as a trajectory through FanSpeedBands, including the door
+// the unlearned default alone does not close: an Unambiguous report overwrites
+// the sticky capability outright, so a 3-speed fan first mis-learned as Two
+// from its own echo self-heals Two -> Three. The listed band must not follow it
+// back up. Mutation: drop the latch in FanSpeedBands::observe (assign instead
+// of min) and the last check fails on 3 != 2.
+QC_TEST("fan_feedback", "the listed band never widens, whatever order evidence arrives") {
+  const std::optional<Capability> trajectories[][4] = {
+      {kUnlearned, Capability::Three, Capability::Two, Capability::One},
+      {kUnlearned, Capability::Two, Capability::Three, Capability::Three},
+      {Capability::One, Capability::Three, kUnlearned, Capability::Two},
+      {kUnlearned, kUnlearned, Capability::Three, kUnlearned},
+  };
+  for (const auto& trajectory : trajectories) {
+    FanSpeedBands bands;
+    std::uint8_t previous = bands.entity();
+    QC_CHECK_EQ(previous, kUnlearnedEntitySpeedCount);
+    for (const auto capability : trajectory) {
+      bands.observe(capability);
+      QC_CHECK(bands.entity() <= previous);
+      previous = bands.entity();
+    }
+  }
+
+  // The mis-learn trajectory spelled out, because it is the one a fresh 3-speed
+  // install actually takes.
+  FanSpeedBands bands;
+  bands.observe(Capability::Two);  // echo-ranked mis-learn narrows the entity
+  QC_CHECK_EQ(bands.entity(), 2);
+  bands.observe(Capability::Three);  // an unambiguous report self-heals the core
+  QC_CHECK_EQ(bands.entity(), 2);    // ...but Home Assistant still holds 2
+}
+
+// The command band is bounded by the latched entity band, which is what makes
+// it no wider than the band Home Assistant is working in: the entity band only
+// narrows, so the count listed at connect time is >= today's, and command <=
+// today's entity band <= the cached one. Mutation: drop the bound in
+// FanSpeedBands::observe and the self-healed leg reports command 3 against a
+// listed band of 2 — Home Assistant's 100% would then transmit MED.
+QC_TEST("fan_feedback", "the command band is never wider than the listed band") {
+  const std::optional<Capability> capabilities[] = {
+      kUnlearned, Capability::One, Capability::Two, Capability::Three};
+  for (const auto first : capabilities) {
+    for (const auto second : capabilities) {
+      FanSpeedBands bands;
+      bands.observe(first);
+      QC_CHECK(bands.command() <= bands.entity());
+      bands.observe(second);
+      QC_CHECK(bands.command() <= bands.entity());
+    }
+  }
+
+  // The self-heal, concretely: capability rises to Three but the listed band is
+  // latched at 2, so an inbound level is still mapped against 2.
+  FanSpeedBands bands;
+  bands.observe(Capability::Two);
+  bands.observe(Capability::Three);
+  QC_CHECK_EQ(bands.command(), 2);
+
+  // And the ordinary 3-speed install, where nothing was ever latched narrower:
+  // MED becomes commandable as soon as the fan proves it has three speeds.
+  FanSpeedBands fresh;
+  fresh.observe(kUnlearned);
+  QC_CHECK_EQ(fresh.command(), kUnlearnedCommandSpeedCount);
+  fresh.observe(Capability::Three);
+  QC_CHECK_EQ(fresh.entity(), 3);
+  QC_CHECK_EQ(fresh.command(), 3);
+}
+
+// The acceptance property the two bands exist for, driven over every band Home
+// Assistant may have cached (any entity band the device can list) and every
+// capability the device may hold when the press arrives: the TOP of Home
+// Assistant's band always transmits HIGH (0xBF), and the bottom always LOW.
+// This is the check the reviewer's probe failed — with one collapsed band, a
+// device that listed 2 and then learned Three answered its own 100% with MED.
+QC_TEST("fan_feedback", "the top of Home Assistant's cached band always transmits HIGH") {
+  const std::optional<Capability> capabilities[] = {
+      kUnlearned, Capability::One, Capability::Two, Capability::Three};
+  for (const auto listed_at_connect : capabilities) {
+    for (const auto learned_later : capabilities) {
+      FanSpeedBands bands;
+      bands.observe(listed_at_connect);
+      const int cached_top = bands.entity();  // what Home Assistant now renders
+      bands.observe(learned_later);
+      QC_CHECK_EQ(fan_command_from_intent(true, cached_top, bands.command())
+                      .outbound_command_byte(),
+                  0xBF);
+      // ...and its bottom always LOW, except on a 1-level band where the single
+      // level IS the top and takes the same top-of-band rule (speed_for_level's
+      // recorded choice for a unit type that does not exist in the field).
+      QC_CHECK_EQ(
+          fan_command_from_intent(true, 1, bands.command()).outbound_command_byte(),
+          bands.command() >= 2 ? 0x9F : 0xBF);
+    }
+  }
+}
+
+// The display half of the same divergence: a published level must stay
+// renderable in the band Home Assistant cached. Widening broke this too — after
+// learning Three a device that listed 2 published level 3 into a 2-level
+// entity, which is issue #30's update that disappears.
+QC_TEST("fan_feedback", "a published level always fits the band Home Assistant cached") {
+  const std::optional<Capability> capabilities[] = {
+      kUnlearned, Capability::One, Capability::Two, Capability::Three};
+  for (const auto listed_at_connect : capabilities) {
+    for (const auto learned_later : capabilities) {
+      FanSpeedBands bands;
+      bands.observe(listed_at_connect);
+      const int cached_band = bands.entity();
+      bands.observe(learned_later);
+      for (std::uint8_t nibble = 1; nibble <= 3; ++nibble) {
+        const auto raw =
+            static_cast<std::uint8_t>(0xC0U | (nibble << 4U) | 0x0FU);
+        const auto feedback =
+            authority_to_feedback(observed(raw), bands.entity());
+        QC_CHECK(feedback.speed.has_value());
+        QC_CHECK(*feedback.speed <= cached_band);
+      }
+    }
+  }
 }
 
 // The #31 acceptance property end to end at the mapping layer: immediately
 // after a reboot that restored capability Two, a Home Assistant level-2
 // command must transmit HIGH (0xBF), not MED (0xAF, which stops the fan).
 QC_TEST("fan_feedback", "level 2 maps to HIGH right after a capability-restored boot") {
-  const auto count =
-      authority_speed_count(restored_snapshot(::quietcool::SpeedCapability::Two));
-  const auto command = fan_command_from_intent(true, 2, count);
+  FanSpeedBands bands;
+  bands.observe(Capability::Two);
+  QC_CHECK_EQ(bands.entity(), 2);
+  const auto command = fan_command_from_intent(true, 2, bands.command());
   QC_CHECK_EQ(command.outbound_command_byte(), 0xBF);
 }
 
-// Issue #31 review (opus-xhigh): the rebinding case, which is where a PURE
-// authority_speed_count would otherwise open a fresh route to #30's stopped
+// Issue #31 review (opus-xhigh): the rebinding case, which is where a band
+// carried over from the previous fan would open a fresh route to #30's stopped
 // fan. Home Assistant caches supported_speed_count from ListEntities and
 // refreshes it only on reconnect, so after a mid-session Learn of a different
 // fan its band and the device's disagree, and the device has no way to re-list
 // or to re-query (radio_ready_seen_ has latched, and an ON request answered by
 // a marker-bearing mismatch never promotes). Whatever band Home Assistant
-// believes, its press arrives as a level in 1..3 — and against the
-// unknown-capability band NONE of them can form MED, the one speed a 2-speed
-// fan lacks. Mutation: widen kUnknownCapabilitySpeedCount to 3 and the level-2
-// leg transmits 0xAF.
+// believes, its press arrives as a level in 1..3 — and against the unlearned
+// command band NONE of them can form MED, the one speed a 2-speed fan lacks.
+// Mutation: widen kUnlearnedCommandSpeedCount to 3 and the level-2 leg
+// transmits 0xAF.
 QC_TEST("fan_feedback", "a rebinding publication can never transmit MED") {
-  const auto count = authority_speed_count(restored_snapshot(std::nullopt));
-  QC_CHECK_EQ(count, kUnknownCapabilitySpeedCount);
+  // The previous fan taught Three; then the binding changes and the snapshot
+  // comes back capability-less.
+  FanSpeedBands bands;
+  bands.observe(Capability::Three);
+  bands.observe(kUnlearned);
+  const auto count = bands.command();
+  QC_CHECK_EQ(count, kUnlearnedCommandSpeedCount);
   QC_CHECK_EQ(fan_command_from_intent(true, 1, count).outbound_command_byte(),
               0x9F);
   QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
@@ -240,15 +385,14 @@ QC_TEST("fan_feedback", "a rebinding publication can never transmit MED") {
 // The general form of that safety property, over every capability the snapshot
 // can carry, every level Home Assistant can send against a stale cached band,
 // and both intents: the MED nibble reaches the wire only once the fan has
-// CONFIRMED three speeds. Mutation: any widening of the unknown band, or an
-// identity level->nibble mapping, produces a Medium here without a Three.
+// CONFIRMED three speeds. Mutation: any widening of the unlearned command band,
+// or an identity level->nibble mapping, produces a Medium here without a Three.
 QC_TEST("fan_feedback", "MED is formed only for a confirmed three-speed fan") {
-  const std::optional<::quietcool::SpeedCapability> capabilities[] = {
-      std::nullopt, ::quietcool::SpeedCapability::One,
-      ::quietcool::SpeedCapability::Two, ::quietcool::SpeedCapability::Three};
+  const std::optional<Capability> capabilities[] = {
+      kUnlearned, Capability::One, Capability::Two, Capability::Three};
   bool medium_seen = false;
   for (const auto capability : capabilities) {
-    const auto count = authority_speed_count(restored_snapshot(capability));
+    const auto count = command_speed_count(capability);
     for (int level = 0; level <= 5; ++level) {
       for (const bool on : {false, true}) {
         const auto command = fan_command_from_intent(on, level, count);
@@ -257,8 +401,7 @@ QC_TEST("fan_feedback", "MED is formed only for a confirmed three-speed fan") {
             std::optional<::quietcool::Speed>(::quietcool::Speed::Medium);
         medium_seen = medium_seen || medium;
         QC_CHECK(!medium ||
-                 capability == std::optional<::quietcool::SpeedCapability>(
-                                   ::quietcool::SpeedCapability::Three));
+                 capability == std::optional<Capability>(Capability::Three));
       }
     }
   }

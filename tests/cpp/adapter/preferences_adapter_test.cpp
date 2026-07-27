@@ -295,11 +295,15 @@ QC_TEST("preferences", "restored capability reaches the publisher before any RF"
       publisher.last->state));
   QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Two);
 
-  // A level-2 press mapped against the seeded count transmits HIGH (0xBF).
-  const auto count = authority_speed_count(*publisher.last);
-  QC_CHECK_EQ(count, 2);
-  QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
-              0xBF);
+  // A level-2 press mapped against the seeded bands transmits HIGH (0xBF), and
+  // the entity is listed as a 2-level fan from the very first ListEntities.
+  FanSpeedBands bands;
+  bands.observe(publisher.last->speed_capability);
+  QC_CHECK_EQ(bands.entity(), 2);
+  QC_CHECK_EQ(bands.command(), 2);
+  QC_CHECK_EQ(
+      fan_command_from_intent(true, 2, bands.command()).outbound_command_byte(),
+      0xBF);
 }
 
 // The other half of the #31 chain, on a unit that has never learned a band:
@@ -324,8 +328,13 @@ QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches 
   CapturingPublisher publisher;
   component.set_authority_publisher(&publisher);
   component.setup();
-  QC_CHECK_EQ(authority_speed_count(*publisher.last),
-              kUnknownCapabilitySpeedCount);
+  // The entity is listed at the WIDEST band while nothing is known, so learning
+  // can only narrow it; the command band is the MED-free one.
+  FanSpeedBands bands;
+  bands.observe(publisher.last->speed_capability);
+  QC_CHECK_EQ(bands.entity(), kUnlearnedEntitySpeedCount);
+  QC_CHECK_EQ(bands.command(), kUnlearnedCommandSpeedCount);
+  const int listed_at_connect = bands.entity();
 
   // Let the unanswered boot query lapse, then command LOW.
   QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
@@ -344,10 +353,17 @@ QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches 
 
   QC_CHECK(publisher.last->speed_capability.has_value());
   QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Two);
-  const auto count = authority_speed_count(*publisher.last);
-  QC_CHECK_EQ(count, 2);
-  QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
+  bands.observe(publisher.last->speed_capability);
+  QC_CHECK_EQ(bands.entity(), 2);  // narrowed, which Home Assistant survives
+  QC_CHECK_EQ(bands.command(), 2);
+  // Home Assistant is still working in the band it was listed at connect time;
+  // its top-of-band press must transmit HIGH, not MED.
+  QC_CHECK_EQ(fan_command_from_intent(true, listed_at_connect, bands.command())
+                  .outbound_command_byte(),
               0xBF);
+  QC_CHECK_EQ(
+      fan_command_from_intent(true, 2, bands.command()).outbound_command_byte(),
+      0xBF);
 
   // And it is durable, so the next boot never reopens the window.
   EspHomePreferencesAdapter reader(kPreferenceKey, 0);
@@ -383,7 +399,10 @@ QC_TEST("preferences", "an echo-confirmed HIGH publishes the top level, not MED"
   CapturingPublisher publisher;
   component.set_authority_publisher(&publisher);
   component.setup();
-  QC_CHECK_EQ(authority_speed_count(*publisher.last), 3);
+  FanSpeedBands bands;
+  bands.observe(publisher.last->speed_capability);
+  QC_CHECK_EQ(bands.entity(), 3);
+  QC_CHECK_EQ(bands.command(), 3);
 
   QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
   component.request_state(
@@ -398,7 +417,8 @@ QC_TEST("preferences", "an echo-confirmed HIGH publishes the top level, not MED"
 
   // The echo did not demote the band...
   QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Three);
-  const auto count = authority_speed_count(*publisher.last);
+  bands.observe(publisher.last->speed_capability);
+  const auto count = bands.entity();
   QC_CHECK_EQ(count, 3);
   // ...and the confirmed frame it carries is the ambiguous 0xBF.
   const auto* confirmed =
@@ -414,9 +434,77 @@ QC_TEST("preferences", "an echo-confirmed HIGH publishes the top level, not MED"
 
   // The downstream half: the entity caches that level, and a later turn-on
   // without an explicit speed re-commands HIGH rather than MED.
-  QC_CHECK_EQ(
-      fan_command_from_intent(true, *feedback.speed, count).outbound_command_byte(),
-      0xBF);
+  QC_CHECK_EQ(fan_command_from_intent(true, *feedback.speed, bands.command())
+                  .outbound_command_byte(),
+              0xBF);
+}
+
+// Issue #31 review (opus-xhigh), through the real component: the trajectory a
+// fresh 3-speed install actually takes. Nothing is provisioned with a
+// capability, the entity is listed at whatever band setup() produces, and the
+// fan then proves Three. Home Assistant is still working in the band it was
+// listed at connect time, so ITS top-of-band press must still transmit HIGH —
+// and the confirmed level it is shown must still fit that band.
+//
+// With one collapsed band the device listed 2, widened to 3 on learning, and
+// Home Assistant's 100% (level 2) then mapped against 3 and transmitted MED
+// (0xAF): the fan ran at MEDIUM while the UI read 100%, and HIGH was
+// unreachable until the next reconnect or reboot.
+QC_TEST("preferences", "learning three speeds cannot widen the band under Home Assistant") {
+  ScopedPreferences preferences;
+  {
+    EspHomePreferencesAdapter writer(kPreferenceKey, 0);
+    writer.load();
+    QC_CHECK(provision(writer));  // provisioned, capability unknown
+    QC_CHECK(!writer.load().speed_capability.has_value());
+  }
+
+  host_test::set_millis(0);
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
+  CapturingPublisher publisher;
+  component.set_authority_publisher(&publisher);
+  component.setup();
+
+  // What Home Assistant caches at ListEntities, before any RF evidence exists.
+  FanSpeedBands bands;
+  bands.observe(publisher.last->speed_capability);
+  const int cached_band = bands.entity();
+
+  // Its top-of-band press right now transmits HIGH...
+  QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
+  QC_CHECK_EQ(fan_command_from_intent(true, cached_band, bands.command())
+                  .outbound_command_byte(),
+              0xBF);
+  component.request_state(fan_command_from_intent(true, cached_band,
+                                                  bands.command()));
+  QC_CHECK(loop_to(component,
+                   ::quietcool::CoordinatorState::PostCommandListening, 2000));
+  const auto& sent = radio.packets().back();
+  QC_CHECK_EQ(sent.bytes[4], 0xBF);
+
+  // ...and the fan answers with a genuine 3-speed report (marker bits 11, so
+  // unambiguous: not our own echo of 0xBF), which teaches Three.
+  confirm_with(component, {sent.bytes[0], sent.bytes[1], sent.bytes[2],
+                           sent.bytes[3], 0xFF, 0xFF});
+  QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Three);
+  bands.observe(publisher.last->speed_capability);
+
+  // The listed band did not widen under the connection...
+  QC_CHECK(bands.entity() <= cached_band);
+  // ...the same press still transmits HIGH, never MED...
+  QC_CHECK_EQ(fan_command_from_intent(true, cached_band, bands.command())
+                  .outbound_command_byte(),
+              0xBF);
+  // ...and the level published for that confirmed HIGH still fits the band
+  // Home Assistant is rendering it against.
+  const auto* confirmed =
+      std::get_if<::quietcool::ConfirmedStateAuthority>(&publisher.last->state);
+  QC_CHECK(confirmed != nullptr);
+  const auto feedback = authority_to_feedback(confirmed->state, bands.entity());
+  QC_CHECK(feedback.speed.has_value());
+  QC_CHECK(*feedback.speed <= cached_band);
+  QC_CHECK_EQ(*feedback.speed, cached_band);  // a confirmed HIGH reads as 100%
 }
 
 }  // namespace
