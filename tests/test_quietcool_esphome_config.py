@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -24,24 +25,64 @@ CI_COVERAGE_END = "<!-- ci-coverage:end -->"
 # the frozen legacy/ track. Local per-device wrapper YAMLs are untracked, so
 # enumerating from git keeps a developer's private wrapper out of the gates.
 _CONFIG_PATH = re.compile(r"^(?:legacy/)?quietcool-[\w.-]+\.yaml$")
-# `(?!\S)`: the target must END at .yaml, so `foo.yaml.disabled` is not read
-# as coverage of `foo.yaml`.
-_ESPHOME_INVOCATION = re.compile(r"esphome\s+(config|compile)\s+(\S+\.yaml)(?!\S)")
 _SECRET_USE = re.compile(r"!secret\s+([a-z0-9_]+)")
 _INCLUDE_USE = re.compile(r"!include\s+(\S+\.yaml)")
 _FILE_REF = re.compile(r'(?m)^\s*(?:-\s*)?file:\s*"([^"]+)"')
 _PATH_REF = re.compile(r"(?m)^\s*path:\s*(\S+)\s*$")
 _SUBSTITUTION_REF = re.compile(r"\$\{(\w+)\}")
-# A workflow job key (`  core:`), a step's `run:`, and a block scalar header.
-_JOB_KEY = re.compile(r"^ {2}([\w-]+):\s*$")
-_RUN_KEY = re.compile(r"^(\s*)(?:-\s+)?run:(.*)$")
+# A mapping key and a block-scalar header (`run: |`) in the YAML subset below.
+_YAML_KEY = re.compile(r"^([\w.-]+):(?:\s+(.*))?$")
 _BLOCK_SCALAR = re.compile(r"^[|>][+-]?\d*$")
 _CODE_FENCE = re.compile(r"^\s*```")
-_MAKE_HOST_SUITE = re.compile(r"make\s+-C\s+tests/cpp\s+([\w-]+)")
+
+# GitHub runs a step's `run:` script under `bash -e`, so a non-zero exit
+# aborts the step and fails the job — EXCEPT where the shell throws the exit
+# status away. These two sets are that distinction, and they decide whether a
+# command in a script is a gate:
+#   `a; b`, `a && b`  -> both statuses reach the shell; both gate.
+#   `a || b`          -> a's failure is handled, not fatal.
+#   `a | b`           -> the pipeline's status is b's (no `pipefail`).
+#   `a &`             -> backgrounded; the step never waits on it.
+_SEQUENCERS = frozenset({";", "&&", "(", ")", "{", "}"})
+_STATUS_SWALLOWING = frozenset({"||", "|", "&"})
+_REDIRECTIONS = frozenset({">", ">>", "<", "<<", ">&", "<&", ">|", "<>"})
 
 # This module's own identity, derived rather than spelled out, so a rename
-# cannot orphan the "CI actually runs this suite" gate below.
-_TEST_MODULE = f"{Path(__file__).resolve().parent.name}.{Path(__file__).stem}"
+# cannot orphan the "CI actually runs this suite" gate below. A command runs
+# this suite only if it names one of these; `pytest` with no target at all is
+# deliberately NOT accepted, because that shape is indistinguishable from
+# `pytest --version` and from a runner merely being installed.
+_TEST_PACKAGE = Path(__file__).resolve().parent.name
+_TEST_MODULE = f"{_TEST_PACKAGE}.{Path(__file__).stem}"
+_TEST_TARGETS = frozenset(
+    {
+        _TEST_MODULE,
+        _TEST_PACKAGE,
+        f"{_TEST_PACKAGE}/",
+        f"{_TEST_PACKAGE}/{Path(__file__).stem}.py",
+        f"./{_TEST_PACKAGE}/{Path(__file__).stem}.py",
+    }
+)
+
+# The workflow triggers the README's ci-coverage block claims, paired with the
+# words it uses for each and with the filter keys that would falsify the claim
+# — the same binding HOST_SUITE_GATES applies to the suites. A workflow that
+# no longer runs on push and on pull_request gates nothing at all, however
+# complete its jobs look.
+#
+# The README says "*Every* push and pull request", so a path filter falsifies
+# either. `branches:` is asymmetric on purpose: scoping `push` to the
+# integration branch is what "push" means in a PR-based repo (feature-branch
+# pushes are covered as pull requests), while any branch restriction on
+# `pull_request` leaves some pull requests ungated.
+CI_TRIGGERS = (
+    ("push", "push", ("paths", "paths-ignore", "branches-ignore")),
+    (
+        "pull_request",
+        "pull request",
+        ("paths", "paths-ignore", "branches", "branches-ignore"),
+    ),
+)
 
 # The host C++ gates the workflow must run, paired with the words the README's
 # ci-coverage block uses for each. The pairing IS the binding: the README's
@@ -154,72 +195,261 @@ def _checked_in_configs(test: unittest.TestCase) -> tuple[Path, ...]:
     return configs
 
 
-def _workflow_jobs(source: Path) -> dict[str, tuple[str, ...]]:
-    """{job name: the shell commands that job actually runs}.
+def _yaml_scalar(raw: str) -> str | list[str]:
+    """A plain scalar or a flow sequence (`[main, release]`)."""
+    if raw.startswith("[") and raw.endswith("]"):
+        return [
+            item.strip().strip("'\"")
+            for item in raw[1:-1].split(",")
+            if item.strip()
+        ]
+    if len(raw) > 1 and raw[0] == raw[-1] and raw[0] in "'\"":
+        return raw[1:-1]
+    return raw
 
-    Structural, not textual. Everything `CiCoverageTest` claims about CI is
-    derived from what CI *executes*, so a step that is commented out simply is
-    not in the result. Reading the workflow as raw text made the single most
-    ordinary way of disabling a step — commenting it out — invisible to the
-    gate, while the README kept publishing the claim that step backed.
 
-    Comments are removed with `_strip_comments` (a bare `#` split). Its worst
-    case is over-truncation, which can only DROP a command and fail loudly;
-    under-stripping would let a dead gate pass silently, which is the failure
-    direction that matters here.
-    """
-    lines = _strip_comments(source.read_text()).splitlines()
-    jobs: dict[str, list[str]] = {}
-    current: list[str] | None = None  # the job whose steps we are reading
-    in_jobs = False
-    index = 0
+def _yaml_block(
+    lines: list[tuple[int, str]], index: int, indent: int
+) -> tuple[object, int]:
+    if index >= len(lines) or lines[index][0] < indent:
+        return "", index
+    if lines[index][1].startswith("- "):
+        return _yaml_sequence(lines, index, lines[index][0])
+    return _yaml_mapping(lines, index, lines[index][0])
+
+
+def _yaml_sequence(
+    lines: list[tuple[int, str]], index: int, indent: int
+) -> tuple[list[object], int]:
+    items: list[object] = []
     while index < len(lines):
-        line = lines[index]
+        line_indent, content = lines[index]
+        if line_indent != indent or not content.startswith("- "):
+            break
         index += 1
-        if line.strip() and not line[:1].isspace():  # a top-level key
-            in_jobs = line.startswith("jobs:")
-            current = None
-            continue
-        if in_jobs:
-            job = _JOB_KEY.match(line)
-            if job:
-                current = jobs.setdefault(job.group(1), [])
-                continue
-        if current is None:  # not inside a job's body
-            continue
-        run = _RUN_KEY.match(line)
-        if not run:
-            continue
-        indent, value = len(run.group(1)), run.group(2).strip()
-        if not _BLOCK_SCALAR.match(value):
-            if value:
-                current.append(value)
-            continue
-        while index < len(lines):  # a `run: |` block runs every line in it
-            nested = lines[index]
-            if nested.strip() and len(nested) - len(nested.lstrip()) <= indent:
-                break
-            if nested.strip():
-                current.append(nested.strip())
+        # `- key: value` puts the item's first key two columns right of the
+        # dash, which is exactly where its sibling keys are indented.
+        body = [(indent + 2, content[2:].strip())]
+        while index < len(lines) and lines[index][0] > indent:
+            body.append(lines[index])
             index += 1
-    return {name: tuple(commands) for name, commands in jobs.items()}
+        if _YAML_KEY.match(body[0][1]):
+            item, _ = _yaml_mapping(body, 0, indent + 2)
+            items.append(item)
+        else:
+            items.append(_yaml_scalar(body[0][1]))
+    return items, index
 
 
-def _workflow_commands(source: Path) -> tuple[str, ...]:
-    """Every shell command the workflow runs, across all jobs."""
+def _yaml_mapping(
+    lines: list[tuple[int, str]], index: int, indent: int
+) -> tuple[dict[str, object], int]:
+    mapping: dict[str, object] = {}
+    while index < len(lines):
+        line_indent, content = lines[index]
+        if line_indent < indent:
+            break
+        if line_indent > indent:  # a child of a key we already consumed
+            index += 1
+            continue
+        key = _YAML_KEY.match(content)
+        if not key:  # e.g. a sequence item: not part of this mapping
+            break
+        name, raw = key.group(1), (key.group(2) or "").strip()
+        index += 1
+        if _BLOCK_SCALAR.match(raw):
+            block: list[str] = []
+            while index < len(lines) and lines[index][0] > indent:
+                block.append(lines[index][1])
+                index += 1
+            mapping[name] = "\n".join(block)
+        elif raw:
+            mapping[name] = _yaml_scalar(raw)
+        elif index < len(lines) and (
+            lines[index][0] > indent
+            # a block sequence may also sit at its key's own indent
+            or (lines[index][0] == indent and lines[index][1].startswith("- "))
+        ):
+            mapping[name], index = _yaml_block(lines, index, lines[index][0])
+        else:
+            mapping[name] = ""
+    return mapping, index
+
+
+def _yaml_subset(text: str) -> dict[str, object]:
+    """Parse the YAML subset a GitHub workflow uses.
+
+    Nested mappings, block sequences, block scalars (`run: |`), and flow
+    sequences (`branches: [main]`) — not general YAML. It exists so the gates
+    below can be read off the workflow's STRUCTURE (which step carries which
+    `if:`, which job `needs:` which) rather than off its text. A shape it
+    cannot parse yields a job with no commands, which
+    `test_workflow_parses_into_jobs_that_run_commands` fails on; the failure
+    direction is loud, never a silently vacuous gate.
+
+    Comments go first via `_strip_comments`. Worst case that over-truncates,
+    which again only DROPS a command and fails loudly.
+    """
+    lines = [
+        (len(raw) - len(raw.lstrip()), raw.strip())
+        for raw in _strip_comments(text).splitlines()
+        if raw.strip()
+    ]
+    parsed, _ = _yaml_block(lines, 0, 0)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _invocations(script: str) -> tuple[tuple[str, ...], ...]:
+    """argv of every command in a shell script whose failure fails the step.
+
+    Two things make a command in a script not a gate, and both are ordinary
+    ways to neuter one without deleting it:
+
+    * its exit status is discarded (`… || true`, `… | tee log`, `… &`); and
+    * it is an ARGUMENT rather than a command (`echo esphome config x.yaml`) —
+      which is why this returns argv and every matcher below asks what the
+      program is, instead of searching the text for a verb.
+
+    Unparseable quoting falls back to a whitespace split, and an unrecognized
+    wrapper (`sudo …`, `xargs …`) simply is not the program being matched: in
+    both cases a real gate goes uncounted and fails loudly.
+    """
+    invocations: list[tuple[str, ...]] = []
+    for line in script.splitlines():
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            tokens = line.split()
+        argv: list[str] = []
+        redirected = False
+        for token in (*tokens, ";"):
+            if token in _STATUS_SWALLOWING:
+                argv, redirected = [], False  # its status never reaches bash
+            elif token in _SEQUENCERS:
+                if argv:
+                    invocations.append(tuple(argv))
+                argv, redirected = [], False
+            elif token in _REDIRECTIONS:
+                # `2>&1` lexes as `2`, `>&`, `1`; everything from the first
+                # redirection on is plumbing, not arguments.
+                redirected = True
+                if argv and argv[-1].isdigit():
+                    argv.pop()
+            elif not redirected:
+                argv.append(token)
+    return tuple(invocations)
+
+
+def _program(argv: tuple[str, ...]) -> str:
+    """The command run, without its path (`.venv/bin/esphome` -> esphome)."""
+    return Path(argv[0]).name if argv else ""
+
+
+def _gates(node: dict[str, object]) -> bool:
+    """Does this job or step fail the workflow when its command fails?
+
+    Deliberately conservative: a node gates only when it is unconditional (no
+    `if:` at all — GitHub expressions are not evaluated here, and a step that
+    runs only sometimes does not back a claim about every push and PR) and its
+    failure is fatal (`continue-on-error` absent, or literally false). Both
+    misjudgements land on the safe side: a real gate that is not counted fails
+    this suite loudly, whereas counting a dead one is exactly the silence this
+    class exists to prevent.
+    """
+    if "if" in node:
+        return False
+    fatal = str(node.get("continue-on-error", "false"))
+    return fatal.strip().lower() == "false"
+
+
+def _workflow_gates(source: Path) -> dict[str, tuple[tuple[str, ...], ...]]:
+    """{job: argv of every command whose failure fails that job}.
+
+    Everything `CiCoverageTest` claims about CI is derived from this, so the
+    model has to be what CI *enforces*, not what the file mentions. A step that
+    is commented out, disabled with `if:`, marked `continue-on-error`, or
+    reduced to an argument of `echo` is not in the result, and neither is any
+    job that cannot fail the run.
+    """
+    workflow = _yaml_subset(source.read_text())
+    declared = workflow.get("jobs")
+    jobs = {
+        name: job
+        for name, job in (
+            declared if isinstance(declared, dict) else {}
+        ).items()
+        if isinstance(job, dict)
+    }
+    gating = {name: job for name, job in jobs.items() if _gates(job)}
+    # A job is skipped when a job it `needs:` is skipped, so depending on a
+    # non-gating job makes a job non-gating too. Iterate to a fixpoint.
+    while True:
+        blocked = {
+            name
+            for name, job in gating.items()
+            if any(
+                dep not in gating
+                for dep in _as_list(job.get("needs", []))
+                if dep
+            )
+        }
+        if not blocked:
+            break
+        gating = {n: j for n, j in gating.items() if n not in blocked}
+    result: dict[str, tuple[tuple[str, ...], ...]] = {}
+    for name, job in gating.items():
+        commands: list[tuple[str, ...]] = []
+        steps = job.get("steps")
+        for step in steps if isinstance(steps, list) else []:
+            if not isinstance(step, dict) or not _gates(step):
+                continue
+            script = step.get("run")
+            if isinstance(script, str) and script.strip():
+                commands.extend(_invocations(script))
+        result[name] = tuple(commands)
+    return result
+
+
+def _as_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _workflow_triggers(source: Path) -> dict[str, dict[str, object]]:
+    """{event: its filters} for the workflow's `on:` block."""
+    declared = _yaml_subset(source.read_text()).get("on")
+    if isinstance(declared, str):
+        return {declared: {}} if declared else {}
+    if isinstance(declared, list):
+        return {event: {} for event in declared}
+    if isinstance(declared, dict):
+        return {
+            event: filters if isinstance(filters, dict) else {}
+            for event, filters in declared.items()
+        }
+    return {}
+
+
+def _gating_commands(source: Path) -> tuple[tuple[str, ...], ...]:
+    """Every gating command the workflow runs, across all jobs."""
     return tuple(
         command
-        for commands in _workflow_jobs(source).values()
+        for commands in _workflow_gates(source).values()
         for command in commands
     )
 
 
-def _checklist_commands(source: Path) -> tuple[str, ...]:
-    """The commands a Markdown checklist asks a contributor to run.
+def _checklist_commands(source: Path) -> tuple[tuple[str, ...], ...]:
+    """argv of the commands a Markdown checklist asks a contributor to run.
 
     Only fenced code blocks count, and a line commented out inside the fence
-    is not something the checklist asks anyone to run — the same rule the
-    workflow parse applies, for the same reason.
+    is not something the checklist asks anyone to run — the same rules the
+    workflow parse applies, for the same reasons.
     """
     fenced: list[str] = []
     inside = False
@@ -229,21 +459,86 @@ def _checklist_commands(source: Path) -> tuple[str, ...]:
             continue
         if inside:
             fenced.append(line)
-    return tuple(
-        command
-        for command in _strip_comments("\n".join(fenced)).splitlines()
-        if command.strip()
-    )
+    return _invocations(_strip_comments("\n".join(fenced)))
 
 
-def _esphome_targets(commands: tuple[str, ...]) -> tuple[set[str], set[str]]:
-    """(config-validated, compiled) targets named by executed commands."""
+def _esphome_targets(
+    commands: tuple[tuple[str, ...], ...],
+) -> tuple[set[str], set[str]]:
+    """(config-validated, compiled) targets named by gating commands."""
     validated: set[str] = set()
     compiled: set[str] = set()
-    for command in commands:
-        for verb, target in _ESPHOME_INVOCATION.findall(command):
-            (validated if verb == "config" else compiled).add(target)
+    for argv in commands:
+        if _program(argv) != "esphome":
+            continue
+        rest = list(argv[1:])
+        while rest and rest[0].startswith("-"):
+            rest.pop(0)
+        if not rest or rest[0] not in ("config", "compile"):
+            continue
+        verb = rest.pop(0)
+        for token in rest:
+            # The target must END at .yaml, so `foo.yaml.disabled` is not read
+            # as coverage of `foo.yaml`.
+            if token.endswith(".yaml"):
+                (validated if verb == "config" else compiled).add(token)
     return validated, compiled
+
+
+def _make_targets(
+    commands: tuple[tuple[str, ...], ...], directory: str
+) -> set[str]:
+    """The `make -C <directory> …` targets the gating commands build."""
+    targets: set[str] = set()
+    for argv in commands:
+        if _program(argv) != "make":
+            continue
+        rest = list(argv[1:])
+        where: str | None = None
+        names: list[str] = []
+        while rest:
+            token = rest.pop(0)
+            if token == "-C":
+                where = rest.pop(0) if rest else None
+            elif token.startswith("-C"):
+                where = token[2:]
+            elif token.startswith("-") or "=" in token:  # flag or var override
+                continue
+            else:
+                names.append(token)
+        if where == directory:
+            targets.update(names)
+    return targets
+
+
+def _runs_test_module(argv: tuple[str, ...]) -> bool:
+    """Does this invocation execute THIS test module?
+
+    The program must be the test runner itself — `pip install pytest` installs
+    one, it does not run anything — and it must name this module, this file,
+    or its package.
+    """
+    program = _program(argv)
+    args = list(argv[1:])
+    if program.startswith("python"):
+        if args[:1] != ["-m"] or args[1:2] not in (["pytest"], ["unittest"]):
+            return False
+        args = args[2:]
+    elif program not in ("pytest", "py.test"):
+        return False
+    return any(arg in _TEST_TARGETS for arg in args)
+
+
+def _provisions_secrets(
+    commands: tuple[tuple[str, ...], ...], destination: str
+) -> bool:
+    """Does some gating command copy the example secrets to `destination`?"""
+    return any(
+        _program(argv) == "cp"
+        and argv[-1:] == (destination,)
+        and SECRETS_EXAMPLE.name in argv
+        for argv in commands
+    )
 
 
 def _ci_coverage_block(test: unittest.TestCase) -> str:
@@ -3223,6 +3518,179 @@ class RepoLayoutTest(unittest.TestCase):
                     )
 
 
+class WorkflowModelTest(unittest.TestCase):
+    """The model `CiCoverageTest` derives every claim from, tested directly.
+
+    `CiCoverageTest` can only be as honest as its answer to "does this command
+    gate?". Probing that answer through the real workflow shows it works for
+    the shapes the real workflow happens to have; these fixtures pin the rule
+    itself, including shapes ci.yml does not use today and would otherwise
+    acquire unguarded.
+    """
+
+    def _gates(self, workflow: str) -> dict[str, tuple[tuple[str, ...], ...]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "ci.yml"
+            probe.write_text(workflow)
+            return _workflow_gates(probe)
+
+    def test_invocations_are_argv_not_text(self) -> None:
+        for command, expected in (
+            ("make -C tests/cpp test", (("make", "-C", "tests/cpp", "test"),)),
+            (
+                ".venv/bin/esphome config a.yaml",
+                ((".venv/bin/esphome", "config", "a.yaml"),),
+            ),
+            # a command name is position 0, never a word somewhere inside
+            (
+                "echo esphome config a.yaml",
+                (("echo", "esphome", "config", "a.yaml"),),
+            ),
+            # `;` and `&&` both propagate failure under `bash -e`
+            (
+                "cp a b && cp c d",
+                (("cp", "a", "b"), ("cp", "c", "d")),
+            ),
+            ("cp a b; cp c d", (("cp", "a", "b"), ("cp", "c", "d"))),
+            # every line of a `run: |` block is its own command
+            ("cp a b\ncp c d", (("cp", "a", "b"), ("cp", "c", "d"))),
+            # redirections are plumbing, including the fd number in `2>&1`
+            (
+                "make -C tests/cpp test > log 2>&1",
+                (("make", "-C", "tests/cpp", "test"),),
+            ),
+            ('esphome config "a b.yaml"', (("esphome", "config", "a b.yaml"),)),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(_invocations(command), expected)
+
+    def test_invocations_drop_commands_whose_failure_is_discarded(self) -> None:
+        # `bash -e` aborts on a failing command, but not when the shell itself
+        # consumes the status. Each of these leaves the command in the file
+        # while removing the only thing that made it a gate.
+        for command, expected in (
+            ("make -C tests/cpp test || true", (("true",),)),
+            ("esphome config a.yaml | tee log", (("tee", "log"),)),
+            ("esphome config a.yaml &", ()),
+            # the right-hand side of `||` still gates: its failure is fatal
+            ("false || esphome config a.yaml", (("esphome", "config", "a.yaml"),)),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(_invocations(command), expected)
+
+    def test_gates_read_steps_including_block_scalars(self) -> None:
+        gates = self._gates(
+            "name: ci\n"
+            "on:\n"
+            "  push:\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - name: two commands\n"
+            "        run: |\n"
+            "          cp a b\n"
+            "          make -C tests/cpp test\n"
+            "      - run: esphome config a.yaml\n"
+        )
+        self.assertEqual(
+            gates,
+            {
+                "build": (
+                    ("cp", "a", "b"),
+                    ("make", "-C", "tests/cpp", "test"),
+                    ("esphome", "config", "a.yaml"),
+                )
+            },
+        )
+
+    def test_conditional_or_non_fatal_nodes_do_not_gate(self) -> None:
+        base = (
+            "on:\n  push:\n"
+            "jobs:\n"
+            "  build:\n"
+            "{job}"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - name: probe\n"
+            "{step}"
+            "        run: esphome config a.yaml\n"
+        )
+        for label, job, step in (
+            ("step if: false", "", "        if: false\n"),
+            ("step if: expression", "", "        if: ${{ github.ref }}\n"),
+            ("step continue-on-error", "", "        continue-on-error: true\n"),
+            ("job if: false", "    if: false\n", ""),
+            ("job continue-on-error", "    continue-on-error: true\n", ""),
+        ):
+            with self.subTest(case=label):
+                self.assertEqual(
+                    self._gates(base.format(job=job, step=step)).get("build", ()),
+                    (),
+                    f"{label} still counted as a gate",
+                )
+        # ...and without either attribute the same step does gate.
+        self.assertEqual(
+            self._gates(base.format(job="", step="")),
+            {"build": (("esphome", "config", "a.yaml"),)},
+        )
+        # An explicit `continue-on-error: false` is still a gate.
+        self.assertEqual(
+            self._gates(
+                base.format(job="", step="        continue-on-error: false\n")
+            ),
+            {"build": (("esphome", "config", "a.yaml"),)},
+        )
+
+    def test_a_job_needing_a_skipped_job_does_not_gate(self) -> None:
+        workflow = (
+            "on:\n  push:\n"
+            "jobs:\n"
+            "  disabled:\n"
+            "    if: false\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: true\n"
+            "  middle:\n"
+            "    needs: disabled\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: esphome config a.yaml\n"
+            "  last:\n"
+            "    needs: [middle]\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: esphome config b.yaml\n"
+        )
+        # GitHub skips a job whose dependency was skipped, transitively.
+        self.assertEqual(self._gates(workflow), {})
+
+    def test_triggers_parse_every_form_the_on_key_takes(self) -> None:
+        for label, workflow, expected in (
+            (
+                "mapping",
+                "on:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n",
+                {"push": {"branches": ["main"]}, "pull_request": {}},
+            ),
+            (
+                "flow list",
+                "on: [push, pull_request]\njobs:\n",
+                {"push": {}, "pull_request": {}},
+            ),
+            ("scalar", "on: push\njobs:\n", {"push": {}}),
+            (
+                "filtered",
+                "on:\n  push:\n    paths:\n      - docs/**\njobs:\n",
+                {"push": {"paths": ["docs/**"]}},
+            ),
+        ):
+            with self.subTest(form=label), tempfile.TemporaryDirectory() as tmp:
+                probe = Path(tmp) / "ci.yml"
+                probe.write_text(workflow)
+                self.assertEqual(_workflow_triggers(probe), expected)
+
+
 class CiCoverageTest(unittest.TestCase):
     """What CI gates is a published claim; keep the claim machine-checked.
 
@@ -3236,13 +3704,15 @@ class CiCoverageTest(unittest.TestCase):
     actually runs. Anything CI does not compile must be compiled by the
     documented local gate instead — a target may not be silently ungated.
 
-    "What the workflow actually runs" means the commands it *executes*, parsed
-    per job (`_workflow_jobs`), never the file as text. A first version matched
-    raw text, so commenting a step out — the ordinary way to disable one — left
-    every assertion here satisfied by a dead gate. For the same reason the
-    claims cover more than `esphome` invocations: the host C++ suites and this
-    very regression suite are gated too, since a guard CI never runs gates
-    nothing.
+    "What the workflow actually runs" means the commands whose failure fails
+    the run (`_workflow_gates`), never the file as text. Text matching made
+    every ordinary way of switching a gate off invisible here: commenting a
+    step out, `if: false`, `continue-on-error: true`, `… || true`, or an
+    `echo` in front of it all left the file "mentioning" the command and every
+    assertion below satisfied by a dead gate. For the same reason the claims
+    cover more than `esphome` invocations — the host C++ suites, this very
+    regression suite, and the workflow's own triggers are gated too, since a
+    guard CI never runs gates nothing.
     """
 
     def setUp(self) -> None:
@@ -3251,8 +3721,8 @@ class CiCoverageTest(unittest.TestCase):
             str(path.relative_to(ROOT)).replace("\\", "/")
             for path in self.configs
         )
-        self.jobs = _workflow_jobs(CI_WORKFLOW)
-        self.commands = _workflow_commands(CI_WORKFLOW)
+        self.jobs = _workflow_gates(CI_WORKFLOW)
+        self.commands = _gating_commands(CI_WORKFLOW)
         self.validated, self.compiled = _esphome_targets(self.commands)
 
     def test_workflow_parses_into_jobs_that_run_commands(self) -> None:
@@ -3267,64 +3737,198 @@ class CiCoverageTest(unittest.TestCase):
                 self.assertTrue(commands, f"job {job!r} runs no commands")
         self.assertGreaterEqual(len(self.commands), 15)
 
-    def test_commented_out_workflow_steps_are_not_counted_as_gates(
-        self,
-    ) -> None:
-        # Commenting a step out is how CI steps are ordinarily disabled. A
-        # raw-text scan still sees one, so a disabled gate used to keep
-        # satisfying every coverage assertion below. Pin the property here so
-        # the structural parse cannot regress to text matching.
-        #
-        # BOTH shapes must be covered, because they fail differently: a whole
-        # `run:` step stops looking like a step at all, while a line inside a
-        # `run: |` block is still collected and only comment stripping drops
-        # it. Probing just the first would leave the second unguarded.
-        text = CI_WORKFLOW.read_text()
-        for step in (
-            "run: esphome config quietcool-cpp-lora32.yaml",  # a whole step
-            "cp secrets.yaml.example legacy/secrets.yaml",  # inside `run: |`
-        ):
-            with self.subTest(step=step):
+    def test_ci_triggers_are_every_push_and_pull_request(self) -> None:
+        # A workflow with impeccable jobs gates nothing if it never runs.
+        # `on: workflow_dispatch` alone, or a `paths:` filter, leaves every
+        # other assertion in this class satisfied while no push and no PR is
+        # ever checked — and the README's ci-coverage block still opens with
+        # "Every push and pull request runs …".
+        triggers = _workflow_triggers(CI_WORKFLOW)
+        block = _ci_coverage_block(self)
+        for event, claim, disqualifying in CI_TRIGGERS:
+            with self.subTest(event=event):
                 self.assertIn(
-                    step, text, "workflow no longer runs the probed step"
+                    event,
+                    triggers,
+                    f"ci.yml does not run on {event}, but the README's "
+                    f"ci-coverage block claims {claim!r}: {sorted(triggers)}",
                 )
-                with tempfile.TemporaryDirectory() as tmp:
-                    probe = Path(tmp) / "ci.yml"
-                    probe.write_text(text.replace(step, f"# {step}"))
-                    commands = _workflow_commands(probe)
                 self.assertEqual(
-                    [command for command in commands if step in command],
+                    sorted(set(triggers[event]) & set(disqualifying)),
                     [],
-                    f"the commented-out step {step!r} is still counted as a "
-                    "command CI runs",
+                    f"ci.yml filters the {event} trigger, so it does not run "
+                    "on EVERY one as the README claims",
+                )
+                self.assertIn(
+                    claim,
+                    block,
+                    f"ci.yml runs on {event} but the README ci-coverage "
+                    f"block never says {claim!r}",
                 )
 
-    def test_commented_out_checklist_commands_are_not_counted_as_gates(
+    def test_disabled_workflow_steps_are_not_counted_as_gates(self) -> None:
+        # Every ordinary way of switching a step off without deleting it. Each
+        # row leaves the command in the file, so a text scan still "sees" it;
+        # none of them can leave it in the gating set. Probing only one shape
+        # is what let the previous round pass with `if:` and
+        # `continue-on-error:` unguarded.
+        text = CI_WORKFLOW.read_text()
+        # Two probes, because a whole `run:` step and a line inside a `run: |`
+        # block are found by different parts of the parse: probing only one
+        # would leave the other unguarded.
+        step = "run: esphome config quietcool-cpp-lora32.yaml"
+        job = "  component:\n"  # the job that runs that step
+        line = "cp secrets.yaml.example legacy/secrets.yaml"
+        # The ASan/UBSan run over the confirmation core: the single most
+        # safety-relevant gate in the workflow, and the one whose claim the
+        # README states first.
+        sanitized = "run: make -C tests/cpp test-sanitized"
+
+        def validates_lora32(commands: tuple[tuple[str, ...], ...]) -> bool:
+            return "quietcool-cpp-lora32.yaml" in _esphome_targets(commands)[0]
+
+        def provisions_legacy_secrets(
+            commands: tuple[tuple[str, ...], ...],
+        ) -> bool:
+            return _provisions_secrets(commands, "legacy/secrets.yaml")
+
+        def runs_sanitized(commands: tuple[tuple[str, ...], ...]) -> bool:
+            return "test-sanitized" in _make_targets(commands, "tests/cpp")
+
+        cases = (
+            ("commented-out step", step, f"# {step}", validates_lora32),
+            ("step if:", step, f"if: false\n        {step}", validates_lora32),
+            (
+                "step if: expression",
+                step,
+                f"if: ${{{{ false }}}}\n        {step}",
+                validates_lora32,
+            ),
+            (
+                "step continue-on-error",
+                step,
+                f"continue-on-error: true\n        {step}",
+                validates_lora32,
+            ),
+            ("status swallowed by ||", step, f"{step} || true", validates_lora32),
+            (
+                "status swallowed by a pipe",
+                step,
+                f"{step} | tee log",
+                validates_lora32,
+            ),
+            ("backgrounded", step, f"{step} &", validates_lora32),
+            (
+                "argument of echo",
+                step,
+                step.replace("run: ", "run: echo "),
+                validates_lora32,
+            ),
+            ("job if:", job, f"{job}    if: false\n", validates_lora32),
+            (
+                "job continue-on-error",
+                job,
+                f"{job}    continue-on-error: true\n",
+                validates_lora32,
+            ),
+            (
+                # a job is skipped when a job it needs is skipped
+                "job needs: a disabled job",
+                job,
+                "  disabled:\n    if: false\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: true\n"
+                f"{job}    needs: disabled\n",
+                validates_lora32,
+            ),
+            (
+                "commented-out line in a run: block",
+                line,
+                f"# {line}",
+                provisions_legacy_secrets,
+            ),
+            (
+                "run: block line swallowed by ||",
+                line,
+                f"{line} || true",
+                provisions_legacy_secrets,
+            ),
+            (
+                "run: block line as an argument of echo",
+                line,
+                f"echo {line}",
+                provisions_legacy_secrets,
+            ),
+            (
+                "sanitizer step commented out",
+                sanitized,
+                f"# {sanitized}",
+                runs_sanitized,
+            ),
+            (
+                "sanitizer step as an argument of echo",
+                sanitized,
+                sanitized.replace("run: ", "run: echo "),
+                runs_sanitized,
+            ),
+            (
+                "sanitizer step swallowed by ||",
+                sanitized,
+                f"{sanitized} || true",
+                runs_sanitized,
+            ),
+            (
+                "sanitizer step continue-on-error",
+                sanitized,
+                f"continue-on-error: true\n        {sanitized}",
+                runs_sanitized,
+            ),
+        )
+        for label, old, new, still_gates in cases:
+            with self.subTest(case=label):
+                self.assertIn(old, text, "workflow no longer has the probe anchor")
+                with tempfile.TemporaryDirectory() as tmp:
+                    probe = Path(tmp) / "ci.yml"
+                    probe.write_text(text.replace(old, new))
+                    commands = _gating_commands(probe)
+                self.assertFalse(
+                    still_gates(commands),
+                    f"a step disabled by {label} is still counted as a gate",
+                )
+        # The probes only mean something if the unmutated workflow gates each.
+        self.assertTrue(validates_lora32(self.commands))
+        self.assertTrue(provisions_legacy_secrets(self.commands))
+        self.assertTrue(runs_sanitized(self.commands))
+
+    def test_disabled_checklist_commands_are_not_counted_as_gates(
         self,
     ) -> None:
         # Same property for the local gate: CONTRIBUTING.md is the ONLY thing
-        # compiling the config people actually flash, so a commented-out
-        # compile line must not satisfy `test_targets_ci_skips_...`.
+        # compiling the config people actually flash, so a compile line that
+        # has been switched off must not satisfy `test_targets_ci_skips_...`.
         text = CONTRIBUTING.read_text()
         step = "esphome compile quietcool-cpp-lora32.yaml"
         self.assertIn(step, text, "checklist no longer runs the probed step")
-        with tempfile.TemporaryDirectory() as tmp:
-            probe = Path(tmp) / "CONTRIBUTING.md"
-            probe.write_text(text.replace(step, f"# {step}"))
-            _, compiled = _esphome_targets(_checklist_commands(probe))
-        self.assertNotIn(
-            "quietcool-cpp-lora32.yaml",
-            compiled,
-            "a commented-out checklist command is still counted as a gate",
-        )
+        for label, replacement in (
+            ("commented out", f"# {step}"),
+            ("status swallowed by ||", f"{step} || true"),
+            ("argument of echo", f"echo {step}"),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                probe = Path(tmp) / "CONTRIBUTING.md"
+                probe.write_text(text.replace(step, replacement))
+                _, compiled = _esphome_targets(_checklist_commands(probe))
+                self.assertNotIn(
+                    "quietcool-cpp-lora32.yaml",
+                    compiled,
+                    f"a checklist command disabled by {label} is still "
+                    "counted as a gate",
+                )
 
     def test_ci_runs_every_host_cpp_suite_the_readme_claims(self) -> None:
         # Binds the ci-coverage block's first sentence to the `core` job.
         # Without this, deleting that job left the suite green while the
         # README still advertised a gate over the confirmation core.
-        run_by_ci: set[str] = set()
-        for command in self.commands:
-            run_by_ci.update(_MAKE_HOST_SUITE.findall(command))
+        run_by_ci = _make_targets(self.commands, "tests/cpp")
         self.assertEqual(
             run_by_ci,
             {target for target, _ in HOST_SUITE_GATES},
@@ -3345,23 +3949,48 @@ class CiCoverageTest(unittest.TestCase):
         # Everything this class enforces is only a gate if CI runs this file.
         # Nothing asserted that, so the `Config regression tests` step could
         # be dropped and all of these guards would silently stop gating.
-        package, _, _ = _TEST_MODULE.partition(".")
-        runners = ("pytest", "unittest")
-        found = [
-            command
-            for command in self.commands
-            if any(runner in command for runner in runners)
-            and (
-                _TEST_MODULE in command
-                or _TEST_MODULE.replace(".", "/") in command
-                or re.search(rf"(?:^|\s){package}(?:[/\s]|$)", command)
-                or command.split()[-1] in runners
-            )
-        ]
         self.assertTrue(
-            found,
+            [argv for argv in self.commands if _runs_test_module(argv)],
             f"no ci.yml step runs {_TEST_MODULE}; every gate in "
             "CiCoverageTest would enforce nothing",
+        )
+
+    def test_installing_a_test_runner_is_not_running_this_suite(self) -> None:
+        # The guard above is what makes every other guard in this class a
+        # gate, so its own permissiveness is load-bearing. A first version
+        # accepted any command whose LAST token was `pytest`/`unittest`, so
+        # deleting the regression step and adding an ordinary
+        # `pip install pytest` anywhere in the workflow kept it satisfied
+        # while nothing in this file ran. Naming the runner is not running it.
+        for command in (
+            "pip install pytest",
+            "uv pip install pytest",
+            "python -m pip install pytest",
+            "pytest --version",
+            "python -m pytest --collect-only tests/cpp",
+            f"echo python -m unittest {_TEST_MODULE}",
+            f"python -m unittest {_TEST_MODULE} || true",
+            f"python -m unittest {_TEST_MODULE} | tee log",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    [
+                        argv
+                        for argv in _invocations(command)
+                        if _runs_test_module(argv)
+                    ],
+                    [],
+                    f"{command!r} is counted as CI running this suite",
+                )
+        # ...and the real invocation still is one, so this is not vacuous.
+        self.assertTrue(
+            [
+                argv
+                for argv in _invocations(
+                    f"python -m unittest {_TEST_MODULE} -v"
+                )
+                if _runs_test_module(argv)
+            ]
         )
 
     def test_workflow_only_runs_configs_that_exist(self) -> None:
@@ -3461,7 +4090,6 @@ class CiCoverageTest(unittest.TestCase):
             expected = (
                 "secrets.yaml" if rel_dir == "." else f"{rel_dir}/secrets.yaml"
             )
-            provision = f"cp secrets.yaml.example {expected}"
             for job, commands in sorted(self.jobs.items()):
                 validated, compiled = _esphome_targets(commands)
                 if name not in validated | compiled:
@@ -3469,7 +4097,7 @@ class CiCoverageTest(unittest.TestCase):
                 checked += 1
                 with self.subTest(config=name, job=job):
                     self.assertTrue(
-                        any(provision in command for command in commands),
+                        _provisions_secrets(commands, expected),
                         f"ci.yml job {job!r} runs esphome on {name}, which "
                         f"reads !secret, but never provisions {expected}",
                     )
