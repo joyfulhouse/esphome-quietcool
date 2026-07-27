@@ -2,8 +2,8 @@
 
 Status: design contract only
 Date: 2026-07-21
-Target worktree: <code>/Users/bryanli/Projects/joyfulhouse/esphome-quietcool-cpp</code>
-Target branch baseline: <code>feat/cpp-core</code> at <code>c676bbf</code>
+Target: the dedicated C++ core development branch (since merged into
+<code>main</code>), baseline commit <code>c676bbf</code>
 Implementation authorization: none
 
 ## 1. Purpose and decision
@@ -47,8 +47,8 @@ The evidence base is:
 
 - <code>docs/claude/2026-07-20-confirmation-path-findings.md</code>, including
   its 2026-07-21 postscript.
-- The Rust reference at
-  <code>/Users/bryanli/Projects/joyfulhouse/homeassistant-dev/quietcool-rust/crates/quietcool-core</code>.
+- The Rust reference implementation (the <code>quietcool-core</code> crate,
+  maintained outside this repository).
 - The current YAML only as migration and compatibility evidence, not as a
   state-machine template.
 
@@ -4020,8 +4020,8 @@ published optimistically.
 The two existing configurations remain independently reviewable throughout
 migration:
 
-- <code>quietcool-lora32.yaml</code>;
-- <code>quietcool-lora-v3.yaml</code>.
+- <code>legacy/quietcool-lora32.yaml</code>;
+- <code>legacy/quietcool-lora-v3.yaml</code>.
 
 Neither is replaced by a generated file during the comparison stages.
 The deployed YAML coordinator remains the rollback reference until the C++
@@ -4040,7 +4040,7 @@ The confirmation machine moves first.
 | 3: receive-only shadow | core receives copied RX/timestamps and logs shadow decisions; YAML remains sole TX/authority owner | one known SX127x canary | loop load or RX forwarding; flash previous YAML binary |
 | 4: TX-disabled authority shadow | C++ computes authority and transactions but cannot emit RF; compare against captures | same SX127x canary | diagnostic divergence only; disable shadow |
 | 5: single-coordinator C++ canary control | C++ owns TX, confirmation, Refresh guard, and authority; YAML retains UI/display wiring only, with all legacy TX/authority lambdas removed from or compile-time inert in the flashed binary | one controlled SX127x installation only after the structural ownership gate passes | real control regression; flash preserved deployed build |
-| 6: SX127x config cutover | <code>quietcool-lora32.yaml</code> becomes config-plus-wiring | SX127x canary, then other verified units one at a time | integration/config regression; retain stage-5 and legacy artifacts |
+| 6: SX127x config cutover | <code>legacy/quietcool-lora32.yaml</code> becomes config-plus-wiring | SX127x canary, then other verified units one at a time | integration/config regression; retain stage-5 and legacy artifacts |
 | 7: SX126x bench | same core through SX126x adapter | bench V3/SX126x board only | unverified pins/radio semantics; do not deploy |
 | 8: shared package | common YAML package owns entities/core config; board wrappers own pins/radio | verified units after side-by-side review | packaging/substitution mistakes; wrappers remain small and diffable |
 | 9: legacy source cleanup review | remove archived/inert legacy coordinator source from the active configuration tree after parity evidence; it has not been executable in any Stage-5-or-later binary | no special flash | loss of rollback source; preserve tagged release and captures |
@@ -4177,7 +4177,8 @@ warnings.
 
 ### 21.6 Existing custom fan component
 
-The current <code>quietcool_confirmed_fan</code> platform correctly avoids
+The current legacy YAML fan platform (now <code>quietcool_legacy_yaml</code>)
+correctly avoids
 optimistic publication, but it delegates behavior into YAML scripts.
 Migration should:
 

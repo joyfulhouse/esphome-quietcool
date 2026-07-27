@@ -1,4 +1,5 @@
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -2932,6 +2933,44 @@ class RepoLayoutTest(unittest.TestCase):
         self.assertIn("legacy/README.md", readme)
         self.assertIn("legacy/quietcool-lora32.yaml", readme)
         self.assertIn("legacy/quietcool-lora-v3.yaml", readme)
+
+    def test_no_tracked_file_carries_stale_local_references(self) -> None:
+        # The 2026-07 repo-clarity purge removed machine-local absolute
+        # paths, the long-merged development branch name, and the old
+        # component name from every tracked file. Keep them out: each one
+        # points a clone at state that exists only on the original
+        # development machine. The patterns are assembled from fragments so
+        # this test does not flag itself.
+        forbidden = (
+            b"/Users/" + b"bryanli",  # machine-local absolute paths
+            b"feat/" + b"cpp-core",  # merged development branch
+            b"quietcool_confirmed" + b"_fan",  # renamed quietcool_legacy_yaml
+        )
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            self.skipTest("not a git checkout; cannot enumerate tracked files")
+        tracked = [p for p in proc.stdout.split(b"\0") if p]
+        # An implausibly short listing means enumeration rotted, not that
+        # the repo shrank.
+        self.assertGreater(len(tracked), 20)
+        for rel in tracked:
+            path = ROOT / rel.decode()
+            if not path.is_file():  # e.g. submodule gitlink entries
+                continue
+            data = path.read_bytes()
+            for pattern in forbidden:
+                with self.subTest(file=rel.decode(), pattern=pattern.decode()):
+                    self.assertNotIn(
+                        pattern,
+                        data,
+                        f"{rel.decode()} still contains the stale reference "
+                        f"{pattern.decode()!r}",
+                    )
 
 
 if __name__ == "__main__":

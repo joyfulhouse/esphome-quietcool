@@ -6,14 +6,26 @@ sequence is one invocation and the timing is deterministic.
 """
 
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
 
 from aioesphomeapi import APIClient
 
-HOST = "10.100.8.46"
-SECRETS = Path("/Users/bryanli/Projects/joyfulhouse/homeassistant-dev/quietcool/secrets.yaml")
+HOST = os.environ.get("QUIETCOOL_HOST", "10.100.8.46")
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SECRETS_CANDIDATES = (
+    Path(os.environ["QUIETCOOL_SECRETS"]).expanduser(),
+) if "QUIETCOOL_SECRETS" in os.environ else (
+    _REPO_ROOT / "secrets.yaml",
+    _REPO_ROOT / "legacy" / "secrets.yaml",
+)
+SECRETS = next(
+    (p for p in _SECRETS_CANDIDATES if p.is_file()),
+    _SECRETS_CANDIDATES[0],
+)
 
 SPEEDS = {"off": None, "low": 1, "medium": 2, "high": 3}
 
