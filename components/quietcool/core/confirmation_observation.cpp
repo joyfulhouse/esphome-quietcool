@@ -74,11 +74,17 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
   if (!transaction_ ||
       (state_ != CoordinatorState::PostCommandListening &&
        state_ != CoordinatorState::FallbackResponseListening)) {
-    AcceptedObservation accepted{value.state, value.capability,
-                                 source,      value.confidence,
-                                 now_ms,      value.independent_candidates,
-                                 {},          {},
-                                 {},          false};
+    AcceptedObservation accepted{value.state,
+                                 value.capability,
+                                 value.capability_evidence,
+                                 source,
+                                 value.confidence,
+                                 now_ms,
+                                 value.independent_candidates,
+                                 {},
+                                 {},
+                                 {},
+                                 false};
     promote_authority(accepted, now_ms, effects);
     recovery_.note_consensus();
     recovery_.cancel();
@@ -144,6 +150,7 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
   const auto promote = [&](bool local) {
     AcceptedObservation accepted{value.state,
                                  value.capability,
+                                 value.capability_evidence,
                                  source,
                                  value.confidence,
                                  now_ms,

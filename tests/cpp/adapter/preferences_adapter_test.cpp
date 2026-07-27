@@ -26,6 +26,7 @@
 #include "support/test.h"
 #include "support/test_doubles.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -277,6 +278,75 @@ QC_TEST("preferences", "restored capability reaches the publisher before any RF"
   QC_CHECK_EQ(count, 2);
   QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
               0xBF);
+}
+
+// The other half of the #31 chain, on a unit that has never learned a band:
+// a 2-speed fan's confirmation must narrow the entity AND reach NVS, so the
+// window this branch closes is entered at most once per fan. The fan's
+// confirming report is byte-identical to the command frame (both carry marker
+// bits 10), which is exactly the frame the echo filter cannot attribute — if
+// that evidence is discarded rather than ranked, the count stays at the
+// compiled 3 and a level-2 press transmits MED, which stops the fan (#30).
+QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches NVS") {
+  ScopedPreferences preferences;
+  {
+    EspHomePreferencesAdapter writer(kPreferenceKey, 0);
+    writer.load();
+    QC_CHECK(provision(writer));  // provisioned, capability unknown
+    QC_CHECK(!writer.load().speed_capability.has_value());
+  }
+
+  host_test::set_millis(0);
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
+  CapturingPublisher publisher;
+  component.set_authority_publisher(&publisher);
+  component.setup();
+  QC_CHECK_EQ(authority_speed_count(*publisher.last),
+              kCompiledDefaultSpeedCount);
+
+  const auto loop_to = [&](::quietcool::CoordinatorState target,
+                           std::size_t limit) {
+    for (std::size_t pass = 0; pass < limit; ++pass) {
+      if (component.snapshot().state == target) return true;
+      host_test::advance_millis(25);
+      component.call_loop();
+    }
+    return component.snapshot().state == target;
+  };
+
+  // Let the unanswered boot query lapse, then command LOW.
+  QC_CHECK(loop_to(::quietcool::CoordinatorState::Idle, 2000));
+  component.request_state(
+      ::quietcool::FanState::command(::quietcool::Speed::Low,
+                                     ::quietcool::Duration::Continuous));
+  QC_CHECK(loop_to(::quietcool::CoordinatorState::PostCommandListening, 2000));
+  const auto& sent = radio.packets().back();
+  QC_CHECK_EQ(sent.bytes[4], 0x9F);
+
+  // Two independent confirmations inside the acceptance window, byte-identical
+  // to what we transmitted — a genuine 2-speed report.
+  const std::array<std::uint8_t, 6> report{sent.bytes[0], sent.bytes[1],
+                                           sent.bytes[2], sent.bytes[3],
+                                           0x9F,          0x9F};
+  host_test::advance_millis(500);
+  component.on_radio_packet(::quietcool::ByteView(report.data(), 6));
+  host_test::advance_millis(100);
+  component.on_radio_packet(::quietcool::ByteView(report.data(), 6));
+  component.call_loop();
+
+  QC_CHECK(publisher.last->speed_capability.has_value());
+  QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Two);
+  const auto count = authority_speed_count(*publisher.last);
+  QC_CHECK_EQ(count, 2);
+  QC_CHECK_EQ(fan_command_from_intent(true, 2, count).outbound_command_byte(),
+              0xBF);
+
+  // And it is durable, so the next boot never reopens the window.
+  EspHomePreferencesAdapter reader(kPreferenceKey, 0);
+  const auto reloaded = reader.load().speed_capability;
+  QC_CHECK(reloaded.has_value());
+  QC_CHECK_EQ(reloaded.value(), SpeedCapability::Two);
 }
 
 }  // namespace

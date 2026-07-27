@@ -431,6 +431,115 @@ QC_TEST("persistence", "genuine report capability persists during a command wind
               SpeedCapability::Three);
 }
 
+// Issue #31 review (opus-xhigh): a 2-speed fan's CONFIRMING report is
+// byte-identical to the command frame by construction — both carry marker bits
+// 10 — so it is exactly the frame the echo filter cannot tell from our own
+// echo. Suppressing its capability outright would delete the last path by
+// which a 2-speed band is learned from a SUCCESSFUL command: outside a
+// response window a report classifies as ExternalPriorityState (which
+// invalidates, never promotes), and a confirmed command never opens a fallback
+// query. The band would stay at the compiled 3 and the next level-2 press
+// would transmit MED — the speed a 2-speed fan lacks, which STOPS it (#30).
+QC_TEST("persistence", "a two-speed confirmation teaches the band on the command path") {
+  for (const auto speed : {Speed::Low, Speed::High}) {
+    auto core = restored_core();
+    QC_CHECK(!core.snapshot(0).authority.speed_capability.has_value());
+    core.request_state(FanState::command(speed, Duration::Continuous), 0);
+    const auto tx = persistence_tx(core.poll(0));
+    QC_CHECK(tx.has_value());
+    core.on_tx_started(tx->token, 0);
+    core.on_tx_complete(tx->token, 400);
+
+    // The fan echoes the command byte back verbatim: that IS a 2-speed report.
+    const auto report = report_frame(tx->payload.bytes[4]);
+    core.on_frame(ByteView(report.bytes), 1300);
+    const auto effects = core.on_frame(ByteView(report.bytes),
+                                       1300 + kMinIndependentCandidateGapMs);
+    const auto snapshot = core.snapshot(1400);
+    QC_CHECK_EQ(snapshot.last_transaction_outcome.value(),
+                TransactionOutcome::Confirmed);
+    QC_CHECK(snapshot.authority.speed_capability.has_value());
+    QC_CHECK_EQ(snapshot.authority.speed_capability.value(),
+                SpeedCapability::Two);
+    const auto save =
+        persistence_request(effects, PersistenceKind::SaveSpeedCapability);
+    QC_CHECK(save.has_value());
+    QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Two);
+  }
+}
+
+// The same scenario carried through to the wire, which is where #30 bites: the
+// press AFTER a successful 2-speed command must not transmit MED. Level 2 on a
+// 2-band entity is HIGH; the core's re-aim is the last line of defence and it
+// can only fire if the confirmation above taught the band.
+QC_TEST("persistence", "the press after a two-speed confirmation never transmits MED") {
+  auto core = restored_core();
+  core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
+  const auto first = persistence_tx(core.poll(0));
+  QC_CHECK(first.has_value());
+  core.on_tx_started(first->token, 0);
+  core.on_tx_complete(first->token, 400);
+  const auto report = report_frame(0x9F);
+  core.on_frame(ByteView(report.bytes), 1300);
+  core.on_frame(ByteView(report.bytes), 1300 + kMinIndependentCandidateGapMs);
+  QC_CHECK_EQ(core.snapshot(1400).last_transaction_outcome.value(),
+              TransactionOutcome::Confirmed);
+
+  core.poll(400 + kResponseTailEndMs + 1);
+  core.request_state(FanState::command(Speed::Medium, Duration::Continuous),
+                     400 + kResponseTailEndMs + 2);
+  const auto second = persistence_tx(core.poll(400 + kResponseTailEndMs + 3));
+  QC_CHECK(second.has_value());
+  QC_CHECK_EQ(second->payload.bytes[4], 0xBF);
+}
+
+// A query window is opened by a 0x66 burst, so nothing heard in it can be an
+// echo of one of our state frames — even though the command transaction that
+// scheduled the fallback query is still live. Keying the echo filter on "a
+// transaction exists" instead of "we are in the post-command window" would
+// rank this reply as a possible echo, and a possible echo cannot correct an
+// already-stored capability: the wrong band would survive the very query sent
+// to resolve it (issue #31 review).
+QC_TEST("persistence", "a fallback query reply outranks a stored capability") {
+  ConfirmationCore core(CoreConfig{59});
+  RestorableState restored;
+  restored.sender = persistence_sender();
+  restored.speed_capability = SpeedCapability::Three;  // stale/wrong record
+  core.restore(restored, 0);
+
+  core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
+  const auto command = persistence_tx(core.poll(0));
+  QC_CHECK(command.has_value());
+  QC_CHECK_EQ(command->payload.bytes[4], 0x9F);
+  core.on_tx_started(command->token, 0);
+  core.on_tx_complete(command->token, 400);
+
+  // Silence through the post-command window and its tail, then the fallback.
+  core.poll(400 + kResponseTailEndMs + 1);
+  core.poll(400 + kResponseTailEndMs + 1);
+  QC_CHECK_EQ(core.snapshot(400 + kResponseTailEndMs + 1).state,
+              CoordinatorState::FallbackQueryPending);
+  const auto query = persistence_tx(core.poll(400 + kResponseTailEndMs + 2));
+  QC_CHECK(query.has_value());
+  QC_CHECK_EQ(query->payload.bytes[4], 0x66);
+  core.on_tx_started(query->token, 400 + kResponseTailEndMs + 2);
+  core.on_tx_complete(query->token, 400 + kResponseTailEndMs + 102);
+
+  // The 2-speed fan answers with the same byte our command carried.
+  const auto reply = report_frame(0x9F);
+  const MonotonicMs anchor = 400 + kResponseTailEndMs + 102;
+  core.on_frame(ByteView(reply.bytes), anchor + kDirectQueryAcceptStartMs + 1);
+  const auto effects = core.on_frame(
+      ByteView(reply.bytes),
+      anchor + kDirectQueryAcceptStartMs + 1 + kMinIndependentCandidateGapMs);
+  const auto save =
+      persistence_request(effects, PersistenceKind::SaveSpeedCapability);
+  QC_CHECK(save.has_value());
+  QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Two);
+  QC_CHECK_EQ(core.snapshot(anchor + 1000).authority.speed_capability.value(),
+              SpeedCapability::Two);
+}
+
 // Issue #31 review: the worst-case CONFIRMING-PROMOTE reduction emits four
 // effects — SaveRememberedSpeed, SaveSpeedCapability, PublishAuthority and
 // TransactionFinished — which is exactly CoreEffects::kCapacity. Its production

@@ -103,7 +103,18 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
   // not the freshness of the current authority claim (issue #31). It is
   // cleared only through clear_confirmed_capability(), when the binding
   // itself changes (Forget, or learning a different fan).
-  if (accepted.capability != SpeedCapability::Unknown)
+  //
+  // Evidence that could be our own echo (marker bits 10, byte-identical to the
+  // frame we just transmitted) is admitted only into an EMPTY slot. That is
+  // what lets a 2-speed fan's confirming report — indistinguishable from an
+  // echo by construction — teach the band on a fresh unit, while making it
+  // impossible for an echo to demote a fan whose capability is already known
+  // from an unambiguous frame (issue #31 review). If a fresh unit ever does
+  // mis-learn Two from a pure echo, the next unambiguous report (any query
+  // reply, or the fan's answer to the re-aimed command) overwrites it.
+  if (accepted.capability != SpeedCapability::Unknown &&
+      (accepted.capability_evidence == CapabilityEvidence::Unambiguous ||
+       !confirmed_capability_))
     confirmed_capability_ = accepted.capability;
   const auto duration = accepted.state.duration();
   const auto duration_anchor = duration_ms(duration);

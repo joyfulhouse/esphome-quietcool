@@ -51,13 +51,17 @@ void QuietCoolFan::publish_authority(
   // Home Assistant can send a command, or a level-2 press on a 2-speed fan is
   // mapped against the compiled default of 3 and transmits MED, which stops
   // the fan (issue #30's failure, transiently). The snapshot's sticky
-  // capability is the single source of truth here; the per-report
-  // FanFeedback::supported_speed_count is never fresher (promote() folds the
-  // same consensus capability into the snapshot before it is published), so
-  // it is deliberately not consulted. authority_speed_count is pure in the
-  // snapshot: a capability-less snapshot (Forget, or a re-bind to a different
-  // fan) resets the count to the compiled default rather than preserving the
-  // previous fan's band (issue #31 review).
+  // capability is the single source of truth here, and it strictly DOMINATES
+  // the per-report FanFeedback::supported_speed_count rather than merely
+  // matching it: promote() folds every confirmed report's capability into the
+  // snapshot, so the snapshot is defined whenever the report's marker bits
+  // are, plus at restore time — and it is the only one of the two that applies
+  // evidence ranking, so a frame that may have been our own echo cannot demote
+  // a fan whose band is already known (issue #31 review). Consulting the
+  // report as a second source would reinstate exactly that demotion.
+  // authority_speed_count is pure in the snapshot: a capability-less snapshot
+  // (Forget, or a re-bind to a different fan) resets the count to the compiled
+  // default rather than preserving the previous fan's band.
   supported_speed_count_ = authority_speed_count(authority);
   const auto confirmed = publication_gate_.next(authority);
   if (!confirmed) return;

@@ -128,6 +128,19 @@ enum class EvidenceSource : std::uint8_t {
   ExternalDiagnostic, RestoredHint
 };
 enum class EvidenceConfidence : std::uint8_t { ExactBackedConsensus, RecoveredOnlyConsensus };
+// How much a reported SpeedCapability may be trusted (issue #31 review). A
+// command frame and a 2-speed fan's report are byte-identical by construction —
+// both carry marker bits 10, which is also the encoding of SpeedCapability::Two
+// — so a frame matching our own in-flight command is PossiblyOwnEcho: real
+// evidence of a 2-speed fan, or no evidence at all if it was our own echo. The
+// rank exists because the two failure modes are wildly asymmetric. Discarding
+// such evidence leaves a 2-speed fan's band at the compiled 3 and the next
+// level-2 press transmits MED, a speed it lacks, which STOPS the fan (#30).
+// Trusting it blindly can mis-learn Two on a 3-speed fan, whose only effect is
+// that a MED press runs HIGH until the next unambiguous report corrects it. So
+// PossiblyOwnEcho evidence is used, but never in preference to a frame that
+// could not have been ours.
+enum class CapabilityEvidence : std::uint8_t { Unambiguous, PossiblyOwnEcho };
 enum class AuthorityLossReason : std::uint8_t {
   Boot, Unprovisioned, LocalCommandPending, ManualRevalidationPending,
   ExactOemQuery, ExternalStateTraffic, AmbiguousOemYield, ContradictoryTail,
