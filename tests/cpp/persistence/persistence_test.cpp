@@ -361,8 +361,8 @@ QC_TEST("persistence", "forget clears the sticky capability in RAM") {
               1U);
   QC_CHECK(!core.snapshot(1).authority.speed_capability.has_value());
   // The clear is also PUBLISHED so the fan entity's speed count returns to
-  // the compiled default instead of keeping the forgotten fan's band (issue
-  // #31 review).
+  // the unknown-capability band instead of keeping the forgotten fan's band
+  // (issue #31 review).
   const auto published = published_authority(effects);
   QC_CHECK(published.has_value());
   QC_CHECK(!published->speed_capability.has_value());
@@ -438,8 +438,11 @@ QC_TEST("persistence", "genuine report capability persists during a command wind
 // which a 2-speed band is learned from a SUCCESSFUL command: outside a
 // response window a report classifies as ExternalPriorityState (which
 // invalidates, never promotes), and a confirmed command never opens a fallback
-// query. The band would stay at the compiled 3 and the next level-2 press
-// would transmit MED — the speed a 2-speed fan lacks, which STOPS it (#30).
+// query. A fan driven only by successful commands would then never confirm or
+// persist its band: every boot would fall back to the conservative
+// unknown-capability assumption, the entity's traits would never state what the
+// fan actually is, and the core's capability filter — the last line of defence
+// against a MED frame formed from a stale wider band — could never fire.
 QC_TEST("persistence", "a two-speed confirmation teaches the band on the command path") {
   for (const auto speed : {Speed::Low, Speed::High}) {
     auto core = restored_core();

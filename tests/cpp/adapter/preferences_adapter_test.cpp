@@ -248,6 +248,28 @@ class CapturingPublisher final : public AuthorityPublisher {
   std::size_t publications{0};
 };
 
+// Drives the component's loop until it reaches `target`, in 25 ms steps.
+bool loop_to(QuietCoolComponent& component, ::quietcool::CoordinatorState target,
+             std::size_t limit) {
+  for (std::size_t pass = 0; pass < limit; ++pass) {
+    if (component.snapshot().state == target) return true;
+    host_test::advance_millis(25);
+    component.call_loop();
+  }
+  return component.snapshot().state == target;
+}
+
+// Feeds the same 6-byte report twice, far enough apart to count as independent
+// candidates, then lets the effects drain.
+void confirm_with(QuietCoolComponent& component,
+                  const std::array<std::uint8_t, 6>& report) {
+  host_test::advance_millis(500);
+  component.on_radio_packet(::quietcool::ByteView(report.data(), 6));
+  host_test::advance_millis(100);
+  component.on_radio_packet(::quietcool::ByteView(report.data(), 6));
+  component.call_loop();
+}
+
 // The whole #31 chain on the host: NVS record -> adapter load -> core restore
 // -> PublishAuthorityEffect -> authority publisher, all inside setup(), before
 // a single frame is transmitted. Then the published capability must make a
@@ -281,12 +303,12 @@ QC_TEST("preferences", "restored capability reaches the publisher before any RF"
 }
 
 // The other half of the #31 chain, on a unit that has never learned a band:
-// a 2-speed fan's confirmation must narrow the entity AND reach NVS, so the
-// window this branch closes is entered at most once per fan. The fan's
+// a 2-speed fan's confirmation must CONFIRM the entity band AND reach NVS, so
+// the unknown-capability window is entered at most once per fan. The fan's
 // confirming report is byte-identical to the command frame (both carry marker
 // bits 10), which is exactly the frame the echo filter cannot attribute — if
-// that evidence is discarded rather than ranked, the count stays at the
-// compiled 3 and a level-2 press transmits MED, which stops the fan (#30).
+// that evidence is discarded rather than ranked, nothing is ever persisted and
+// every boot re-enters the window on a fan whose band was already provable.
 QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches NVS") {
   ScopedPreferences preferences;
   {
@@ -303,37 +325,22 @@ QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches 
   component.set_authority_publisher(&publisher);
   component.setup();
   QC_CHECK_EQ(authority_speed_count(*publisher.last),
-              kCompiledDefaultSpeedCount);
-
-  const auto loop_to = [&](::quietcool::CoordinatorState target,
-                           std::size_t limit) {
-    for (std::size_t pass = 0; pass < limit; ++pass) {
-      if (component.snapshot().state == target) return true;
-      host_test::advance_millis(25);
-      component.call_loop();
-    }
-    return component.snapshot().state == target;
-  };
+              kUnknownCapabilitySpeedCount);
 
   // Let the unanswered boot query lapse, then command LOW.
-  QC_CHECK(loop_to(::quietcool::CoordinatorState::Idle, 2000));
+  QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
   component.request_state(
       ::quietcool::FanState::command(::quietcool::Speed::Low,
                                      ::quietcool::Duration::Continuous));
-  QC_CHECK(loop_to(::quietcool::CoordinatorState::PostCommandListening, 2000));
+  QC_CHECK(loop_to(component,
+                   ::quietcool::CoordinatorState::PostCommandListening, 2000));
   const auto& sent = radio.packets().back();
   QC_CHECK_EQ(sent.bytes[4], 0x9F);
 
   // Two independent confirmations inside the acceptance window, byte-identical
   // to what we transmitted — a genuine 2-speed report.
-  const std::array<std::uint8_t, 6> report{sent.bytes[0], sent.bytes[1],
-                                           sent.bytes[2], sent.bytes[3],
-                                           0x9F,          0x9F};
-  host_test::advance_millis(500);
-  component.on_radio_packet(::quietcool::ByteView(report.data(), 6));
-  host_test::advance_millis(100);
-  component.on_radio_packet(::quietcool::ByteView(report.data(), 6));
-  component.call_loop();
+  confirm_with(component, {sent.bytes[0], sent.bytes[1], sent.bytes[2],
+                           sent.bytes[3], 0x9F, 0x9F});
 
   QC_CHECK(publisher.last->speed_capability.has_value());
   QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Two);
@@ -347,6 +354,69 @@ QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches 
   const auto reloaded = reader.load().speed_capability;
   QC_CHECK(reloaded.has_value());
   QC_CHECK_EQ(reloaded.value(), SpeedCapability::Two);
+}
+
+// Issue #31 review (opus-xhigh and codex): the band and the level are published
+// from the same snapshot, so they cannot contradict each other.
+//
+// The trajectory, through the real component: a fan whose sticky capability is
+// Three is commanded to HIGH (0xBF on the wire) and answers with that very
+// byte. The frame is indistinguishable from our own echo, and its marker bits
+// (10) alias SpeedCapability::Two — evidence ranking therefore refuses to let
+// it demote the stored Three, which is correct. The two lines
+// QuietCoolFan::publish_authority then runs must agree: clamping the level by
+// the report's markers instead published 2 against a band of 3, so Home
+// Assistant showed 2/3 (~66%) for a fan running at HIGH, and the next turn-on
+// with no explicit speed reused that level and transmitted MED (0xAF).
+QC_TEST("preferences", "an echo-confirmed HIGH publishes the top level, not MED") {
+  ScopedPreferences preferences;
+  {
+    EspHomePreferencesAdapter writer(kPreferenceKey, 0);
+    writer.load();
+    QC_CHECK(provision(writer));
+    QC_CHECK(save_capability(writer, SpeedCapability::Three));
+  }
+
+  host_test::set_millis(0);
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
+  CapturingPublisher publisher;
+  component.set_authority_publisher(&publisher);
+  component.setup();
+  QC_CHECK_EQ(authority_speed_count(*publisher.last), 3);
+
+  QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
+  component.request_state(
+      ::quietcool::FanState::command(::quietcool::Speed::High,
+                                     ::quietcool::Duration::Continuous));
+  QC_CHECK(loop_to(component,
+                   ::quietcool::CoordinatorState::PostCommandListening, 2000));
+  const auto& sent = radio.packets().back();
+  QC_CHECK_EQ(sent.bytes[4], 0xBF);
+  confirm_with(component, {sent.bytes[0], sent.bytes[1], sent.bytes[2],
+                           sent.bytes[3], 0xBF, 0xBF});
+
+  // The echo did not demote the band...
+  QC_CHECK_EQ(publisher.last->speed_capability.value(), SpeedCapability::Three);
+  const auto count = authority_speed_count(*publisher.last);
+  QC_CHECK_EQ(count, 3);
+  // ...and the confirmed frame it carries is the ambiguous 0xBF.
+  const auto* confirmed =
+      std::get_if<::quietcool::ConfirmedStateAuthority>(&publisher.last->state);
+  QC_CHECK(confirmed != nullptr);
+  QC_CHECK_EQ(confirmed->state.raw_byte(), 0xBF);
+  QC_CHECK_EQ(confirmed->state.report_capability().value(),
+              SpeedCapability::Two);  // the alias the mapping must ignore
+
+  const auto feedback = authority_to_feedback(confirmed->state, count);
+  QC_CHECK(feedback.on);
+  QC_CHECK_EQ(feedback.speed, std::optional<int>(3));  // not 2 of 3
+
+  // The downstream half: the entity caches that level, and a later turn-on
+  // without an explicit speed re-commands HIGH rather than MED.
+  QC_CHECK_EQ(
+      fan_command_from_intent(true, *feedback.speed, count).outbound_command_byte(),
+      0xBF);
 }
 
 }  // namespace

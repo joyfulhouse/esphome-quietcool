@@ -134,12 +134,16 @@ enum class EvidenceConfidence : std::uint8_t { ExactBackedConsensus, RecoveredOn
 // — so a frame matching our own in-flight command is PossiblyOwnEcho: real
 // evidence of a 2-speed fan, or no evidence at all if it was our own echo. The
 // rank exists because the two failure modes are wildly asymmetric. Discarding
-// such evidence leaves a 2-speed fan's band at the compiled 3 and the next
-// level-2 press transmits MED, a speed it lacks, which STOPS the fan (#30).
-// Trusting it blindly can mis-learn Two on a 3-speed fan, whose only effect is
-// that a MED press runs HIGH until the next unambiguous report corrects it. So
-// PossiblyOwnEcho evidence is used, but never in preference to a frame that
-// could not have been ours.
+// such evidence makes capability Two unlearnable from a SUCCESSFUL command — a
+// confirmed command never opens a fallback query, and outside a response window
+// a report classifies as ExternalPriorityState, which invalidates rather than
+// promotes — so a 2-speed fan driven only by commands would never confirm or
+// persist its band, and every boot would fall back to the conservative
+// unknown-capability assumption instead of to proof. Trusting it blindly is the
+// worse half: an echo can then DEMOTE a fan already known to have three speeds,
+// narrowing its entity to two levels across reboots and putting MED out of
+// reach on a fan that has it. So PossiblyOwnEcho evidence is used, but never in
+// preference to a frame that could not have been ours.
 enum class CapabilityEvidence : std::uint8_t { Unambiguous, PossiblyOwnEcho };
 enum class AuthorityLossReason : std::uint8_t {
   Boot, Unprovisioned, LocalCommandPending, ManualRevalidationPending,

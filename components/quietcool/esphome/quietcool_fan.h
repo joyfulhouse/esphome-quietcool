@@ -30,7 +30,7 @@ class QuietCoolFan final : public Component,
  private:
   QuietCoolComponent* controller_{nullptr};
   ::quietcool::AuthorityPublicationGate publication_gate_;
-  std::uint8_t supported_speed_count_{kCompiledDefaultSpeedCount};
+  std::uint8_t supported_speed_count_{kUnknownCapabilitySpeedCount};
 };
 
 }  // namespace esphome::quietcool

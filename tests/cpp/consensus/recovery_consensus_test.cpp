@@ -121,9 +121,10 @@ QC_TEST("consensus", "canonical change resets all group facts") {
 // Issue #31 review: a 2-speed fan's confirming report is byte-identical to the
 // command frame — both carry marker bits 10 — so the echo filter cannot tell
 // them apart. It must therefore RANK the evidence, not drop it: dropping it
-// would make capability Two unlearnable on the command path and leave the
-// entity's band at the compiled 3, which transmits MED on a level-2 press and
-// stops a 2-speed fan (#30).
+// would make capability Two unlearnable on the command path, so a fan driven
+// only by successful commands would never confirm or persist its band and
+// every boot would fall back to the conservative unknown-capability
+// assumption.
 QC_TEST("consensus", "an echo-indistinguishable candidate still teaches the band") {
   ConsensusTracker tracker;
   QC_CHECK(!tracker.observe(response(0xCB, 0x9F), 100, 0x9F).has_value());

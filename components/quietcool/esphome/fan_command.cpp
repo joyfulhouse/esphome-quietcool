@@ -24,8 +24,9 @@ int clamp_fan_speed(int speed, std::uint8_t supported_speed_count) {
   // "high" on a 2-speed fan transmit MED (0xAF) — a speed the fan does not
   // have — which stopped it instead (issue #30).
   //
-  // Over the real 1..3 domain (production initialises at 3 and accepts only
-  // reported counts 1..3), count==3 degenerates to the identity mapping
+  // Over the real 1..3 domain (production initialises at the
+  // unknown-capability band and otherwise takes only confirmed counts 1..3),
+  // count==3 degenerates to the identity mapping
   // (1→Low, 2→Medium, 3→High), so 3-speed units are unaffected. Outside that
   // domain the rule is positional, not identity — deliberate, since a count
   // above 3 has no wire meaning to be identical to. count==1 maps its single level to High

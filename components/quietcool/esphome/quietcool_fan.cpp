@@ -49,19 +49,22 @@ void QuietCoolFan::publish_authority(
   // restore-time publication carries no confirmed state — the gate swallows
   // it — but its restored speed_capability must reach get_traits() before
   // Home Assistant can send a command, or a level-2 press on a 2-speed fan is
-  // mapped against the compiled default of 3 and transmits MED, which stops
-  // the fan (issue #30's failure, transiently). The snapshot's sticky
-  // capability is the single source of truth here, and it strictly DOMINATES
-  // the per-report FanFeedback::supported_speed_count rather than merely
-  // matching it: promote() folds every confirmed report's capability into the
-  // snapshot, so the snapshot is defined whenever the report's marker bits
-  // are, plus at restore time — and it is the only one of the two that applies
-  // evidence ranking, so a frame that may have been our own echo cannot demote
-  // a fan whose band is already known (issue #31 review). Consulting the
-  // report as a second source would reinstate exactly that demotion.
+  // mapped against a wider band and transmits MED, which stops the fan (issue
+  // #30's failure, transiently).
+  //
+  // The snapshot's sticky capability is the SOLE source of the band, for both
+  // roles this member serves — the traits Home Assistant lists and the band
+  // control() maps an incoming level against. promote() folds every confirmed
+  // report's capability into the snapshot and it is the only place evidence
+  // ranking is applied, so a frame that may have been our own echo (marker bits
+  // 10 alias capability Two) cannot demote a fan whose band is already known
+  // (issue #31 review). authority_to_feedback is therefore handed this same
+  // count and never re-derives one from the report, which is what keeps the
+  // published LEVEL inside the published BAND.
+  //
   // authority_speed_count is pure in the snapshot: a capability-less snapshot
-  // (Forget, or a re-bind to a different fan) resets the count to the compiled
-  // default rather than preserving the previous fan's band.
+  // (Forget, or a re-bind to a different fan) resets the count to the
+  // unknown-capability band rather than preserving the previous fan's.
   supported_speed_count_ = authority_speed_count(authority);
   const auto confirmed = publication_gate_.next(authority);
   if (!confirmed) return;

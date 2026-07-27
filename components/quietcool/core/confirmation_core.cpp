@@ -38,10 +38,12 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
   }
   // Publish the restored snapshot (issue #31): restore previously produced no
   // PublishAuthorityEffect at all, so the fan entity never saw the restored
-  // speed_capability and kept its compiled default of 3 until the boot query's
-  // reply. The publication gate swallows this for STATE purposes (authority is
-  // Unknown here), but the adapter seeds its supported speed count from it
-  // before the gate runs.
+  // speed_capability and ran on its unknown-capability assumption until the
+  // boot query's reply — which lands after the API has already listed the
+  // entity, freezing the wrong band in Home Assistant's cache for the session.
+  // The publication gate swallows this for STATE purposes (authority is Unknown
+  // here), but the adapter seeds its supported speed count from it before the
+  // gate runs.
   effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   return effects;
 }
