@@ -2,9 +2,16 @@
 
 Status: design contract only
 Date: 2026-07-21
-Target worktree: <code>/Users/bryanli/Projects/joyfulhouse/esphome-quietcool-cpp</code>
+Target worktree: a dedicated checkout outside this repository
 Target branch baseline: <code>feat/cpp-core</code> at <code>c676bbf</code>
 Implementation authorization: none
+
+This is a dated historical record and is not maintained. It describes the
+repository as it stood on 2026-07-21, before the YAML track was frozen under
+<code>legacy/</code>; paths and names below are not corrected to the current
+layout. The only edits since are the redaction of two absolute filesystem
+paths on the original author's machine (this header and §2), which pointed at
+directories no clone can have.
 
 ## 1. Purpose and decision
 
@@ -47,8 +54,8 @@ The evidence base is:
 
 - <code>docs/claude/2026-07-20-confirmation-path-findings.md</code>, including
   its 2026-07-21 postscript.
-- The Rust reference at
-  <code>/Users/bryanli/Projects/joyfulhouse/homeassistant-dev/quietcool-rust/crates/quietcool-core</code>.
+- The Rust reference implementation (the <code>quietcool-core</code> crate,
+  maintained outside this repository).
 - The current YAML only as migration and compatibility evidence, not as a
   state-machine template.
 

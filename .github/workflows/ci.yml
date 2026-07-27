@@ -32,10 +32,26 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install esphome
+      - name: Provide example secrets
+        # The primary deployable config resolves `!secret` against its own
+        # directory (the repository root). The placeholders in the example are
+        # syntactically valid, so validation needs nothing real.
+        run: cp secrets.yaml.example secrets.yaml
       - name: esphome config (C++ / SX127x)
         run: esphome config quietcool-cpp-example.yaml
       - name: esphome config (C++ / SX126x)
         run: esphome config quietcool-cpp-example-sx126x.yaml
+      # The primary deployable config and the diagnostic harness that packages
+      # it used to be absent from this workflow entirely, while the README
+      # claimed CI covered every checked-in target. They are validated here;
+      # they are NOT compiled, so their display/entity lambdas are only ever
+      # built by the pre-PR checklist in CONTRIBUTING.md. Closing that
+      # remaining gap costs a third ESP-IDF build — do it deliberately, not by
+      # editing the README.
+      - name: esphome config (C++ / primary deployable)
+        run: esphome config quietcool-cpp-lora32.yaml
+      - name: esphome config (C++ / loop-stack diagnostic)
+        run: esphome config quietcool-cpp-diag.yaml
       - name: Compile (C++ / SX127x)
         run: esphome compile quietcool-cpp-example.yaml
       - name: Compile (C++ / SX126x)
@@ -51,14 +67,18 @@ jobs:
           python-version: "3.13"
       - run: pip install esphome
       - name: Provide example secrets
-        run: cp secrets.yaml.example secrets.yaml
+        # ESPHome resolves !secret against the config file's own directory,
+        # so the frozen legacy configs need their copy under legacy/.
+        run: |
+          cp secrets.yaml.example secrets.yaml
+          cp secrets.yaml.example legacy/secrets.yaml
       - name: Config regression tests
         run: python -m unittest tests.test_quietcool_esphome_config -v
       - name: esphome config (LoRa32 V2.1 / SX1278)
-        run: esphome config quietcool-lora32.yaml
+        run: esphome config legacy/quietcool-lora32.yaml
       - name: esphome config (LoRa V3 / SX1262)
-        run: esphome config quietcool-lora-v3.yaml
+        run: esphome config legacy/quietcool-lora-v3.yaml
       - name: Compile (LoRa32 V2.1 / SX1278)
-        run: esphome compile quietcool-lora32.yaml
+        run: esphome compile legacy/quietcool-lora32.yaml
       - name: Compile (LoRa V3 / SX1262)
-        run: esphome compile quietcool-lora-v3.yaml
+        run: esphome compile legacy/quietcool-lora-v3.yaml

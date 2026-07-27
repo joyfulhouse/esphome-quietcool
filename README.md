@@ -11,6 +11,16 @@ clean-room implementation of what that analysis found.
 > This project drives the fan directly with a Semtech LoRa transceiver in raw FSK
 > packet mode.
 
+**The product is the C++ external component** under
+[`components/quietcool/`](components/quietcool) — an RF confirmation core with
+host test suites that `.github/workflows/ci.yml` runs, the platform-free one
+also under ASan/UBSan
+([what the workflow runs](#what-githubworkflowsciyml-runs)) — plus the
+`quietcool-cpp-*.yaml`
+configurations at the repository root that wire it to real boards. An earlier
+all-YAML implementation is preserved as a frozen legacy track under
+[`legacy/`](legacy/).
+
 ## Where to buy
 
 All you need is one of these two off-the-shelf ESP32 LoRa boards (each is a
@@ -19,11 +29,92 @@ complete kit: ESP32 + 433 MHz radio + OLED + antenna):
 | [LilyGO TTGO LoRa32 V2.1 (433 MHz)](https://amzn.to/4vBvqOU) | [HiLetgo ESP32 LoRa V3 (SX1262)](https://amzn.to/4wagWqi) |
 | :---: | :---: |
 | [![LilyGO TTGO LoRa32 V2.1 433 MHz board](docs/images/lilygo-ttgo-lora32-v21.jpg)](https://amzn.to/4vBvqOU) | [![HiLetgo ESP32 LoRa V3 SX1262 board with OLED and 433–510 MHz antenna](docs/images/hiletgo-esp32-lora-v3.jpg)](https://amzn.to/4wagWqi) |
-| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and **verified working on real fans** (SX1278, `quietcool-cpp-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — ⚠️ **not yet confirmed working**: the SX1262/ESP32-S3 port (`quietcool-lora-v3.yaml`) compiles but hasn't been tested on real hardware. Choose the LilyGO unless you want to help with bring-up |
+| **[Buy on Amazon](https://amzn.to/4vBvqOU)** — the reference board this project was built and **verified working on real fans** (SX1278, `quietcool-cpp-lora32.yaml`) | **[Buy on Amazon](https://amzn.to/4wagWqi)** — ⚠️ **not yet confirmed working**: the SX1262/ESP32-S3 port (`legacy/quietcool-lora-v3.yaml`) compiles but hasn't been tested on real hardware. Choose the LilyGO unless you want to help with bring-up |
 
 <sub>Disclosure: as an Amazon Associate (store `joyfulhousegi-20`) the maintainers
 may earn from qualifying purchases through the links above. They cost you nothing
 extra.</sub>
+
+## Supported hardware
+
+| Board | Radio | MCU | Config | Status |
+| --- | --- | --- | --- | --- |
+| LilyGO TTGO LoRa32 **V2.1** (433 MHz) | SX1278 (SX127x) | ESP32 | `quietcool-cpp-lora32.yaml` (C++, **primary**) | Running on real fans |
+| Heltec / HiLetgo ESP32 LoRa **V3** (433–510 MHz) | SX1262 (SX126x) | ESP32-S3 | `legacy/quietcool-lora-v3.yaml` (legacy YAML) | Builds; awaiting hardware bring-up |
+
+The maintained build is the **C++ core** (`quietcool-cpp-lora32.yaml`), which
+keeps the RF confirmation state machine in the tested C++ component under
+`components/quietcool/`. The V3/SX1262 board has no deployable C++ config yet
+(`quietcool-cpp-example-sx126x.yaml` is a compile-only reference), so V3 stays
+on the [legacy YAML track](#legacy-yaml-track-frozen) for now.
+
+The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
+`sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
+knobs). The CI workflow runs `esphome config` and `esphome compile` on the V3
+config (see [below](#what-githubworkflowsciyml-runs)). That says the config
+builds, not that the radio behaves: the V3 has not been run on real
+hardware yet — a few pins (status-LED polarity, the VBAT ADC divider, and the
+RX filter bandwidth) are noted inline as `PIN CONFIDENCE` items to confirm on
+first bring-up. See [docs/hardware.md](docs/hardware.md).
+
+Both need a **433 MHz antenna** connected before transmitting.
+
+## Quick start (C++ build)
+
+Four `quietcool-cpp-*.yaml` configs live at the repository root:
+
+| File | Use it when |
+| --- | --- |
+| `quietcool-cpp-example.yaml` | **Canonical starting point** — the minimal config-and-wiring-only shape of the C++ build (compile-only: no network/secrets) |
+| `quietcool-cpp-lora32.yaml` | **Full-featured deployable reference** for the TTGO LoRa32 V2.1 — network, OLED, HA entities. Flash this |
+| `quietcool-cpp-example-sx126x.yaml` | Minimal compile-only reference for SX126x boards (Heltec V3) |
+| `quietcool-cpp-diag.yaml` | Loop-stack diagnostic harness (packages the primary config) |
+
+```bash
+# 1. Install ESPHome (uv recommended)
+uv venv .venv && uv pip install --python .venv/bin/python esphome
+
+# 2. Provide secrets
+cp secrets.yaml.example secrets.yaml   # then edit
+
+# 3. Validate, build, flash (USB first time, OTA after)
+.venv/bin/esphome run quietcool-cpp-lora32.yaml
+```
+
+Then adopt the device in Home Assistant (ESPHome integration) and teach it your
+fan via [Learn mode](#learn-mode--porting-to-your-own-fan). The full
+step-by-step walkthrough — flashing, HA adoption, pairing, display setup,
+troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
+
+### What `.github/workflows/ci.yml` runs
+
+The workflow declares three jobs. Below is every command they run; setup steps
+(checkout, `setup-python`, `pip install esphome`, and copying
+`secrets.yaml.example` into place) are omitted.
+
+| Job | Commands it runs |
+| --- | --- |
+| `core` | `make -C tests/cpp test`, `make -C tests/cpp test-adapter`, `make -C tests/cpp test-sanitized` |
+| `component` | `esphome config` on `quietcool-cpp-example.yaml`, `quietcool-cpp-example-sx126x.yaml`, `quietcool-cpp-lora32.yaml`, `quietcool-cpp-diag.yaml`; then `esphome compile` on `quietcool-cpp-example.yaml` and `quietcool-cpp-example-sx126x.yaml` |
+| `legacy-yaml` | `python -m unittest tests.test_quietcool_esphome_config`; then `esphome config` **and** `esphome compile` on `legacy/quietcool-lora32.yaml` and `legacy/quietcool-lora-v3.yaml` |
+
+Three things are worth spelling out, and the table claims nothing beyond them:
+
+- What each `make` target covers is decided by `tests/cpp/Makefile`, not by the
+  workflow. `test` builds the platform-free host suite, runs two static gates
+  first (a platform-include check and an exceptions/RTTI-free syntax check),
+  and depends on `test-adapter`; `test-adapter` builds the ESPHome adapter
+  sources against stubs. `test-sanitized` rebuilds **only the platform-free
+  suite** under ASan/UBSan — the adapter suite is not sanitized.
+- The workflow never runs `esphome compile` on `quietcool-cpp-lora32.yaml` —
+  the config you actually flash — or on `quietcool-cpp-diag.yaml`. Their
+  display and entity lambdas are compiled only when someone runs the pre-PR
+  checklist in [CONTRIBUTING.md](CONTRIBUTING.md) by hand. **Compile locally
+  before you flash.**
+- Whether any of these jobs has to pass before a change reaches `main` is a
+  GitHub branch-protection setting, which is not stored in this repository.
+  Read the table as "what the workflow file runs", not as a guarantee about
+  what gets merged.
 
 ## Features
 
@@ -63,7 +154,7 @@ extra.</sub>
   visible in RF diagnostics, but it never mutates the safety-facing fan entity:
   hearing a command is not proof that the receiver acted. Only consensus from
   this controller's locally anchored query can publish physical state.
-- **On-device OLED** — animated fan icon, HH:MM:SS timer countdown, three
+- **On-device OLED** — animated fan icon, timer countdown, three
   HA-relayed temperatures (indoor / outdoor / attic) with semantic icons, and a
   WiFi / API / battery status row. Temperature sources are configurable from the
   HA UI, not hard-coded.
@@ -90,15 +181,19 @@ no CRC), and then either confirms and stops, or lets the pre-existing spaced
 re-fire backstop continue up to its fixed attempt budget. Every outcome —
 `confirmed`, `mismatch`, `no consensus`, `FAILED`, or `superseded by OEM
 remote` — is published to Home Assistant, and a physical OEM remote press
-always takes priority over pending automatic work. Hearing its `66 66` query
-reserves a two-second exchange holdoff in which no local query or state frame
-can take airtime. The response decoder and single-transaction flow, including
-the 2026-07-19 state-knowledge/coalescing correction, were validated live on a
-downstream SX1278 installation. The capability diagnostics identified the test
-fan as a two-speed model, and three rapid equivalent Off calls joined one
-transaction that confirmed after one command and one query. Full detail is in
-[docs/protocol.md](docs/protocol.md) and
-[docs/firmware-analysis.md](docs/firmware-analysis.md).
+always takes priority over pending automatic work.
+
+The full engineering detail lives in the docs, not here:
+
+- the query/response timing model, transaction/consensus rules, Off-variant
+  semantics, timer state-knowledge contract, and the bounded TX queue —
+  [docs/protocol.md](docs/protocol.md) (see “Query timing and closed-loop
+  control” and “State-knowledge boundary”);
+- the 2026-07-19 production Off-flapping RCA and the live validation record —
+  [docs/protocol.md](docs/protocol.md#2026-07-19-production-rca) and
+  [docs/deployment.md](docs/deployment.md);
+- the recovered OEM firmware evidence behind all of it —
+  [docs/firmware-analysis.md](docs/firmware-analysis.md).
 
 > ⚠️ **Safety automations MUST gate on `Fan Confirmed Off` (or
 > `Fan State Known`), never on the bare `fan.*` entity.** This is a hard
@@ -112,150 +207,46 @@ transaction that confirmed after one command and one query. Full detail is in
 > subscribe, outside any publish discipline. `Fan Confirmed Off` is
 > immune: it is false until authoritative query consensus proves Off.
 
-All duration-zero commands (`80`, `90`, `A0`, and `B0`) are semantically Off.
-The transmitter may preserve the fan's remembered-speed nibble as an
-OEM-faithful compatibility policy, but a duplicate active Off request joins the
-same transaction regardless of that nibble. Command requests never publish the
-fan entity optimistically. Correlated local-query consensus may set `Fan State
-Known`; passive OEM traffic is diagnostics-only and clears/leaves state
-authority false. `Fan Confirmed Off` is the atomic safety signal: it is true
-only when authoritative consensus says Off, and false for running or unknown
-state. This avoids an HA batching race that can occur when a safety automation
-separately joins the fan entity and a Known flag.
-
-The same rule applies to timers: the controller presents no guessed timer state
-at boot. Every new command, and every actual non-query command burst including
-an automatic re-fire, invalidates both `Fan State Known` and `Timer State Known`.
-Outgoing commands do not optimistically arm or clear confirmed timer metadata.
-The fan reports the programmed duration, not when the timer began, so a trusted
-countdown is created only when a locally initiated timer command is confirmed;
-an active-timer report from a manual Refresh has unknown age and remains
-diagnostic-only. When an estimated local countdown reaches zero, the firmware
-invalidates state and timer authority instead of publishing a guessed Off.
-
-The serialized TX queue is deliberately finite (`max_runs: 5`). ESPHome may
-reject an execution beyond that capacity, so this project does not promise one
-on-air burst for every rapid press. A new transaction and its re-fire command
-are armed before enqueue, and the spaced driver waits for TX to become idle;
-that gives the latest desired command a bounded retry path even when its initial
-enqueue was rejected. At actual execution, obsolete queued state commands are
-discarded before airtime. A following query is scheduled so its 300 ms
-acceptance floor begins one millisecond after the preceding inclusive 2.5 s
-response tail; the original one-second spaced command re-fire remains eligible
-while that query is pending.
-
-### 2026-07-19 production Off-flapping RCA
-
-Production recorder and controller diagnostics captured 107 Home Assistant fan
-state transitions in 73.34 seconds after a window interlock requested Off: 54
-interlock runs, 53 RF-confirmation mismatches that all still showed five attempts
-remaining, and 118 RF bursts (354 application frames). The fan repeatedly
-reported `B1` (High, one-hour timer); no ESP-originated On command was present.
-
-The observed feedback path was the former ESPHome `TemplateFan` publishing optimistic
-Off, followed by Home Assistant re-entering the interlock when confirmation
-restored On. Each re-entry started a fresh Off transaction and reset the
-nominally bounded attempt counter. The correction has independent guards:
-
-1. never publish locally requested or passive OEM state into the safety fan
-   entity; and
-2. coalesce every semantically equivalent request into its active transaction
-   without TX, counter reset, or loss of query/consensus evidence;
-3. discard stale different-command queue entries before airtime; and
-4. poison superseded query epochs and conflicting response mailboxes so stale
-   consensus cannot restore authority.
-
-The one-second spaced re-fire mechanism and its terminal attempt limit remain
-unchanged. These records demonstrate reported-state flapping and excessive RF
-traffic; without an independent motor sensor they do not prove that the
-physical fan cycled 53 times. They also do not prove that speed-matched Off is
-required: `90` later succeeded while the last apparent state was High.
-
-On 2026-07-19 the corrected logic was OTA-flashed exactly once to the downstream
-SX1278 controller and exercised without energizing the already-Off fan. A
-62-second post-boot observation produced zero transmissions and left all state
-authority unknown. Manual Refresh then received two exact `90 90` reports, and
-three rapid HA Off calls produced only one Off burst plus one query; the two
-duplicate calls joined the active budget, and the transaction confirmed `90`
-after one command and one query. Home Assistant recorded no fan or interlock
-state transitions during the test. This is RF confirmation, not independent
-airflow or motor proof. The public SX1278 source was compiled but its named
-artifact was not the file flashed; the SX1262/V3 image was compiled and remains
-unverified on hardware.
-
-## Supported hardware
-
-| Board | Radio | MCU | Config | Status |
-| --- | --- | --- | --- | --- |
-| LilyGO TTGO LoRa32 **V2.1** (433 MHz) | SX1278 (SX127x) | ESP32 | `quietcool-cpp-lora32.yaml` (C++, **primary**) | Running on real fans |
-| Heltec / HiLetgo ESP32 LoRa **V3** (433–510 MHz) | SX1262 (SX126x) | ESP32-S3 | `quietcool-lora-v3.yaml` (legacy YAML) | Builds; awaiting hardware bring-up |
-
-The maintained build is the **C++ core** (`quietcool-cpp-lora32.yaml`), which
-moves the RF confirmation state machine into the tested C++ component under
-`components/quietcool/`. The all-YAML build (`quietcool-lora32.yaml`) is retained
-as **legacy** for units not yet cut over. The V3/SX1262 board has no deployable
-C++ config yet (`quietcool-cpp-example-sx126x.yaml` is a compile-only reference),
-so V3 stays on the legacy YAML build for now.
-
-The V3 port reproduces the identical 2-FSK profile on the SX1262 (ESPHome's
-`sx126x` component exposes the same bitrate/deviation/sync/preamble/variable-length
-knobs). CI validates and compiles both checked-in targets. The V3 has not been
-run on real hardware yet — a few pins
-(status-LED polarity, the VBAT ADC divider, and the RX filter bandwidth) are
-noted inline as `PIN CONFIDENCE` items to confirm on first bring-up. See
-[docs/hardware.md](docs/hardware.md).
-
-Both need a **433 MHz antenna** connected before transmitting.
-
-Buying links (with product photos) are at the top of this README under
-[Where to buy](#where-to-buy).
-
-## Quick start
-
-```bash
-# 1. Install ESPHome (uv recommended)
-uv venv .venv && uv pip install --python .venv/bin/python esphome
-
-# 2. Provide secrets
-cp secrets.yaml.example secrets.yaml   # then edit
-
-# 3. Validate, build, flash (USB first time, OTA after)
-.venv/bin/esphome run quietcool-cpp-lora32.yaml
-```
-
-Then adopt the device in Home Assistant (ESPHome integration) and teach it your
-fan via [Learn mode](#learn-mode--porting-to-your-own-fan). The full
-step-by-step walkthrough — flashing, HA adoption, pairing, display setup,
-troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
-
 ## Documentation
 
 - [INSTALL.md](INSTALL.md) — step-by-step install, pairing, and troubleshooting
-- [docs/protocol.md](docs/protocol.md) — RF profile, frame format, command byte
+- [docs/protocol.md](docs/protocol.md) — RF profile, frame format, command byte,
+  closed-loop transaction rules, 2026-07-19 RCA
 - [docs/firmware-analysis.md](docs/firmware-analysis.md) — the reverse-engineering:
   memory map, register config, command-byte and response-parser disassembly,
   per-unit ID mechanism
 - [docs/hardware.md](docs/hardware.md) — boards, wiring, antenna, buying links
 - [docs/display.md](docs/display.md) — OLED layout, icon language, preview renderer
 - [docs/deployment.md](docs/deployment.md) — multi-device pattern + a real 2-fan install
+- [legacy/README.md](legacy/README.md) — the frozen all-YAML track
+
+## Legacy YAML track (frozen)
+
+Before the C++ core, the whole confirmation state machine lived in YAML
+lambdas. That implementation was **frozen on 2026-07-21** and moved to
+[`legacy/`](legacy/): `legacy/quietcool-lora32.yaml` (TTGO / SX1278,
+superseded by the C++ build) and `legacy/quietcool-lora-v3.yaml` (Heltec V3 /
+SX1262 — still the only deployable config for that board). Both remain
+buildable, CI-validated, and covered by the Python regression suite, and they
+still use the supported `components/quietcool_legacy_yaml` fan platform — but
+no new behavior lands there. See [legacy/README.md](legacy/README.md).
 
 ## Repository layout
 
 ```
 INSTALL.md                        # step-by-step setup guide
 quietcool-cpp-lora32.yaml         # TTGO LoRa32 V2.1 / SX1278 — C++ build (PRIMARY, flash this)
-quietcool-cpp-example.yaml        # minimal compile-only C++ reference
-quietcool-cpp-example-sx126x.yaml # minimal compile-only C++ reference (SX126x)
+quietcool-cpp-example.yaml        # minimal C++ starting point (compile-only)
+quietcool-cpp-example-sx126x.yaml # minimal C++ reference for SX126x boards (compile-only)
 quietcool-cpp-diag.yaml           # C++ loop-stack diagnostic harness
-quietcool-lora32.yaml             # legacy all-YAML build (TTGO) — superseded
-quietcool-lora-v3.yaml            # legacy all-YAML build (Heltec/HiLetgo V3)
-components/quietcool/             # C++ confirmation core (primary build)
-components/quietcool_legacy_yaml/  # legacy YAML-build fan entity platform
-secrets.yaml.example             # copy to secrets.yaml (gitignored)
-tests/                           # config regression tests (pytest/unittest)
-tools/                           # display renderer + fan-frame generator
-fonts/ images/                   # OLED assets (MDI webfont, fan bitmaps)
-docs/                            # protocol, firmware analysis, hardware, display
+components/quietcool/             # C++ confirmation core (the product)
+components/quietcool_legacy_yaml/ # fan-entity platform used by the legacy track
+legacy/                           # frozen all-YAML build track (see legacy/README.md)
+secrets.yaml.example              # copy to secrets.yaml (gitignored)
+tests/                            # host C++ suites + config regression tests
+tools/                            # display renderer + fan-frame generator
+fonts/ images/                    # OLED assets (MDI webfont, fan bitmaps)
+docs/                             # protocol, firmware analysis, hardware, display
 ```
 
 ## Safety
@@ -305,17 +296,17 @@ fan's ID from its OEM remote through the existing receive path.
 > **Two builds — follow the one you flashed.** The **default build is now the
 > C++ core** (`quietcool-cpp-lora32.yaml`, which compiles `components/quietcool/`);
 > pair it with [Pairing on the C++ core build](#pairing-on-the-c-core-build)
-> below. The original **legacy YAML build** (`quietcool-lora32.yaml`) pairs
-> differently — two presses and an on-OLED prompt — and is documented under the
-> "legacy YAML build" headings that follow. As of this writing the reference
-> TTGO unit runs the C++ build; a second unit remains on the legacy YAML build
-> pending cutover. Matching the wrong procedure to your firmware is the common
-> mistake, so confirm which you flashed.
+> below. The original **legacy YAML build** (`legacy/quietcool-lora32.yaml`)
+> pairs differently — two presses and an on-OLED prompt — and is documented
+> under the "legacy YAML build" headings that follow. As of this writing the
+> reference TTGO unit runs the C++ build; a second unit remains on the legacy
+> YAML build pending cutover. Matching the wrong procedure to your firmware is
+> the common mistake, so confirm which you flashed.
 
 ### First-boot flow (legacy YAML build)
 
 1. Before compiling, change the top-level substitution in
-   `quietcool-lora32.yaml` to:
+   `legacy/quietcool-lora32.yaml` to:
 
    ```yaml
    substitutions:

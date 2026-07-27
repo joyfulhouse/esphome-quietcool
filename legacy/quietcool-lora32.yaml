@@ -7,7 +7,9 @@
 # `quietcool-cpp-lora32.yaml`, which moves that state machine into the tested
 # C++ component under `components/quietcool/`. This file is kept — and stays
 # buildable — only for units not yet cut over to the C++ build. New installs
-# should use the C++ build; see README.md.
+# should use the C++ build; see the root README.md and legacy/README.md.
+# Building from this directory needs a secrets.yaml here
+# (cp ../secrets.yaml.example secrets.yaml, then edit).
 # ============================================================================
 #
 # QuietCool Fan Controller - firmware-verified CMT2300A protocol
@@ -167,7 +169,7 @@ esphome:
 external_components:
   - source:
       type: local
-      path: components
+      path: ../components
     components: [quietcool_legacy_yaml]
 
 esp32:
@@ -2411,7 +2413,7 @@ font:
   # WiFi/API/battery status row AND the v3.3 indoor/outdoor/attic
   # temperature-column icons - share this single 13px font so every glyph
   # on the panel reads at one visually consistent size.
-  - file: "fonts/materialdesignicons-webfont.ttf"
+  - file: "../fonts/materialdesignicons-webfont.ttf"
     id: font_icons
     size: 13
     glyphs: [
@@ -2486,55 +2488,55 @@ font:
 image:
   - platform: file
     id: fan_frame_0
-    file: "images/fan_frame_0.png"
+    file: "../images/fan_frame_0.png"
     type: BINARY
   - platform: file
     id: fan_frame_1
-    file: "images/fan_frame_1.png"
+    file: "../images/fan_frame_1.png"
     type: BINARY
   - platform: file
     id: fan_frame_2
-    file: "images/fan_frame_2.png"
+    file: "../images/fan_frame_2.png"
     type: BINARY
   - platform: file
     id: fan_frame_3
-    file: "images/fan_frame_3.png"
+    file: "../images/fan_frame_3.png"
     type: BINARY
   - platform: file
     id: fan_frame_4
-    file: "images/fan_frame_4.png"
+    file: "../images/fan_frame_4.png"
     type: BINARY
   - platform: file
     id: fan_frame_5
-    file: "images/fan_frame_5.png"
+    file: "../images/fan_frame_5.png"
     type: BINARY
   - platform: file
     id: fan_frame_6
-    file: "images/fan_frame_6.png"
+    file: "../images/fan_frame_6.png"
     type: BINARY
   - platform: file
     id: fan_frame_7
-    file: "images/fan_frame_7.png"
+    file: "../images/fan_frame_7.png"
     type: BINARY
   - platform: file
     id: fan_frame_8
-    file: "images/fan_frame_8.png"
+    file: "../images/fan_frame_8.png"
     type: BINARY
   - platform: file
     id: fan_frame_9
-    file: "images/fan_frame_9.png"
+    file: "../images/fan_frame_9.png"
     type: BINARY
   - platform: file
     id: fan_frame_10
-    file: "images/fan_frame_10.png"
+    file: "../images/fan_frame_10.png"
     type: BINARY
   - platform: file
     id: fan_frame_11
-    file: "images/fan_frame_11.png"
+    file: "../images/fan_frame_11.png"
     type: BINARY
   - platform: file
     id: fan_off_frame
-    file: "images/fan_off.png"
+    file: "../images/fan_off.png"
     type: BINARY
 
 display:

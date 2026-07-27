@@ -1,13 +1,202 @@
+from __future__ import annotations
+
+import importlib.util
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------------
+# Why there are no workflow-semantics assertions in this file
+#
+# Three earlier rounds of this suite tried to prove, statically, that
+# `.github/workflows/ci.yml` "really gates" a merge: a YAML-subset parser, a
+# `bash -e` exit-status model, and fixture tests for that model. Each round was
+# defeated by the next construct — a commented-out step, then `if: false` /
+# `continue-on-error: true` / `on: workflow_dispatch`, then a command that
+# merely ended in the token `pytest`. The regress is unwinnable by
+# construction, because whether a workflow blocks a merge is decided by
+# GitHub's branch-protection required-checks settings, which live in the
+# repository's GitHub configuration and are not in this repository at all. No
+# amount of reading ci.yml can answer the question the assertions were posing.
+#
+# So: this file asserts nothing about *when* GitHub runs a step, whether a step
+# can fail a run, or whether a check is required. The one thing it still reads
+# out of ci.yml is a plain, on-disk fact (see `SecretsProvisioningTest`).
+# Documentation claims about CI are kept honest by being narrow and literal —
+# the README names the workflow's jobs and targets and claims nothing beyond
+# them — not by a model of GitHub Actions. Please do not rebuild the model.
+# ---------------------------------------------------------------------------
+
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "quietcool-lora32.yaml"
-V3_CONFIG = ROOT / "quietcool-lora-v3.yaml"
+CONFIG = ROOT / "legacy" / "quietcool-lora32.yaml"
+V3_CONFIG = ROOT / "legacy" / "quietcool-lora-v3.yaml"
 SECRETS = ROOT / "secrets.yaml"
+SECRETS_EXAMPLE = ROOT / "secrets.yaml.example"
 README = ROOT / "README.md"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+
+# A checked-in ESPHome target: a top-level config at the repository root or in
+# the frozen legacy/ track. Local per-device wrapper YAMLs are untracked, so
+# enumerating from git keeps a developer's private wrapper out of the checks.
+_CONFIG_PATH = re.compile(r"^(?:legacy/)?quietcool-[\w.-]+\.yaml$")
+_SECRET_USE = re.compile(r"!secret\s+([a-z0-9_]+)")
+_INCLUDE_USE = re.compile(r"!include\s+(\S+\.yaml)")
+_FILE_REF = re.compile(r'(?m)^\s*(?:-\s*)?file:\s*"([^"]+)"')
+_PATH_REF = re.compile(r"(?m)^\s*path:\s*(\S+)\s*$")
+_SUBSTITUTION_REF = re.compile(r"\$\{(\w+)\}")
+
+# Literal reads of ci.yml: a job header (two-space key under `jobs:`), an
+# `esphome config|compile <target>` line, and a copy of the example secrets.
+_CI_JOB_HEADER = re.compile(r"^  ([\w.-]+):\s*$")
+_ESPHOME_RUN = re.compile(r"\besphome\s+(config|compile)\s+(\S+\.yaml)\b")
+_SECRETS_COPY = re.compile(
+    r"\bcp\s+(?:-\S+\s+)*secrets\.yaml\.example\s+(\S+)"
+)
+
+
+def _git_output(*args: str) -> bytes | None:
+    """stdout of a git command in ROOT, or None outside a git checkout."""
+    proc = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, check=False
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _tracked_files() -> list[str] | None:
+    out = _git_output("ls-files", "-z")
+    if out is None:
+        return None
+    return [entry.decode() for entry in out.split(b"\0") if entry]
+
+
+def _strip_comments(text: str) -> str:
+    """Drop `#` comments so prose about `!secret` is not read as config."""
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def _substitutions(text: str) -> dict[str, str]:
+    """Values declared in the file's own top-level `substitutions:` block."""
+    values: dict[str, str] = {}
+    inside = False
+    for line in text.splitlines():
+        if line.rstrip() == "substitutions:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if line.strip() and not line[:1].isspace():
+            break  # next top-level key
+        entry = re.match(r'^\s{2}(\w+):\s*"?([^"#\n]*?)"?\s*$', line)
+        if entry:
+            values[entry.group(1)] = entry.group(2)
+    return values
+
+
+def _yaml_list_items(text: str, key: str) -> list[str]:
+    """Items of the first `<key>:` block sequence (e.g. `includes:`)."""
+    items: list[str] = []
+    indent: int | None = None
+    for line in text.splitlines():
+        header = re.match(rf"^(\s*){key}:\s*$", line)
+        if header and indent is None:
+            indent = len(header.group(1))
+            continue
+        if indent is None:
+            continue
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        if line.strip().startswith("- "):
+            items.append(line.strip()[2:].strip().strip('"'))
+    return items
+
+
+def _local_references(config: Path) -> tuple[list[str], list[str]]:
+    """(file-ish, directory-ish) local references made by one config.
+
+    Substitutions are expanded from the config's own block, and remote
+    references (`gfonts://…`) are dropped: only on-disk paths are returned.
+    """
+    text = config.read_text()
+    values = _substitutions(text)
+    body = _strip_comments(text)
+
+    def expand(ref: str) -> str:
+        return _SUBSTITUTION_REF.sub(
+            lambda m: values.get(m.group(1), m.group(0)), ref
+        )
+
+    def local(refs: tuple[str, ...]) -> list[str]:
+        return [expand(ref) for ref in refs if "://" not in expand(ref)]
+
+    files = local((*_FILE_REF.findall(body), *_INCLUDE_USE.findall(body)))
+    dirs = local((*_PATH_REF.findall(body), *_yaml_list_items(body, "includes")))
+    return files, dirs
+
+
+def _checked_in_configs(test: unittest.TestCase) -> tuple[Path, ...]:
+    """Every checked-in ESPHome target, newest layout, from git."""
+    tracked = _tracked_files()
+    if tracked is None:
+        test.skipTest("not a git checkout; cannot enumerate checked-in configs")
+    configs = tuple(
+        ROOT / rel for rel in sorted(tracked) if _CONFIG_PATH.match(rel)
+    )
+    # Four is already fewer than the repository ships; an emptier result means
+    # the enumeration rotted, not that the configs were deleted.
+    test.assertGreaterEqual(len(configs), 4, "config enumeration rotted")
+    return configs
+
+
+def _ci_jobs() -> dict[str, str]:
+    """{job name: the raw text of that job's block} from ci.yml.
+
+    A deliberately flat, literal read: job names are the two-space keys under
+    `jobs:`, and a job's block is every line up to the next such key. It exists
+    only so the secrets check below can be made per job — jobs do not share a
+    filesystem, so a `cp` in one job provisions nothing for a config another
+    job runs.
+
+    This models nothing about whether a step runs or whether its failure fails
+    the run; see the note at the top of this file for why that question is not
+    answerable from this repository.
+    """
+    jobs: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    inside = False
+    for line in CI_WORKFLOW.read_text().splitlines():
+        if line.rstrip() == "jobs:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if line.strip() and not line[:1].isspace():
+            break  # a later top-level key
+        header = _CI_JOB_HEADER.match(line)
+        if header:
+            current = jobs.setdefault(header.group(1), [])
+            continue
+        if current is not None:
+            current.append(line)
+    return {name: "\n".join(body) for name, body in jobs.items()}
+
+
+def _secret_names(config: Path, seen: frozenset[Path] = frozenset()) -> set[str]:
+    """`!secret` names a config needs, following its `!include` packages."""
+    if config in seen:
+        return set()
+    body = _strip_comments(config.read_text())
+    names = set(_SECRET_USE.findall(body))
+    for include in _INCLUDE_USE.findall(body):
+        included = (config.parent / include).resolve()
+        if included.is_file():
+            names |= _secret_names(included, seen | {config})
+    return names
 CONFIRMED_FAN_HEADER = (
     ROOT / "components" / "quietcool_legacy_yaml" / "quietcool_legacy_yaml.h"
 )
@@ -2088,9 +2277,9 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         for i in range(12):
             with self.subTest(frame=i):
                 self.assertIn(f"id: fan_frame_{i}", image_block)
-                self.assertIn(f'file: "images/fan_frame_{i}.png"', image_block)
+                self.assertIn(f'file: "../images/fan_frame_{i}.png"', image_block)
         self.assertIn("id: fan_off_frame", image_block)
-        self.assertIn('file: "images/fan_off.png"', image_block)
+        self.assertIn('file: "../images/fan_off.png"', image_block)
         # Every entry uses the new `platform: file` form, not the
         # deprecated bare-list image: syntax ESPHome 2026.7 warns about.
         self.assertEqual(image_block.count("platform: file"), 13)
@@ -2295,7 +2484,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
 
     def test_mdi_icon_font_declared_from_local_file(self) -> None:
         font_block = top_level_block(self.text, "font")
-        self.assertIn('file: "fonts/materialdesignicons-webfont.ttf"', font_block)
+        self.assertIn('file: "../fonts/materialdesignicons-webfont.ttf"', font_block)
         self.assertIn("id: font_icons", font_block)
         # font_icons_lg (18pt, infinity-only) was removed along with the
         # infinity glyph (FIX 2) - every icon, including battery, now
@@ -2541,7 +2730,7 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
             "(int32_t) (id(timer_expiry_millis) - millis())", interval_block
         )
 
-        known_guard = interval_block.index("if (!id(timer_state_known))")
+        self.assertIn("if (!id(timer_state_known))", interval_block)
         self.assertIn("id(timer_active) = false;", interval_block)
         self.assertIn("id(fan_state_known) = false;", interval_block)
         self.assertIn("id(timer_state_known) = false;", interval_block)
@@ -2836,6 +3025,336 @@ class QuietCoolESPHomeConfigTest(unittest.TestCase):
         renderer = (ROOT / "tools" / "render_display.py").read_text()
         self.assertIn("KEEP IN SYNC: STATE_UNKNOWN", renderer)
         self.assertIn('("" if state.state_known else "?")', renderer)
+
+
+class RepoLayoutTest(unittest.TestCase):
+    """The frozen legacy track lives under legacy/ and stays buildable.
+
+    These guards exist because the 2026-07 repo-clarity move relocated the two
+    monolithic YAML configs; every relative path inside them (component source,
+    fonts, images) had to gain a `../` prefix or `esphome compile` breaks in a
+    way the pure-text tests above would never notice.
+    """
+
+    def test_legacy_configs_live_under_legacy_with_a_readme(self) -> None:
+        self.assertTrue(CONFIG.is_file(), f"missing {CONFIG}")
+        self.assertTrue(V3_CONFIG.is_file(), f"missing {V3_CONFIG}")
+        legacy_readme = ROOT / "legacy" / "README.md"
+        self.assertTrue(legacy_readme.is_file(), f"missing {legacy_readme}")
+        text = legacy_readme.read_text()
+        self.assertIn("frozen", text)
+        self.assertIn("2026-07-21", text)
+        self.assertIn("quietcool_legacy_yaml", text)
+
+    def test_configs_were_moved_not_copied(self) -> None:
+        # The relocation must not leave (or regain) root-level duplicates:
+        # a stale root copy would silently diverge from the tested legacy
+        # copy while still looking like the canonical file to a visitor.
+        for stale in (
+            ROOT / "quietcool-lora32.yaml",
+            ROOT / "quietcool-lora-v3.yaml",
+        ):
+            with self.subTest(path=stale.name):
+                self.assertFalse(
+                    stale.exists(),
+                    f"{stale.name} must exist only under legacy/, "
+                    f"but a root-level copy is present at {stale}",
+                )
+
+    def test_moved_configs_resolve_assets_relative_to_legacy(self) -> None:
+        # ESPHome resolves external_components/font/image paths against the
+        # top-level config's directory, which is now legacy/.
+        for path in (CONFIG, V3_CONFIG):
+            with self.subTest(config=path.name):
+                text = path.read_text()
+                self.assertIn("path: ../components", text)
+                self.assertNotRegex(text, r"(?m)^\s+path: components\s*$")
+                self.assertIn(
+                    'file: "../fonts/materialdesignicons-webfont.ttf"', text
+                )
+                self.assertNotIn('file: "fonts/', text)
+                self.assertNotIn('file: "images/', text)
+
+    def test_every_local_reference_resolves_on_disk(self) -> None:
+        # Guard the actual invariant, not just the path spelling: every local
+        # `file:`/`!include` and every `path:`/`includes:` directory in EVERY
+        # checked-in config must resolve to something real, relative to that
+        # config's own directory (what ESPHome resolves against), and must
+        # stay inside the repository. The root C++ configs are covered too:
+        # CI compiles only two of them, so a broken asset path in the primary
+        # deployable config would otherwise reach a flash unchallenged.
+        configs = _checked_in_configs(self)
+        seen_files = 0
+        seen_dirs = 0
+        for config in configs:
+            with self.subTest(config=str(config)):
+                local_files, dirs = _local_references(config)
+                seen_files += len(local_files)
+                seen_dirs += len(dirs)
+                for ref in local_files:
+                    with self.subTest(file=ref):
+                        resolved = (config.parent / ref).resolve()
+                        self.assertTrue(
+                            resolved.is_file(),
+                            f"{config.name} references {ref}, which does "
+                            f"not exist at {resolved}",
+                        )
+                        self.assertTrue(resolved.is_relative_to(ROOT))
+                for ref in dirs:
+                    with self.subTest(path=ref):
+                        resolved = (config.parent / ref).resolve()
+                        self.assertTrue(
+                            resolved.is_dir(),
+                            f"{config.name} references {ref}, which does "
+                            f"not exist at {resolved}",
+                        )
+                        self.assertTrue(resolved.is_relative_to(ROOT))
+        # The configs are known to embed local fonts, images, the external
+        # component tree, and one package include; empty results would mean
+        # the extraction rotted, not that the configs stopped using assets.
+        self.assertGreaterEqual(seen_files, 20)
+        self.assertGreaterEqual(seen_dirs, 4)
+
+    def test_root_readme_labels_the_legacy_track(self) -> None:
+        readme = README.read_text()
+        self.assertIn("## Legacy YAML track (frozen)", readme)
+        self.assertIn("legacy/README.md", readme)
+        self.assertIn("legacy/quietcool-lora32.yaml", readme)
+        self.assertIn("legacy/quietcool-lora-v3.yaml", readme)
+
+    def test_no_tracked_file_carries_a_machine_local_path(self) -> None:
+        # An absolute path into the original development machine points a
+        # clone at a directory it cannot have, and no document — however
+        # historical — is improved by keeping one. The pattern is assembled
+        # from fragments so this test does not flag itself.
+        pattern = b"/Users/" + b"bryanli"
+        for rel, data in self._tracked_contents():
+            with self.subTest(file=rel):
+                self.assertNotIn(
+                    pattern,
+                    data,
+                    f"{rel} contains the machine-local path "
+                    f"{pattern.decode()!r}",
+                )
+
+    def test_maintained_files_do_not_name_the_pre_relocation_layout(
+        self,
+    ) -> None:
+        # The merged development branch and the pre-rename component name
+        # describe a repository layout that no longer exists, so a *current*
+        # document naming either is stale. Assembled from fragments so this
+        # test does not flag itself.
+        forbidden = (
+            b"feat/" + b"cpp-core",  # merged development branch
+            b"quietcool_confirmed" + b"_fan",  # renamed quietcool_legacy_yaml
+        )
+        # Dated session records under docs/claude/ are exempt. They are
+        # historical documents: each states the day it was written and
+        # describes the repository as it stood then. Editing one so a lint
+        # passes falsifies the record — an audit names the branch it actually
+        # reviewed, and a design contract names the component that existed
+        # when it was written. Executable tooling in the same directory is
+        # NOT exempt; only the prose records are.
+        exempt = [
+            rel
+            for rel, _ in self._tracked_contents()
+            if rel.startswith("docs/claude/") and rel.endswith(".md")
+        ]
+        # If the directory is renamed or emptied the exemption must fail
+        # loudly rather than quietly protect nothing.
+        self.assertTrue(exempt, "no dated session records found to exempt")
+        for rel in exempt:
+            with self.subTest(exempt=rel):
+                # Keep the exemption honest: it covers dated records, so
+                # every exempted file must actually carry its date, in the
+                # filename or in a `Date:` line near the top.
+                head = (ROOT / rel).read_text()[:400]
+                self.assertRegex(
+                    Path(rel).name + "\n" + head,
+                    r"20\d\d-\d\d-\d\d",
+                    f"{rel} is exempted as a dated record but carries no date",
+                )
+        for rel, data in self._tracked_contents():
+            if rel in exempt:
+                continue
+            for pattern in forbidden:
+                with self.subTest(file=rel, pattern=pattern.decode()):
+                    self.assertNotIn(
+                        pattern,
+                        data,
+                        f"{rel} still names the pre-relocation layout: "
+                        f"{pattern.decode()!r}",
+                    )
+
+    def _tracked_contents(self) -> list[tuple[str, bytes]]:
+        tracked = _tracked_files()
+        if tracked is None:
+            self.skipTest("not a git checkout; cannot enumerate tracked files")
+        # An implausibly short listing means enumeration rotted, not that
+        # the repo shrank.
+        self.assertGreater(len(tracked), 20)
+        return [
+            (rel, (ROOT / rel).read_bytes())
+            for rel in tracked
+            # e.g. submodule gitlink entries
+            if (ROOT / rel).is_file()
+        ]
+
+
+class SecretsProvisioningTest(unittest.TestCase):
+    """Secrets hygiene around the configs CI and contributors validate.
+
+    What is deliberately NOT here: any assertion about GitHub Actions
+    semantics — whether a step is enabled, whether its failure fails the run,
+    whether the workflow is a required check. See the note at the top of this
+    file. Only one test below reads ci.yml at all, and it reads it as flat
+    text for a fact that is checkable on disk.
+    """
+
+    def setUp(self) -> None:
+        self.configs = _checked_in_configs(self)
+        self.names = tuple(
+            str(path.relative_to(ROOT)).replace("\\", "/")
+            for path in self.configs
+        )
+
+    def test_ci_provisions_secrets_for_every_config_it_runs(self) -> None:
+        # ESPHome resolves `!secret` against the top-level config's OWN
+        # directory, so moving the legacy configs under legacy/ needed a second
+        # copy at legacy/secrets.yaml. That is a real, cheap, on-disk fact: if
+        # ci.yml names a config that reads !secret, the same job must copy the
+        # example secrets next to it. Checked per job because jobs do not share
+        # a filesystem.
+        #
+        # This is the only survivor of the deleted CI-modelling tests, kept
+        # because the failure it catches (a relocation that misses ci.yml) is
+        # otherwise found only after a full ESPHome install in CI.
+        needs_secrets = {
+            name: config
+            for config, name in zip(self.configs, self.names)
+            if _secret_names(config)
+        }
+        self.assertTrue(needs_secrets, "no checked-in config reads !secret")
+        checked = 0
+        for job, body in sorted(_ci_jobs().items()):
+            targets = {target for _, target in _ESPHOME_RUN.findall(body)}
+            provisioned = set(_SECRETS_COPY.findall(body))
+            for target in sorted(targets):
+                with self.subTest(job=job, target=target):
+                    # A path in ci.yml that no longer exists means a move that
+                    # missed the workflow.
+                    self.assertIn(
+                        target,
+                        self.names,
+                        f"ci.yml job {job!r} runs esphome against {target}, "
+                        f"which is not a checked-in config",
+                    )
+                    if target not in needs_secrets:
+                        continue
+                    checked += 1
+                    rel_dir = (
+                        needs_secrets[target]
+                        .parent.relative_to(ROOT)
+                        .as_posix()
+                    )
+                    expected = (
+                        "secrets.yaml"
+                        if rel_dir == "."
+                        else f"{rel_dir}/secrets.yaml"
+                    )
+                    self.assertIn(
+                        expected,
+                        provisioned,
+                        f"ci.yml job {job!r} runs esphome on {target}, which "
+                        f"reads !secret, but never copies the example secrets "
+                        f"to {expected}",
+                    )
+        # Zero pairs would mean this test silently checked nothing.
+        self.assertGreater(checked, 0, "no job runs a config needing secrets")
+
+    def test_every_secret_name_used_by_a_config_ships_in_the_example(
+        self,
+    ) -> None:
+        # Pure repository consistency, no CI involved: a config referencing a
+        # key secrets.yaml.example omits cannot be validated from a fresh
+        # clone (or fails only for the contributor whose real secrets.yaml
+        # happens to carry it).
+        example = SECRETS_EXAMPLE.read_text()
+        declared = set(re.findall(r"(?m)^([a-z0-9_]+):", example))
+        self.assertGreater(len(declared), 4)
+        for config, name in zip(self.configs, self.names):
+            for secret in sorted(_secret_names(config)):
+                with self.subTest(config=name, secret=secret):
+                    self.assertIn(
+                        secret,
+                        declared,
+                        f"{name} uses !secret {secret}, which "
+                        "secrets.yaml.example does not declare",
+                    )
+
+    def test_secrets_files_are_gitignored_wherever_they_are_created(
+        self,
+    ) -> None:
+        # Also pure repository consistency, and the one with real
+        # consequences: CI and CONTRIBUTING.md both write a secrets.yaml next
+        # to a config, so a .gitignore that stopped covering a subdirectory
+        # would make real credentials committable.
+        if _git_output("rev-parse", "--git-dir") is None:
+            self.skipTest("not a git checkout; cannot query check-ignore")
+        for directory in sorted({config.parent for config in self.configs}):
+            candidate = (directory / "secrets.yaml").relative_to(ROOT)
+            with self.subTest(path=str(candidate)):
+                self.assertIsNotNone(
+                    _git_output("check-ignore", "-q", str(candidate)),
+                    f"{candidate} is not gitignored",
+                )
+
+
+class PreviewRendererTest(unittest.TestCase):
+    """The OLED preview renderer must find ESPHome's font cache post-move.
+
+    `gfonts://Roboto` is cached under the TOP-LEVEL config's directory, so
+    validating the relocated legacy config populates `legacy/.esphome/` while
+    the renderer used to look only in the repository root's `.esphome/`.
+    """
+
+    def _renderer(self) -> object:
+        if importlib.util.find_spec("PIL") is None:
+            self.skipTest("Pillow not installed; cannot import render_display")
+        spec = importlib.util.spec_from_file_location(
+            "quietcool_render_display", ROOT / "tools" / "render_display.py"
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        # `@dataclass` resolves annotations through sys.modules, so the module
+        # must be registered before it executes.
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_font_cache_is_found_in_either_esphome_build_directory(
+        self,
+    ) -> None:
+        renderer = self._renderer()
+        for build_dir in (".esphome", "legacy/.esphome"):
+            with self.subTest(cache=build_dir), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cached = root / build_dir / "font" / renderer.ROBOTO_CACHE_NAME
+                cached.parent.mkdir(parents=True)
+                cached.write_bytes(b"")
+                self.assertEqual(renderer._resolve_roboto(root), cached)
+
+    def test_missing_font_cache_reports_every_searched_location(self) -> None:
+        renderer = self._renderer()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidates = renderer._roboto_candidates(root)
+            self.assertEqual(len(candidates), 2)
+            # Falls back to the first candidate so the caller can report it.
+            self.assertEqual(renderer._resolve_roboto(root), candidates[0])
+            self.assertIn("legacy", str(candidates[1]))
 
 
 if __name__ == "__main__":

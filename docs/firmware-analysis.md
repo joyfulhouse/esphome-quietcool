@@ -395,8 +395,8 @@ airflow sensor they do not prove physical motor state.
 
 That validation occurred in the downstream working configuration used for the
 2026-07-18 research. Both public YAML templates now share the corrected
-transaction logic: `quietcool-lora32.yaml` on SX1278 and
-`quietcool-lora-v3.yaml` on SX1262. The latter uses a 58.6 kHz RX bandwidth,
+transaction logic: `legacy/quietcool-lora32.yaml` on SX1278 and
+`legacy/quietcool-lora-v3.yaml` on SX1262. The latter uses a 58.6 kHz RX bandwidth,
 the nearest FSK-legal value to the validated SX1278 50 kHz setting, and still
 awaits hardware bring-up. The rollout used a downstream wrapper, not either
 public named artifact. The second (upstairs) unit was offline and was not flashed;

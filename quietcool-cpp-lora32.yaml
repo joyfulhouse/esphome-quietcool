@@ -4,7 +4,7 @@
 # The RF confirmation state machine lives entirely in the C++ external component
 # under components/quietcool/ (which ships in this repository); this file is
 # configuration and wiring only: network, radio hardware, entities, display.
-# It supersedes the all-YAML build in quietcool-lora32.yaml.
+# It supersedes the frozen all-YAML build in legacy/quietcool-lora32.yaml.
 #
 # Before you flash:
 #   - Set quietcool_sender_id below. The checked-in default is "0", which boots

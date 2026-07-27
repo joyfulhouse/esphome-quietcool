@@ -2,13 +2,31 @@
 
 - Run the checks before opening a PR:
   ```bash
-  cp secrets.yaml.example secrets.yaml
+  make -C tests/cpp test            # C++ core + adapter host suites
+  make -C tests/cpp test-sanitized  # the core suite only, under ASan/UBSan
+  cp -n secrets.yaml.example secrets.yaml         # -n: never clobber real credentials
+  cp -n secrets.yaml.example legacy/secrets.yaml  # ESPHome reads !secret from the config's own dir
   .venv/bin/python -m unittest tests.test_quietcool_esphome_config -v
-  .venv/bin/esphome config quietcool-lora32.yaml
-  .venv/bin/esphome compile quietcool-lora32.yaml
-  .venv/bin/esphome config quietcool-lora-v3.yaml
-  .venv/bin/esphome compile quietcool-lora-v3.yaml
+  .venv/bin/esphome config quietcool-cpp-example.yaml
+  .venv/bin/esphome compile quietcool-cpp-example.yaml
+  .venv/bin/esphome config quietcool-cpp-lora32.yaml
+  .venv/bin/esphome compile quietcool-cpp-lora32.yaml
+  .venv/bin/esphome config quietcool-cpp-diag.yaml
+  .venv/bin/esphome compile quietcool-cpp-diag.yaml
+  .venv/bin/esphome config legacy/quietcool-lora32.yaml
+  .venv/bin/esphome compile legacy/quietcool-lora32.yaml
+  .venv/bin/esphome config legacy/quietcool-lora-v3.yaml
+  .venv/bin/esphome compile legacy/quietcool-lora-v3.yaml
   ```
+- `.github/workflows/ci.yml` runs `esphome config` on
+  `quietcool-cpp-lora32.yaml` (the config people actually flash) and
+  `quietcool-cpp-diag.yaml`, but never `esphome compile` on either — so the
+  two `compile` lines above are the only thing that ever builds their display
+  and entity lambdas. Run them. If you change the workflow, update the
+  "What `.github/workflows/ci.yml` runs" table in the README to match; it is
+  maintained by hand, because what the workflow file lists and what GitHub
+  requires before a merge are different things and only the first is in this
+  repository.
 - The V3 remains an unverified hardware port, so successful config validation
   and compilation are not evidence of on-air RF parity.
 - The on-air state commands (Off `90/A0/B0`, plus `9F/AF/BF`), the 3×/45 ms

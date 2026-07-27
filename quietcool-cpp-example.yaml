@@ -1,7 +1,10 @@
-# Compile-only example: not a deployment or flashing target. It shows the
-# minimal config-and-wiring-only shape of the C++ build. For a full, flashable
-# configuration (network, display, secrets, Home Assistant entities), use the
-# primary deployable config, quietcool-cpp-lora32.yaml.
+# Canonical starting point for the C++ build (compile-only: no network, no
+# secrets, not a flashing target). It shows the minimal config-and-wiring-only
+# shape of the C++ external component — start here to understand the build or
+# to derive a config for your own board. For a full, flashable configuration
+# (network, display, secrets, Home Assistant entities), use the primary
+# deployable config, quietcool-cpp-lora32.yaml; for SX126x boards see
+# quietcool-cpp-example-sx126x.yaml.
 esphome:
   name: quietcool-cpp-example
   friendly_name: "QuietCool C++ Example"
