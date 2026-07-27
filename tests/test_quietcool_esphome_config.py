@@ -24,11 +24,21 @@ from pathlib import Path
 # amount of reading ci.yml can answer the question the assertions were posing.
 #
 # So: this file asserts nothing about *when* GitHub runs a step, whether a step
-# can fail a run, or whether a check is required. The one thing it still reads
-# out of ci.yml is a plain, on-disk fact (see `SecretsProvisioningTest`).
-# Documentation claims about CI are kept honest by being narrow and literal —
-# the README names the workflow's jobs and targets and claims nothing beyond
-# them — not by a model of GitHub Actions. Please do not rebuild the model.
+# can fail a run, or whether a check is required. Documentation claims about CI
+# are kept honest by being narrow and literal — the README names the workflow's
+# jobs and targets and claims nothing beyond them — not by a model of GitHub
+# Actions. Please do not rebuild the model.
+#
+# What IS asserted, and why the line is drawn here: `CiBaselineTest` below
+# checks that certain commands are *present in the workflow file*, and that the
+# README's table of those commands matches it. Presence is a plain on-disk fact
+# with no semantics attached, so it cannot be argued away by the next YAML
+# construct — and it catches the ordinary, non-adversarial mistakes that
+# actually happen: deleting a suite from CI while the README still advertises
+# it, adding a config nobody validates, or relocating a config and missing
+# ci.yml. A disabled-but-present step still satisfies these checks. That is
+# accepted deliberately: someone writing `if: false` knows what they are doing,
+# whereas someone deleting a line usually does not.
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +66,18 @@ _ESPHOME_RUN = re.compile(r"\besphome\s+(config|compile)\s+(\S+\.yaml)\b")
 _SECRETS_COPY = re.compile(
     r"\bcp\s+(?:-\S+\s+)*secrets\.yaml\.example\s+(\S+)"
 )
+# A host-suite invocation, captured by Makefile target. The target is captured
+# whole: `test` and `test-adapter` are different targets, and a substring test
+# would let `test-adapter` alone satisfy a check for `test`.
+_MAKE_TARGET = re.compile(r"\bmake\s+-C\s+tests/cpp\s+([\w-]+)")
+# A `python -m unittest <module>` invocation. Matching the full form, not a
+# trailing token, is deliberate: an earlier version of this check accepted any
+# command *ending* in `pytest`, so `pip install pytest` satisfied it.
+_UNITTEST_MODULE = re.compile(
+    r"\bpython3?\s+-m\s+unittest\s+(?:-\S+\s+)*([\w.]+)"
+)
+# A config named anywhere in prose (unanchored, unlike _CONFIG_PATH).
+_CONFIG_MENTION = re.compile(r"(?:legacy/)?quietcool-[\w.-]*\.yaml")
 
 
 def _git_output(*args: str) -> bytes | None:
@@ -3307,6 +3329,124 @@ class SecretsProvisioningTest(unittest.TestCase):
                 self.assertIsNotNone(
                     _git_output("check-ignore", "-q", str(candidate)),
                     f"{candidate} is not gitignored",
+                )
+
+
+class CiBaselineTest(unittest.TestCase):
+    """Baseline sanity checks over ci.yml, and the README's account of it.
+
+    Every assertion here is a literal presence-or-equality check on text that
+    is on disk. Nothing models GitHub Actions semantics — see the note at the
+    top of this file for why that question is not answerable from this
+    repository, and why these checks are still worth having.
+    """
+
+    #: Host suites that must be invoked somewhere in the workflow. The C++
+    #: confirmation core is the deployed implementation; losing the sanitized
+    #: run in particular would let a use-after-free or UB regression through,
+    #: and CI once validated only the frozen YAML targets while a reducer
+    #: recursion crash-looped a production controller.
+    REQUIRED_MAKE_TARGETS = frozenset({"test", "test-adapter", "test-sanitized"})
+
+    def setUp(self) -> None:
+        self.workflow = CI_WORKFLOW.read_text()
+        self.configs = _checked_in_configs(self)
+        self.names = frozenset(
+            str(path.relative_to(ROOT)).replace("\\", "/")
+            for path in self.configs
+        )
+
+    def _esphome_targets(self, text: str) -> set[str]:
+        return {target for _, target in _ESPHOME_RUN.findall(text)}
+
+    def _readme_ci_rows(self) -> dict[str, str]:
+        """{job name: the table cell listing its commands} from the README."""
+        rows: dict[str, str] = {}
+        in_table = False
+        for line in README.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("| Job |"):
+                in_table = True
+                continue
+            if not in_table:
+                continue
+            if not stripped.startswith("|"):
+                break  # the table ended
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) != 2 or set(cells[0]) <= set("- "):
+                continue  # the |---|---| separator
+            rows[cells[0].strip("`")] = cells[1]
+        return rows
+
+    def test_ci_runs_every_host_suite(self) -> None:
+        found = set(_MAKE_TARGET.findall(self.workflow))
+        missing = sorted(self.REQUIRED_MAKE_TARGETS - found)
+        self.assertEqual(
+            missing,
+            [],
+            f"ci.yml no longer invokes {missing}; it runs {sorted(found)}. "
+            "The host suites are the only automated check on the RF "
+            "confirmation core.",
+        )
+
+    def test_ci_runs_this_regression_suite(self) -> None:
+        # Derived from this file's own path, so renaming the module without
+        # updating ci.yml fails here rather than silently stopping the suite.
+        module = str(
+            Path(__file__).resolve().relative_to(ROOT).with_suffix("")
+        ).replace("\\", "/").replace("/", ".")
+        self.assertIn(
+            module,
+            set(_UNITTEST_MODULE.findall(self.workflow)),
+            f"ci.yml does not run `python -m unittest {module}`",
+        )
+
+    def test_ci_validates_every_checked_in_config(self) -> None:
+        # Adding a config that nothing validates.
+        missing = sorted(self.names - self._esphome_targets(self.workflow))
+        self.assertEqual(
+            missing, [], f"ci.yml never runs `esphome config` on {missing}"
+        )
+
+    def test_every_config_ci_names_exists_on_disk(self) -> None:
+        # The other direction, and the one that actually catches a missed
+        # relocation: a step still pointing at `quietcool-lora-v3.yaml` after
+        # the file moved to `legacy/`. Checking only the coverage direction
+        # above is not enough — a stale `esphome config <old path>` step passes
+        # it, because the *compile* step still names the real path.
+        dangling = sorted(
+            target
+            for target in self._esphome_targets(self.workflow)
+            if not (ROOT / target).is_file()
+        )
+        self.assertEqual(
+            dangling,
+            [],
+            f"ci.yml runs ESPHome against paths that do not exist: {dangling}",
+        )
+
+    def test_readme_ci_table_matches_the_workflow(self) -> None:
+        rows = self._readme_ci_rows()
+        jobs = _ci_jobs()
+        self.assertEqual(
+            sorted(rows),
+            sorted(jobs),
+            "the README's CI table and ci.yml disagree about the job list",
+        )
+        for job, cell in sorted(rows.items()):
+            body = jobs[job]
+            with self.subTest(job=job):
+                self.assertEqual(
+                    sorted(set(_CONFIG_MENTION.findall(cell))),
+                    sorted(self._esphome_targets(body)),
+                    f"the README's `{job}` row lists different ESPHome "
+                    "targets than the workflow runs",
+                )
+                self.assertEqual(
+                    sorted(set(_MAKE_TARGET.findall(cell))),
+                    sorted(set(_MAKE_TARGET.findall(body))),
+                    f"the README's `{job}` row lists different make targets "
+                    "than the workflow runs",
                 )
 
 
