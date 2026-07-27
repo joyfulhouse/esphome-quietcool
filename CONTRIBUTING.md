@@ -3,7 +3,7 @@
 - Run the checks before opening a PR:
   ```bash
   make -C tests/cpp test            # C++ core + adapter host suites
-  make -C tests/cpp test-sanitized  # same suites under ASan/UBSan
+  make -C tests/cpp test-sanitized  # the core suite only, under ASan/UBSan
   cp -n secrets.yaml.example secrets.yaml         # -n: never clobber real credentials
   cp -n secrets.yaml.example legacy/secrets.yaml  # ESPHome reads !secret from the config's own dir
   .venv/bin/python -m unittest tests.test_quietcool_esphome_config -v

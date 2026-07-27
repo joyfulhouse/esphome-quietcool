@@ -12,8 +12,11 @@ clean-room implementation of what that analysis found.
 > packet mode.
 
 **The product is the C++ external component** under
-[`components/quietcool/`](components/quietcool) — a host-tested,
-sanitizer-gated RF confirmation core — plus the `quietcool-cpp-*.yaml`
+[`components/quietcool/`](components/quietcool) — an RF confirmation core with
+host test suites that `.github/workflows/ci.yml` runs, the platform-free one
+also under ASan/UBSan
+([what the workflow runs](#what-githubworkflowsciyml-runs)) — plus the
+`quietcool-cpp-*.yaml`
 configurations at the repository root that wire it to real boards. An earlier
 all-YAML implementation is preserved as a frozen legacy track under
 [`legacy/`](legacy/).
@@ -85,18 +88,24 @@ troubleshooting — is in **[INSTALL.md](INSTALL.md)**.
 
 ### What `.github/workflows/ci.yml` runs
 
-The workflow declares three jobs. Below is every check they run; setup steps
+The workflow declares three jobs. Below is every command they run; setup steps
 (checkout, `setup-python`, `pip install esphome`, and copying
 `secrets.yaml.example` into place) are omitted.
 
-| Job | Checks it runs |
+| Job | Commands it runs |
 | --- | --- |
-| `core` | `make -C tests/cpp test`, `make -C tests/cpp test-adapter`, `make -C tests/cpp test-sanitized` (the third builds the same host suites under ASan/UBSan) |
+| `core` | `make -C tests/cpp test`, `make -C tests/cpp test-adapter`, `make -C tests/cpp test-sanitized` |
 | `component` | `esphome config` on `quietcool-cpp-example.yaml`, `quietcool-cpp-example-sx126x.yaml`, `quietcool-cpp-lora32.yaml`, `quietcool-cpp-diag.yaml`; then `esphome compile` on `quietcool-cpp-example.yaml` and `quietcool-cpp-example-sx126x.yaml` |
 | `legacy-yaml` | `python -m unittest tests.test_quietcool_esphome_config`; then `esphome config` **and** `esphome compile` on `legacy/quietcool-lora32.yaml` and `legacy/quietcool-lora-v3.yaml` |
 
-Two things are worth spelling out, and the table claims nothing beyond them:
+Three things are worth spelling out, and the table claims nothing beyond them:
 
+- What each `make` target covers is decided by `tests/cpp/Makefile`, not by the
+  workflow. `test` builds the platform-free host suite, runs two static gates
+  first (a platform-include check and an exceptions/RTTI-free syntax check),
+  and depends on `test-adapter`; `test-adapter` builds the ESPHome adapter
+  sources against stubs. `test-sanitized` rebuilds **only the platform-free
+  suite** under ASan/UBSan — the adapter suite is not sanitized.
 - The workflow never runs `esphome compile` on `quietcool-cpp-lora32.yaml` —
   the config you actually flash — or on `quietcool-cpp-diag.yaml`. Their
   display and entity lambdas are compiled only when someone runs the pre-PR

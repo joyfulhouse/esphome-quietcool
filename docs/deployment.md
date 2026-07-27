@@ -4,12 +4,10 @@ The firmware doesn't hard-code anything device-specific. A second (or third) fan
 reuses the whole base config through a thin wrapper that overrides only
 substitutions — ESPHome gives the including file precedence over the package.
 
-A second-device wrapper looks like this (shown for the frozen legacy YAML
-base; a C++-build wrapper packages `quietcool-cpp-lora32.yaml` the same way).
-Place the wrapper in the **same directory as its base config** — ESPHome
-resolves the base's relative font/image/component paths against the top-level
-config's directory, so a wrapper for `legacy/quietcool-lora32.yaml` belongs in
-`legacy/`:
+A second-device wrapper looks like this (shown for the frozen legacy YAML base;
+a C++-build wrapper packages `quietcool-cpp-lora32.yaml` the same way). The
+`!include` below is relative to the wrapper, so this wrapper belongs in
+`legacy/` — see [Where the wrapper may live](#where-the-wrapper-may-live):
 
 ```yaml
 substitutions:
@@ -23,6 +21,42 @@ substitutions:
 packages:
   base: !include quietcool-lora32.yaml
 ```
+
+## Where the wrapper may live
+
+ESPHome resolves a package's relative asset paths (`external_components`
+`path:`, `font:`/`image:` `file:`) against the **top-level config's** directory
+— the wrapper's — not against the included base's. So placement decides whether
+you need path overrides:
+
+- **Wrapper beside its base config** — nothing to override. The base's own
+  defaults already resolve. A wrapper for `legacy/quietcool-lora32.yaml` in
+  `legacy/`, or one for `quietcool-cpp-lora32.yaml` at the repository root,
+  just works. (`quietcool-cpp-diag.yaml` is exactly this case.)
+- **Wrapper in a different directory** — supported only by the C++ base, and
+  only if the wrapper **overrides both path substitutions** so they point at
+  wherever this repository is checked out *relative to the wrapper*:
+
+  ```yaml
+  substitutions:
+    cpp_components_root: "external/esphome-quietcool/components"
+    assets_root: "external/esphome-quietcool"
+  packages:
+    base: !include external/esphome-quietcool/quietcool-cpp-lora32.yaml
+  ```
+
+  That is the shape a wrapper kept in its own Home Assistant config repository
+  uses, with this repository vendored as a submodule beside it. Miss either
+  override and the build fails looking for `components/` or `images/` under the
+  wrapper's directory. See the `cpp_components_root` / `assets_root` comments in
+  `quietcool-cpp-lora32.yaml`, which are the authority on this contract.
+
+  The two frozen legacy configs cannot do this: their `../components`,
+  `../fonts`, and `../images` paths are hard-coded, not substitution-indirected,
+  so a legacy wrapper **must** sit in `legacy/`.
+
+`!secret` needs no such treatment in either case: when an included file's own
+directory has no `secrets.yaml`, ESPHome falls back to the top-level config's.
 
 Each device needs its own API/OTA/fallback-AP secrets (the `<device>_` naming
 convention in `secrets.yaml`); Wi-Fi is shared. Every fan learns its own remote,
