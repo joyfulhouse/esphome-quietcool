@@ -189,8 +189,13 @@ QC_TEST("supersession", "query and learning states cancel safely for commands") 
                 CoordinatorState::ResponseTailQuarantine);
   }
   {
+    // Issue #16: on a provisioned core the Learn is refused outright, so no
+    // learn window ever competes with the command.
     auto core = supersession_core();
-    core.request_learn(LearnMode::Manual, 0);
+    const auto refused = core.request_learn(LearnMode::Manual, 0);
+    QC_CHECK_EQ(supersession_effects<RefusedInput>(refused), 1U);
+    QC_CHECK_EQ(std::get<RefusedInput>(refused[0]).reason,
+                RefusalReason::AlreadyProvisioned);
     core.request_state(low_on(), 1);
     const auto snapshot = core.snapshot(1);
     QC_CHECK_EQ(snapshot.state, CoordinatorState::CommandPending);
@@ -342,12 +347,14 @@ QC_TEST("supersession", "pending query and recovery work yields to a command") {
 
 QC_TEST("supersession", "both learning phases obey provisioning") {
   {
+    // Issue #16: a provisioned core never reaches a learning phase — the Learn
+    // is refused, its frames stay ordinary traffic, and commands are untouched.
     auto core = supersession_core();
-    core.request_learn(LearnMode::Manual, 0);
-    const auto candidate = supersession_frame(0x9F);
-    core.on_frame(ByteView(candidate.bytes), 1);
-    QC_CHECK_EQ(core.snapshot(1).state,
-                CoordinatorState::LearningAwaitingSecond);
+    const auto refused = core.request_learn(LearnMode::Manual, 0);
+    QC_CHECK_EQ(supersession_effects<RefusedInput>(refused), 1U);
+    QC_CHECK_EQ(std::get<RefusedInput>(refused[0]).reason,
+                RefusalReason::AlreadyProvisioned);
+    QC_CHECK_EQ(core.snapshot(0).state, CoordinatorState::Idle);
     core.request_state(low_on(), 2);
     QC_CHECK_EQ(core.snapshot(2).state, CoordinatorState::CommandPending);
     QC_CHECK(!core.snapshot(2).learning.active);

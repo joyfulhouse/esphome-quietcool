@@ -100,7 +100,9 @@ and watch progress in Home Assistant.
    section, disabled by default), and press it to open the learn window.
 2. Stand near the controller and **operate the fan you are pairing with its own
    OEM remote — press a real speed/duration button about three times, roughly a
-   second apart**, all within 60 seconds.
+   second apart**, all within 60 seconds. Do this immediately and keep at it
+   for the whole window: Learn binds whichever fan it hears, so the target fan
+   must be transmitting while the window is open.
 3. Watch the device **logs**
    (`.venv/bin/esphome logs quietcool-cpp-lora32.yaml`) and the
    `Command Confirmation Status` sensor. On success the fan's four-byte ID
@@ -110,13 +112,28 @@ and watch progress in Home Assistant.
 **Why three presses, and why operate the fan.** The C++ build binds only after
 **three independent sightings** of the same remote — each at least 600 ms after
 the last one it counted — so a single burst of frames counts once and **two
-presses is not enough**. Operating the fan itself helps, because the fan's own
-~1.2 s status self-reports count as extra sightings. If a *different* `CB` fan
-is heard during the window (a neighbor's, or your other unit), the controller
-**aborts and keeps whatever ID was already bound** rather than risk binding the
-wrong fan — so make sure the fan you want is the one actually transmitting. To
-re-pair later, press `Learn Remote ID` again; `Forget Remote ID` clears the
-stored ID. Full details are in the
+presses is not enough**. Operating the fan itself is required, not just
+helpful: the fan's own ~1.2 s status self-reports count as extra sightings,
+and — more importantly — the safety guard depends on it. If a *different* `CB`
+fan is heard during the window (a neighbor's, or your other unit), the
+controller **aborts and keeps whatever ID was already bound** rather than risk
+binding the wrong fan. But that guard can only fire when your fan is actually
+heard: if the target fan stays silent for the whole window and a lone foreign
+fan is the only sender heard, there is no second observation to trip the
+abort, and the controller **will bind the foreign fan**. A unit that is
+already paired never learns on its own, so the exposed case is exactly this
+first pairing — an unprovisioned unit within RF range of another active
+QuietCool — which is why step 2 is part of the procedure and not a
+convenience.
+
+**Re-pairing is deliberately two steps: Forget, then Learn.** Once an ID is
+bound (learned or compiled in), pressing `Learn Remote ID` alone is **refused**
+— the `Command Confirmation Status` sensor shows `refused` and the device log
+shows `reason=already_provisioned` — and the existing binding is untouched.
+Press `Forget Remote ID` first to erase the stored ID, then `Learn Remote ID`
+to open a fresh window. This exists because a single accidental Learn press on
+a provisioned unit could previously open a window in which its binding could be
+replaced by whichever lone fan happened to transmit. Full details are in the
 [README's learn-mode section](README.md#learn-mode--porting-to-your-own-fan).
 
 ## 6. Try it
@@ -184,7 +201,7 @@ select, `Remote Sender ID`, TX/RX counters, `Last TX Command`, and more).
 | `Command Confirmation Status` | text sensor | Pending, confirmed, mismatch, refused, or bounded failure |
 | `Fan Evidence Source` | text sensor | Which exchange last produced authoritative state (boot / manual / recovery query, post-command consensus, …) |
 | `Refresh Fan State` | button | Non-energizing status query using response consensus; active timers remain unknown-age |
-| `Learn Remote ID` | button (config, disabled by default) | Open a learn window (see §5) |
+| `Learn Remote ID` | button (config, disabled by default) | Open a learn window — refused while an ID is bound (Forget first, see §5) |
 | `Forget Remote ID` | button (config, disabled by default) | Erase the stored ID and return to learn mode |
 | `Battery Voltage` / `Battery Level` | sensors | On-board LiPo monitoring |
 | `WiFi Signal`, `Uptime`, `IP Address`, `Restart` | misc | Housekeeping |
@@ -294,6 +311,11 @@ to finish, clears obsolete queued work, and executes the latest desired action.
   nearby — a second sender aborts the
   window. Operating the target fan itself helps: its ~1.2 s self-reports count
   toward the three.
+- **Learn is refused immediately** — `Command Confirmation Status` flips to
+  `refused` (log: `reason=already_provisioned`) the moment you press `Learn
+  Remote ID`. The controller already has a bound ID (learned earlier, or
+  compiled in via `quietcool_sender_id`). Re-pairing is deliberately two steps:
+  press `Forget Remote ID`, then `Learn Remote ID` (see §5).
 - **HA entity doesn't follow the OEM remote** — this is intentional: a heard
   command is diagnostics-only, not proof of fan actuation. Use **Refresh Fan
   State** to seek authoritative consensus. If nothing changes even after a

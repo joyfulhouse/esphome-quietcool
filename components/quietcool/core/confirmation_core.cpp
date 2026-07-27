@@ -217,6 +217,17 @@ CoreEffects ConfirmationCore::handle_manual_refresh(ActionId action,
   return {};
 }
 CoreEffects ConfirmationCore::handle_learn(LearnMode mode, MonotonicMs now_ms) {
+  // Re-learning a bound unit requires an explicit override: Forget, then Learn
+  // (issue #16). While any sender is bound — learned or a compiled-in seed —
+  // a Learn request is refused before it touches ANYTHING: no learn window
+  // opens, no transaction is cancelled, no lease is revoked, authority and the
+  // binding stay exactly as they were, and no SaveProvisioning can follow. This
+  // makes an accidental Learn press on a provisioned unit inert instead of
+  // opening a window in which the binding could be replaced. Forget erases the
+  // sender (and suppresses the compiled seed), after which Learn proceeds as
+  // for any fresh device.
+  if (sender_)
+    return refuse(RefusalReason::AlreadyProvisioned);
   CoreEffects effects;
   if (live_tx_) {
     effects.add(RevokeTxLease{live_tx_->token});
