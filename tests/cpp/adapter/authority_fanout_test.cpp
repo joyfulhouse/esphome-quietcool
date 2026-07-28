@@ -341,6 +341,65 @@ QC_TEST("adapter", "a snapshot made stale mid-delivery never reaches the sink") 
     QC_CHECK(!published);
 }
 
+// A sink sensor whose state callback COMMANDS — the same reentrancy as
+// CommandingPublisher, one stage later (round 12, codex).
+class CommandingSinkSensor final : public binary_sensor::BinarySensor {
+ public:
+  QuietCoolComponent* component{nullptr};
+  bool commanded{false};
+  void publish_state(bool state) override {
+    binary_sensor::BinarySensor::publish_state(state);
+    if (state && component != nullptr && !commanded) {
+      commanded = true;
+      component->request_state(::quietcool::FanState::command(
+          ::quietcool::Speed::High, ::quietcool::Duration::Continuous));
+    }
+  }
+};
+
+QC_TEST("adapter", "a snapshot made stale mid-sink never reaches the diagnostics") {
+  // Round 12 (codex, high): a SINK automation can command just like a
+  // publisher's, and the pre-command revision re-check cannot see it. The
+  // stale tail it would leave is a stage-3 diagnostic text carrying the
+  // pre-command state — whose own automation then composes against a fan the
+  // core already knows is changing. The re-check between stages 2 and 3
+  // drops that tail; the reentrant batch's own delivery carries "unknown".
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CommandingSinkSensor state_known;
+  state_known.component = &component;
+  text_sensor::TextSensor last_confirmed;
+  component.setup();
+  component.set_state_known_sensor(&state_known);
+  component.set_last_confirmed_state_sensor(&last_confirmed);
+
+  // setup()'s own drains already delivered the core's current revision to the
+  // sink, whose gate is revision-difference — a confirmed snapshot reusing
+  // that revision would be swallowed before its state ever published. Move
+  // the gate off it with a crafted-AHEAD unknown delivery, the seam the
+  // strictly-greater re-check deliberately admits (round 12, fable).
+  ::quietcool::AuthoritySnapshot gate_mover{};
+  gate_mover.revision = component.snapshot().authority.revision + 1;
+  component.publish_authority_for_test(gate_mover);
+
+  ::quietcool::AuthoritySnapshot confirmed{};
+  confirmed.state = ::quietcool::ConfirmedStateAuthority{
+      ::quietcool::FanState::command(::quietcool::Speed::High,
+                                     ::quietcool::Duration::Hours1),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 0};
+  confirmed.revision = component.snapshot().authority.revision;
+  component.publish_authority_for_test(confirmed);
+
+  QC_CHECK(state_known.commanded);
+  // The stale confirmed text ("high 1h") must never publish: every delivery
+  // the diagnostic received describes the post-command authority.
+  for (const auto& text : last_confirmed.published())
+    QC_CHECK(text != std::string("high 1h"));
+}
+
 // Reads Fan State Known at the moment Last Confirmed Fan State publishes its
 // falling transition — the order stage 2 before stage 3 exists for.
 class DiagnosticOrderObserver final : public text_sensor::TextSensor {

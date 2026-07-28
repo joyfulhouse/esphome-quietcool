@@ -223,6 +223,26 @@ std::optional<const char*> timer_select_apply_snapshot(
       case ::quietcool::AuthorityLossReason::LearningStarted:
         cache.expiry_bound.reset();
         break;
+      // The OEM remote just changed this fan's timer, so the persisted
+      // deadline describes a program that no longer exists. Keeping it while
+      // the cache takes the frame's NEW state (the rounds 3-4 rule above)
+      // split the cache against itself: once the OLD deadline passed, every
+      // press presumed a remote-set running fan stopped and dropped it to LOW
+      // (round 12, codex + opus, opus probe-proven). The frame is the single
+      // fresh writer of last_diagnostic, so REBUILD the bound from it — a
+      // timed program observed at since_ms cannot outlive since_ms + its run
+      // length (round 7's upper-bound rule); Off, Continuous and an absent
+      // diagnostic carry no deadline. Only this reason: the other freshness
+      // reasons claim no fan movement, and clearing on them is exactly the
+      // near-expiry hole round 11 (codex) closed.
+      case ::quietcool::AuthorityLossReason::ExternalStateTraffic:
+        cache.expiry_bound.reset();
+        if (unknown->last_diagnostic) {
+          if (const auto run_ms =
+                  duration_run_ms(unknown->last_diagnostic->duration()))
+            cache.expiry_bound = unknown->since_ms + *run_ms;
+        }
+        break;
       default:
         break;
     }

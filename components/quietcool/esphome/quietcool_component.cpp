@@ -478,6 +478,15 @@ void QuietCoolComponent::deliver_authority(
   // make the test seam's crafted snapshots indistinguishable from staleness.
   if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
   events_.publish_authority(authority, now_ms);
+  // Re-checked between 2 and 3 as well: a SINK automation can command just
+  // like a publisher's, and the stale tail it would leave is worse — a
+  // diagnostic text (e.g. Last Confirmed Fan State) carrying the pre-command
+  // state, whose own automation then composes against a fan the core already
+  // knows is changing (round 12, codex). Mid-sink staleness inside stage 2
+  // itself is accepted: the remaining sink publications are the Known flags
+  // and status text, no press composes from them, and the reentrant batch's
+  // post-drain delivery corrects them in the same loop pass.
+  if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
   publish_authority_diagnostics(authority);
 }
 

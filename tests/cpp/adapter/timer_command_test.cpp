@@ -704,5 +704,81 @@ QC_TEST("timer_command", "a re-binding clears the previous fan's expiry bound") 
   QC_CHECK_EQ(press.outbound_command_byte(), 0xBF);
 }
 
+QC_TEST("timer_command", "an oem frame rebuilds the expiry bound from its own program") {
+  // Round 12 (codex + opus, opus probe-proven): wave 11's persisted bound
+  // outlived the OEM frame that superseded its program. The cache took the
+  // frame's NEW state (HIGH 12h) while the bound kept the OLD deadline — so
+  // once that dead deadline passed, a press presumed the remote-set running
+  // fan stopped and dropped it to LOW. The bound must be rebuilt from the
+  // frame, exactly like the confirmed cache is.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  // t=30min: the OEM remote sets HIGH+12h; ExternalStateTraffic records the
+  // frame and invalidates both authorities.
+  auto oem = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic);
+  auto& unknown = std::get<::quietcool::UnknownStateAuthority>(oem.state);
+  unknown.since_ms = 1800000;
+  unknown.last_diagnostic = FanState::command(Speed::High, Duration::Hours12);
+  (void)timer_select_apply_snapshot(cache, oem, "");
+  QC_CHECK(cache.confirmed.has_value());
+
+  // t=70min: past the DEAD deadline, inside the live one. The press must
+  // compose from the remote's HIGH, not the stopped-fan LOW rule.
+  const auto press =
+      timer_command_for_press(cache, oem, 4200000, TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xB4);
+  QC_CHECK_EQ(press.speed().value(), Speed::High);
+
+  // Past the REBUILT deadline (since_ms + 12h): presumed stopped, LOW rule.
+  const auto late = timer_command_for_press(cache, oem, 1800000 + 43200000 + 1,
+                                            TimerSelection::Hours4);
+  QC_CHECK_EQ(late.outbound_command_byte(), 0x94);
+}
+
+QC_TEST("timer_command", "an oem continuous frame clears the expiry bound") {
+  // A continuous program has no deadline; keeping the old one would presume
+  // the remote's run-until-stopped fan stopped at the dead timer's expiry.
+  TimerSelectCache cache;
+  (void)timer_select_apply_snapshot(cache, snapshot_with_anchored(3600000), "");
+  auto oem = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic);
+  auto& unknown = std::get<::quietcool::UnknownStateAuthority>(oem.state);
+  unknown.since_ms = 1800000;
+  unknown.last_diagnostic = FanState::command(Speed::High, Duration::Continuous);
+  (void)timer_select_apply_snapshot(cache, oem, "");
+  const auto press = timer_command_for_press(cache, oem, 4000000,
+                                             TimerSelection::Continuous);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xBF);
+}
+
+QC_TEST("timer_command", "a continuous programmed duration clears the expiry bound") {
+  // Round 12 (opus): this arm was defensive and unbound — the core's promote
+  // routes Off/Continuous to NoActiveTimer today, but nothing pinned the arm
+  // that would become load-bearing the day that routing changes. Pin it at
+  // this layer: a Continuous program carries no deadline, so a stale bound
+  // must not survive it.
+  TimerSelectCache cache;
+  (void)timer_select_apply_snapshot(cache, snapshot_with_anchored(3600000), "");
+  ::quietcool::AuthoritySnapshot continuous{};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Continuous;
+  programmed.observed_ms = 1800000;
+  continuous.timer = programmed;
+  (void)timer_select_apply_snapshot(cache, continuous, "");
+  cache.confirmed = FanState::command(Speed::High, Duration::Continuous);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  const auto press = timer_command_for_press(cache, continuous, 4000000,
+                                             TimerSelection::Continuous);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xBF);
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

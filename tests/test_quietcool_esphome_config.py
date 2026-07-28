@@ -3576,10 +3576,16 @@ class CppConfigBindingTest(unittest.TestCase):
                 self.assertIn(f'name: "{name}"', self.text)
 
     def test_every_restored_diagnostic_is_disabled_by_default(self) -> None:
+        # Indentation-anchored, not assertIn (round 12, codex): _entity_block
+        # slices between item markers, so a de-indented top-level
+        # `disabled_by_default: true` — which ESPHome rejects — still lands
+        # inside the slice and satisfied a substring check. The field is only
+        # a property of the entity at exactly the item's property indentation.
         for name in _CPP_RESTORED_DIAGNOSTICS:
             with self.subTest(entity=name):
-                self.assertIn(
-                    "disabled_by_default: true", _entity_block(self.text, name)
+                self.assertRegex(
+                    _entity_block(self.text, name),
+                    r"(?m)^    disabled_by_default: true\s*$",
                 )
 
     def test_every_restored_diagnostic_binds_its_own_kind(self) -> None:
@@ -3592,11 +3598,14 @@ class CppConfigBindingTest(unittest.TestCase):
         for name, kind in _CPP_RESTORED_DIAGNOSTICS.items():
             with self.subTest(entity=name):
                 block = _entity_block(self.text, name)
-                self.assertRegex(block, r"(?m)^\s*(?:- )?platform: quietcool\s*$")
+                # Exact-indentation anchors, same rationale as the
+                # disabled_by_default test above: `^\s*` accepted these lines
+                # at indentations where ESPHome does not read them.
+                self.assertRegex(block, r"(?m)^  - platform: quietcool\s*$")
                 self.assertRegex(
-                    block, r"(?m)^\s*controller_id: quietcool_controller\s*$"
+                    block, r"(?m)^    controller_id: quietcool_controller\s*$"
                 )
-                self.assertRegex(block, rf"(?m)^\s*kind: {kind}\s*$")
+                self.assertRegex(block, rf"(?m)^    kind: {kind}\s*$")
 
     def test_codegen_kind_maps_bind_each_kind_to_its_own_setter(self) -> None:
         # One layer below the YAML (round 2, opus): swapping two values inside
