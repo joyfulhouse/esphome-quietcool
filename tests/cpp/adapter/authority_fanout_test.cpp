@@ -5,7 +5,12 @@
 
 #include "quietcool/esphome/quietcool_component.h"
 
+#include <cmath>
+#include <string>
+
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/sensor/sensor.h"
 
 #include "support/test.h"
 #include "support/test_doubles.h"
@@ -55,7 +60,11 @@ QC_TEST("adapter", "registering past capacity degrades instead of displacing") {
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
   binary_sensor::BinarySensor fault;
+  sensor::Sensor timer_remaining;
+  text_sensor::TextSensor evidence_source;
   component.set_controller_fault_sensor(&fault);
+  component.set_timer_remaining_sensor(&timer_remaining);
+  component.set_evidence_source_sensor(&evidence_source);
   CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
   for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
 
@@ -63,10 +72,17 @@ QC_TEST("adapter", "registering past capacity degrades instead of displacing") {
 
   // Terminal: the overflow publisher was never swapped in, the Controller
   // Fault problem sensor raised, and the degraded controller publishes to
-  // nobody.
+  // nobody. Timer Remaining and Fan Evidence Source take their terminal
+  // values too (round 7, fable + opus: wave 6 added both to the degradation
+  // publication and nothing asserted either — deleting them stayed green,
+  // leaving HA showing "55 minutes remaining" beside a raised fault).
   QC_CHECK_EQ(publishers[QuietCoolComponent::kMaxAuthorityPublishers].calls, 0);
   QC_CHECK(!fault.published().empty());
   QC_CHECK(fault.published().back());
+  QC_CHECK(!timer_remaining.published().empty());
+  QC_CHECK(std::isnan(timer_remaining.published().back()));
+  QC_CHECK(!evidence_source.published().empty());
+  QC_CHECK_EQ(evidence_source.published().back(), std::string("unavailable"));
   QC_CHECK_EQ(publishers[0].calls, 0);
 }
 
@@ -81,12 +97,21 @@ QC_TEST("adapter", "a fault sensor registered after degradation still raises") {
   CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
   for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
 
-  // Degraded before the sensor exists; registration must replay it.
+  // Degraded before the sensors exist; registration must replay it — for the
+  // two wave-6 additions as well as the fault (round 7).
   binary_sensor::BinarySensor fault;
+  sensor::Sensor timer_remaining;
+  text_sensor::TextSensor evidence_source;
   component.set_controller_fault_sensor(&fault);
+  component.set_timer_remaining_sensor(&timer_remaining);
+  component.set_evidence_source_sensor(&evidence_source);
 
   QC_CHECK(!fault.published().empty());
   QC_CHECK(fault.published().back());
+  QC_CHECK(!timer_remaining.published().empty());
+  QC_CHECK(std::isnan(timer_remaining.published().back()));
+  QC_CHECK(!evidence_source.published().empty());
+  QC_CHECK_EQ(evidence_source.published().back(), std::string("unavailable"));
 }
 
 }  // namespace

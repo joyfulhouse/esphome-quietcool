@@ -66,20 +66,30 @@ PLATFORM_FREE_SOURCES := $(wildcard $(ROOT)/components/quietcool/core/*.h) \
 	$(ROOT)/components/quietcool/radio/burst_transmitter.cpp
 
 .PHONY: all test test-adapter test-sanitized platform-include-check \
-	production-flags-check clean
+	production-flags-check clean FORCE
+
+# Every binary depends on FORCE: mtime-based staleness checks have been
+# OBSERVED scoring a mutation against a stale binary when the edit and the
+# previous link landed in the same one-second mtime granule (adversarial
+# round 7, opus). This repo's whole review discipline rests on "mutate it and
+# watch the test fail"; a stale-binary pass makes that instrument lie in
+# exactly the direction that blesses a broken change. An unconditional
+# rebuild costs seconds and makes the instrument honest.
+FORCE:
+
 all: $(TARGET)
 
-$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
+$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS) FORCE
 	@mkdir -p $(BUILD)
 	$(CXX) $(TEST_CXXFLAGS) $(INCLUDES) $(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
-$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
+$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS) FORCE
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(SANITIZE_FLAGS) $(INCLUDES) \
 		$(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
 $(ADAPTER_TARGET): $(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) \
-		$(HEADERS) $(ADAPTER_HEADERS)
+		$(HEADERS) $(ADAPTER_HEADERS) FORCE
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(ADAPTER_INCLUDES) \
 		$(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) -o $@

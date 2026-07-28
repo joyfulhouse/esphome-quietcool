@@ -112,15 +112,23 @@ std::optional<const char*> timer_select_apply_snapshot(
     const char* shown_option);
 
 // The command for a user press, composed against the CURRENT snapshot. Beyond
-// timer_command_from_confirmed it applies one press-time rule: a locally
-// anchored timer whose estimated deadline has already passed means the fan is
-// presumed stopped even if the snapshot still shows a confirmed running state
-// — the deadline is processed by poll(), and a press can land in the tick
-// where it is due but unprocessed (round 6, codex). Composing from the stale
-// confirmed state there would restart the just-stopped fan at its old speed;
-// the due estimate takes the stopped-fan LOW rule instead.
+// timer_command_from_confirmed it applies the presumed-stopped rule: a timer
+// that has provably run out means the fan is presumed stopped even if the
+// snapshot still shows a confirmed running state, and the press composes from
+// the stopped-fan LOW rule rather than restarting the stopped fan at its old
+// speed. Two ways a timer proves out (rounds 6-7):
+//   - a locally anchored deadline that has passed — poll() processes it, but
+//     a press can land in the tick where it is due yet unprocessed;
+//   - a ProgrammedDurationAuthority whose observation time plus duration has
+//     passed — this variant (an OEM-set or boot-query-observed timer) carries
+//     no deadline anywhere in the system, so the core NEVER notices its
+//     expiry; the observation time bounds it from above.
+// The cache is taken by reference and cache.confirmed is CLEARED when the
+// rule fires: the press's own request_state invalidates the timer authority,
+// destroying the evidence this presumption is derived from, so without
+// persisting it only the first press composed correctly (round 7, opus).
 ::quietcool::FanState timer_command_for_press(
-    const TimerSelectCache& cache,
+    TimerSelectCache& cache,
     const ::quietcool::AuthoritySnapshot& authority,
     ::quietcool::MonotonicMs now_ms, TimerSelection requested);
 

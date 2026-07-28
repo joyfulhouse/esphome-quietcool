@@ -493,5 +493,85 @@ QC_TEST("timer_command", "a press after the estimated deadline takes the stopped
   QC_CHECK_EQ(command.speed().value(), Speed::Low);
 }
 
+QC_TEST("timer_command", "a press at the exact anchored deadline is already due") {
+  // Pins the >= boundary (round 7, opus): weakening the predicate to > was
+  // previously invisible because only expiry+1 was probed.
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.timer = ::quietcool::LocallyAnchoredTimerAuthority{
+      ::quietcool::Duration::Hours1,
+      ::quietcool::TransactionId(1),
+      ::quietcool::AttemptNumber(1),
+      0,
+      3600000,
+      ::quietcool::EvidenceSource::PostCommandConsensus};
+  const auto command = timer_command_for_press(
+      cache, snapshot, 3600000 /* exactly the deadline */,
+      TimerSelection::Continuous);
+  QC_CHECK_EQ(command.speed().value(), Speed::Low);
+}
+
+QC_TEST("timer_command", "an expired programmed duration takes the stopped fan rule") {
+  // Round 7 (opus, probe-proven MEDIUM): an OEM-remote-set or boot-query-
+  // observed timer lands in ProgrammedDurationAuthority, which carries no
+  // deadline anywhere in the system — the core cannot estimate its expiry
+  // (start time unknown), so EstimatedTimerDeadline never fires for it and
+  // the fan stops on its own with nothing noticing. The observation time
+  // bounds the expiry from above: a Hours4 timer observed at t0 cannot still
+  // be running at t0+4h, so a press after that composes from the stopped-fan
+  // LOW rule rather than restarting the stopped fan at its old speed.
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours4);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours4;
+  programmed.observed_ms = 0;
+  snapshot.timer = programmed;
+  const auto command = timer_command_for_press(
+      cache, snapshot, 5 * 3600000 /* 5h after observation */,
+      TimerSelection::Continuous);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0x9F);
+  QC_CHECK_EQ(command.speed().value(), Speed::Low);
+}
+
+QC_TEST("timer_command", "a programmed duration not yet due composes from confirmed state") {
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours4);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours4;
+  programmed.observed_ms = 0;
+  snapshot.timer = programmed;
+  const auto command = timer_command_for_press(
+      cache, snapshot, 3 * 3600000, TimerSelection::Continuous);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0xBF);
+}
+
+QC_TEST("timer_command", "a due press clears the cached confirmed state") {
+  // Round 7 (opus, probe-proven): the presumption must OUTLIVE the press —
+  // the press's own request_state invalidates the timer authority, so the
+  // evidence the presumption was derived from is destroyed. Without
+  // persisting it, only the first press composed correctly and a retry a
+  // minute later ran off the pre-expiry speed.
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.timer = ::quietcool::LocallyAnchoredTimerAuthority{
+      ::quietcool::Duration::Hours1,
+      ::quietcool::TransactionId(1),
+      ::quietcool::AttemptNumber(1),
+      0,
+      3600000,
+      ::quietcool::EvidenceSource::PostCommandConsensus};
+  (void)timer_command_for_press(cache, snapshot, 3600001,
+                                TimerSelection::Continuous);
+  QC_CHECK(!cache.confirmed.has_value());
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

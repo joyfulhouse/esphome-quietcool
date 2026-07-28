@@ -183,16 +183,59 @@ std::optional<const char*> timer_select_apply_snapshot(
   return option;
 }
 
+namespace {
+
+// Milliseconds a timed duration runs for. The timed enumerators' values ARE
+// their hour counts (fan_state.h); Off and Continuous have no runtime bound.
+std::optional<::quietcool::MonotonicMs> duration_run_ms(
+    ::quietcool::Duration duration) {
+  switch (duration) {
+    case ::quietcool::Duration::Hours1:
+    case ::quietcool::Duration::Hours2:
+    case ::quietcool::Duration::Hours4:
+    case ::quietcool::Duration::Hours8:
+    case ::quietcool::Duration::Hours12:
+      return static_cast<::quietcool::MonotonicMs>(
+                 static_cast<std::uint8_t>(duration)) *
+             3600000ULL;
+    case ::quietcool::Duration::Off:
+    case ::quietcool::Duration::Continuous:
+      break;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 ::quietcool::FanState timer_command_for_press(
-    const TimerSelectCache& cache,
+    TimerSelectCache& cache,
     const ::quietcool::AuthoritySnapshot& authority,
     ::quietcool::MonotonicMs now_ms, TimerSelection requested) {
-  const auto* anchored =
-      std::get_if<::quietcool::LocallyAnchoredTimerAuthority>(&authority.timer);
-  const bool estimate_due = anchored != nullptr && now_ms >= anchored->expiry_ms;
-  return timer_command_from_confirmed(
-      estimate_due ? std::nullopt : cache.confirmed, cache.capability,
-      requested);
+  bool timer_ran_out = false;
+  if (const auto* anchored =
+          std::get_if<::quietcool::LocallyAnchoredTimerAuthority>(
+              &authority.timer)) {
+    timer_ran_out = now_ms >= anchored->expiry_ms;
+  } else if (const auto* programmed =
+                 std::get_if<::quietcool::ProgrammedDurationAuthority>(
+                     &authority.timer)) {
+    // The core cannot estimate this variant's expiry (start time unknown), so
+    // it never fires EstimatedTimerDeadline for it — but the OBSERVATION time
+    // bounds the expiry from above: a Hours4 timer observed at t0 cannot
+    // still be running at t0+4h (round 7, opus, probe-proven).
+    if (const auto run_ms = duration_run_ms(programmed->duration))
+      timer_ran_out = now_ms >= programmed->observed_ms + *run_ms;
+  }
+  if (timer_ran_out) {
+    // Persist the presumption: the press's own request_state is about to
+    // invalidate the timer authority it was derived from, and
+    // LocalCommandPending / TransactionExhausted keep the cache — so without
+    // clearing here, a failed press's retry would compose from the
+    // pre-expiry speed (round 7, opus, probe-proven).
+    cache.confirmed = std::nullopt;
+  }
+  return timer_command_from_confirmed(cache.confirmed, cache.capability,
+                                      requested);
 }
 
 std::optional<const char*> timer_option_for_authority(
