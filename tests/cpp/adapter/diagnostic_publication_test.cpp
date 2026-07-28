@@ -247,6 +247,26 @@ QC_TEST("adapter", "last tx command sensor is untouched by the boot query") {
   QC_CHECK(sensor.published().empty());
 }
 
+QC_TEST("adapter", "authority diagnostics publish once for repeated identical snapshots") {
+  // The post-drain channel fires essentially every loop tick (an empty effect
+  // batch still arms a publication round), and TextSensor::publish_state does
+  // not dedupe — ungated, each diagnostic emitted one API state message per
+  // tick, measured at 50 publishes over 50 idle ticks (adversarial round 3,
+  // opus). Fifty identical snapshots must produce exactly one publish.
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  text_sensor::TextSensor state_sensor;
+  text_sensor::TextSensor capability_sensor;
+  component.set_last_confirmed_state_sensor(&state_sensor);
+  component.set_speed_capability_sensor(&capability_sensor);
+
+  for (int i = 0; i < 50; ++i) publish(component, AuthoritySnapshot{});
+
+  QC_CHECK_EQ(state_sensor.published().size(), std::size_t(1));
+  QC_CHECK_EQ(capability_sensor.published().size(), std::size_t(1));
+  QC_CHECK_EQ(state_sensor.published().back(), std::string("unknown"));
+}
+
 QC_TEST("adapter", "last valid rx frame sensor publishes state frames as uppercase hex") {
   ScopedPreferences preferences;
   ::quietcool::test::FakeRadio radio;

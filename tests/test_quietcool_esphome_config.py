@@ -3634,9 +3634,13 @@ class CppConfigBindingTest(unittest.TestCase):
         )
 
     def test_the_timer_select_is_a_quietcool_platform_entity(self) -> None:
+        # Line-anchored like the diagnostics (round 3, codex): substring
+        # matching accepted `platform: quietcool_typo`.
         block = _entity_block(self.text, _CPP_TIMER_ENTITY)
-        self.assertIn("platform: quietcool", block)
-        self.assertIn("controller_id: quietcool_controller", block)
+        self.assertRegex(block, r"(?m)^\s*(?:- )?platform: quietcool\s*$")
+        self.assertRegex(
+            block, r"(?m)^\s*controller_id: quietcool_controller\s*$"
+        )
 
     def test_the_timer_options_are_documented_where_they_are_declared(self) -> None:
         # The option list itself lives in select.py (it must match the C++

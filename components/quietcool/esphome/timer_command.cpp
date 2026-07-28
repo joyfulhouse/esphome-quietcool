@@ -108,9 +108,14 @@ std::optional<::quietcool::FanState> confirmed_state_after(
     return confirmed->state;
   if (std::get_if<::quietcool::RevalidatingStateAuthority>(&authority.state))
     return previous;
-  const auto& unknown =
-      std::get<::quietcool::UnknownStateAuthority>(authority.state);
-  switch (unknown.reason) {
+  const auto* unknown =
+      std::get_if<::quietcool::UnknownStateAuthority>(&authority.state);
+  // Defensive rather than std::get (round 3, opus): a fourth StateAuthority
+  // alternative would make an unguarded get std::terminate on the target
+  // (exceptions off) — a reboot loop — where returning "no cache" merely
+  // costs a LOW start. The reason switch below stays -Wswitch-protected.
+  if (unknown == nullptr) return std::nullopt;
+  switch (unknown->reason) {
     // WHAT the cached state describes has changed: a different fan, no fan,
     // or a deadline after which the fan is presumed stopped. Keeping the
     // cache through these aimed a re-bound or expired-timer fan at the
@@ -120,21 +125,29 @@ std::optional<::quietcool::FanState> confirmed_state_after(
     case ::quietcool::AuthorityLossReason::LearningStarted:
     case ::quietcool::AuthorityLossReason::EstimatedTimerDeadline:
       return std::nullopt;
-    // Freshness only: we are momentarily unsure, but the fan is still
-    // physically doing what was last confirmed. Clearing on these turned the
-    // primary "set HIGH, then set a timer" journey into LOW+duration
-    // (round 2, opus): begin_local_command raises LocalCommandPending on
-    // EVERY accepted command. Boot and RestoredUnverified are vacuous here —
-    // they can only precede the first confirmation of a power cycle, when the
-    // cache is empty anyway — and grouped with the keep side so a future
-    // reordering cannot make them destructive.
+    // CONTRARY EVIDENCE (round 3, all three engines): each of these is raised
+    // by positive evidence that some OTHER actor just moved the fan, so the
+    // cached confirmed value is known-contradicted. The snapshot carries the
+    // externally observed state as last_diagnostic — use it, so a timer
+    // pressed during the OEM holdoff runs the fan at the speed the remote
+    // just chose rather than silently overriding it. Without a diagnostic,
+    // the only honest cache is empty (the stopped-fan LOW rule).
+    case ::quietcool::AuthorityLossReason::ExternalStateTraffic:
+    case ::quietcool::AuthorityLossReason::AmbiguousOemYield:
+    case ::quietcool::AuthorityLossReason::ContradictoryTail:
+      return unknown->last_diagnostic;
+    // Freshness only: we are momentarily unsure, but nothing claims the fan
+    // moved. Clearing on these turned the primary "set HIGH, then set a
+    // timer" journey into LOW+duration (round 2, opus): begin_local_command
+    // raises LocalCommandPending on EVERY accepted command. Boot and
+    // RestoredUnverified are vacuous here — they can only precede the first
+    // confirmation of a power cycle, when the cache is empty anyway — and
+    // grouped with the keep side so a future reordering cannot make them
+    // destructive.
     case ::quietcool::AuthorityLossReason::Boot:
     case ::quietcool::AuthorityLossReason::LocalCommandPending:
     case ::quietcool::AuthorityLossReason::ManualRevalidationPending:
     case ::quietcool::AuthorityLossReason::ExactOemQuery:
-    case ::quietcool::AuthorityLossReason::ExternalStateTraffic:
-    case ::quietcool::AuthorityLossReason::AmbiguousOemYield:
-    case ::quietcool::AuthorityLossReason::ContradictoryTail:
     case ::quietcool::AuthorityLossReason::ConsensusTimeout:
     case ::quietcool::AuthorityLossReason::TransactionExhausted:
     case ::quietcool::AuthorityLossReason::RadioUnavailable:
@@ -142,6 +155,22 @@ std::optional<::quietcool::FanState> confirmed_state_after(
       break;
   }
   return previous;
+}
+
+std::optional<const char*> timer_select_apply_snapshot(
+    TimerSelectCache& cache, const ::quietcool::AuthoritySnapshot& authority,
+    const char* shown_option) {
+  // Capability first and unconditionally: it is sticky (a property of the
+  // bound fan, issue #31), while the confirmed state obeys the reason-
+  // discriminating rule above.
+  cache.capability = authority.speed_capability;
+  cache.confirmed = confirmed_state_after(authority, cache.confirmed);
+  const auto option = timer_option_for_authority(authority);
+  if (!option) return std::nullopt;
+  if (shown_option != nullptr && shown_option[0] != '\0' &&
+      std::string(shown_option) == *option)
+    return std::nullopt;
+  return option;
 }
 
 std::optional<const char*> timer_option_for_authority(

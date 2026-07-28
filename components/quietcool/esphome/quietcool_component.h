@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace esphome::quietcool {
 
@@ -52,6 +53,13 @@ class QuietCoolComponent final : public Component {
       // no confirmed state and nothing anywhere would say why.
       ESP_LOGE("quietcool", "authority publisher dropped: capacity %u exceeded",
                static_cast<unsigned>(kMaxAuthorityPublishers));
+      // And loudly at the component level (round 3, codex): a dropped entity
+      // still holds its controller pointer and can TRANSMIT — a timer select
+      // that never receives a snapshot aims every command from an empty
+      // cache. A config that manages to register five publishers is a config
+      // error, and it should look like one in Home Assistant, not like a fan
+      // that mysteriously always starts LOW.
+      this->mark_failed();
       return;
     }
     authority_publishers_[authority_publisher_count_++] = publisher;
@@ -249,8 +257,15 @@ class QuietCoolComponent final : public Component {
   std::uint32_t published_rx_valid_count_{0};
   std::uint32_t published_rx_rejected_count_{0};
   // Last Valid RX Frame publishes only when the byte CHANGES: a retry storm
-  // repeats one byte, so change-gating is the natural rate limit.
+  // repeats one byte, so change-gating is the natural rate limit. The publish
+  // itself is deferred until core_.on_frame has run (round 3, codex).
   std::optional<std::uint8_t> published_rx_frame_byte_;
+  std::optional<std::uint8_t> pending_rx_frame_publish_;
+  // Change gates for the two per-snapshot text diagnostics (round 3, opus,
+  // measured): the post-drain channel fires every tick and TextSensor does
+  // not dedupe.
+  std::string published_last_confirmed_state_;
+  std::string published_speed_capability_;
   // Mirrors ConfirmationCore's own sender_, so on_radio_packet can validate
   // an incoming frame the same way core eventually will, without reaching
   // into core. Updated at exactly the three sites where core's sender_

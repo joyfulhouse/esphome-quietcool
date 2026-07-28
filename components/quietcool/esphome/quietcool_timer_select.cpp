@@ -19,32 +19,14 @@ void QuietCoolTimerSelect::dump_config() {
 
 void QuietCoolTimerSelect::publish_authority(
     const ::quietcool::AuthoritySnapshot& authority) {
-  // Cache the capability unconditionally: like the fan's band, it is sticky and
-  // survives an authority invalidation, because capability describes the bound
-  // fan rather than the freshness of what we know about it (issue #31).
-  capability_ = authority.speed_capability;
-
-  // The cache-update rule lives in confirmed_state_after — linked and tested —
-  // because both wrong versions of it were found adversarially: latching
-  // through invalidations aimed commands with a state the fan no longer had
-  // (round 1), and clearing on every invalidation turned "set HIGH, then set a
-  // timer" into LOW+duration (round 2). This line only marshals.
-  confirmed_ = confirmed_state_after(authority, confirmed_);
-
-  // The published option comes from the timer authority itself, which the
-  // authority store only ever writes from confirmed evidence. nullopt means
-  // "not known" — leave the shown option alone rather than assert a timer state
-  // nothing supports. Note the DISPLAY sense of "None" is "no timer
-  // programmed", which is true for a stopped fan too; only the COMMAND sense
-  // of selecting it transmits run-continuously.
-  //
-  // Deduplicated against the currently shown option: snapshots now arrive on
-  // every effect-drain round (see the post-drain fan-out), so re-publishing an
-  // unchanged option would spam the native API every loop tick.
-  if (const auto option = timer_option_for_authority(authority)) {
-    if (this->current_option().empty() || !(this->current_option() == *option))
-      publish_state(*option);
-  }
+  // The ENTIRE per-snapshot update — capability caching, the reason-
+  // discriminating confirmed-state rule, and the shown-option dedupe — is one
+  // linked, tested call (round 3, opus: mutation proved anything left in this
+  // file is unreachable by any test; this line is now all there is to leave).
+  const auto shown = this->current_option();
+  if (const auto option = timer_select_apply_snapshot(
+          cache_, authority, shown.empty() ? "" : shown.c_str()))
+    publish_state(*option);
 }
 
 void QuietCoolTimerSelect::control(const std::string& value) {
@@ -66,8 +48,9 @@ void QuietCoolTimerSelect::control(const std::string& value) {
   // pure function — precisely so this untestable entity file holds no band
   // decision (round 1, opus: composed inline here, swapping the two bands
   // recreated issue #30 with every suite green).
-  const auto command =
-      timer_command_from_confirmed(confirmed_, capability_, *selection);
+  const auto command = timer_command_from_confirmed(cache_.confirmed,
+                                                    cache_.capability,
+                                                    *selection);
 
   ESP_LOGD(TAG, "Timer '%s' queued as 0x%02X; awaiting confirmation",
            value.c_str(), command.outbound_command_byte());

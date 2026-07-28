@@ -137,10 +137,9 @@ void QuietCoolComponent::on_radio_packet(::quietcool::ByteView packet) {
       // decode_strict's first check).
       const bool carries_state =
           !std::holds_alternative<::quietcool::ExactQuery>(decoded.value());
-      if (carries_state && last_rx_frame_sensor_ != nullptr &&
-          published_rx_frame_byte_ != packet[4]) {
+      if (carries_state && published_rx_frame_byte_ != packet[4]) {
         published_rx_frame_byte_ = packet[4];
-        last_rx_frame_sensor_->publish_state(format_hex_byte(packet[4]));
+        pending_rx_frame_publish_ = packet[4];
       }
     } else {
       ++rx_rejected_count_;
@@ -150,7 +149,18 @@ void QuietCoolComponent::on_radio_packet(::quietcool::ByteView packet) {
     // packet storm costs increments only — no per-packet native-API traffic,
     // and no stale final value once the storm ends.
   }
+  // Core processes the frame BEFORE any diagnostic publishes (round 3,
+  // codex): publish_state can fire a synchronous automation, and one that
+  // commands the fan would otherwise run against the core's PRE-frame state —
+  // e.g. a timer selected from an on_value automation racing the very
+  // OEM-priority handling this frame is about to trigger.
   apply_effects(core_.on_frame(packet, now_ms), now_ms);
+  if (pending_rx_frame_publish_) {
+    if (last_rx_frame_sensor_ != nullptr)
+      last_rx_frame_sensor_->publish_state(
+          format_hex_byte(*pending_rx_frame_publish_));
+    pending_rx_frame_publish_.reset();
+  }
 }
 
 void QuietCoolComponent::flush_rx_counter_publications(
@@ -304,10 +314,14 @@ void QuietCoolComponent::apply_effect(
     return;
   }
   if (const auto* revoke = std::get_if<::quietcool::RevokeTxLease>(&effect)) {
-    burst_.revoke_if_unstarted(revoke->token);
-    // A revoked lease produces no burst event at all, so this is the only
-    // place a revoked command's latch can be cleared (round 2).
-    if (pending_tx_command_.has_value() &&
+    // Clear the latch only when the revocation actually TOOK (round 3, all
+    // three engines): revoke_if_unstarted is a no-op once frame 1 is on the
+    // air — the burst then runs to completion and genuinely transmits, and
+    // clearing here would make TX Count advance while Last TX Command still
+    // showed the previous byte. An unstarted revoked lease produces no burst
+    // event at all, so this is that case's only clearing site (round 2).
+    if (burst_.revoke_if_unstarted(revoke->token) &&
+        pending_tx_command_.has_value() &&
         pending_tx_command_->token == revoke->token)
       pending_tx_command_.reset();
     return;
@@ -424,12 +438,29 @@ void QuietCoolComponent::publish_authority_snapshot(
 
 void QuietCoolComponent::publish_authority_diagnostics(
     const ::quietcool::AuthoritySnapshot& authority) {
-  if (last_confirmed_state_sensor_ != nullptr)
-    last_confirmed_state_sensor_->publish_state(
-        format_last_confirmed_state(authority.state));
-  if (speed_capability_sensor_ != nullptr)
-    speed_capability_sensor_->publish_state(
-        format_speed_capability(authority.speed_capability));
+  // Change-gated (round 3, opus, MEASURED): this runs on the post-drain
+  // channel, which fires essentially every loop tick — an empty effect batch
+  // still arms a publication round — and TextSensor::publish_state notifies
+  // the API unconditionally. Ungated, each sensor emitted one state message
+  // per tick (~60/s) forever. Every consumer of this channel now carries its
+  // own gate: the event sink by revision, the fan by its publication gate,
+  // the select by shown-option dedupe, and these two by last-published text.
+  // The CHANNEL must stay ungated — its per-tick firing is exactly what
+  // delivers the invalidations that emit no effect (round 2, codex).
+  if (last_confirmed_state_sensor_ != nullptr) {
+    auto text = format_last_confirmed_state(authority.state);
+    if (text != published_last_confirmed_state_) {
+      published_last_confirmed_state_ = text;
+      last_confirmed_state_sensor_->publish_state(std::move(text));
+    }
+  }
+  if (speed_capability_sensor_ != nullptr) {
+    auto text = format_speed_capability(authority.speed_capability);
+    if (text != published_speed_capability_) {
+      published_speed_capability_ = text;
+      speed_capability_sensor_->publish_state(std::move(text));
+    }
+  }
 }
 
 void QuietCoolComponent::publish_remote_sender_id() {

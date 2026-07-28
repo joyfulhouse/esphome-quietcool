@@ -289,20 +289,58 @@ QC_TEST("timer_command", "a pending local command keeps the cache") {
 }
 
 QC_TEST("timer_command", "freshness invalidations keep the cache") {
-  // OEM remote polls, external traffic, consensus timeouts: we are momentarily
-  // unsure, but the fan is still physically doing what was last confirmed.
+  // OEM remote polls, consensus timeouts, our own pending work: we are
+  // momentarily unsure, but nothing claims the fan moved.
   const auto high = FanState::command(Speed::High, Duration::Continuous);
   const ::quietcool::AuthorityLossReason freshness[] = {
       ::quietcool::AuthorityLossReason::ExactOemQuery,
-      ::quietcool::AuthorityLossReason::ExternalStateTraffic,
       ::quietcool::AuthorityLossReason::ConsensusTimeout,
       ::quietcool::AuthorityLossReason::TransactionExhausted,
       ::quietcool::AuthorityLossReason::ManualRevalidationPending,
+      ::quietcool::AuthorityLossReason::RadioUnavailable,
   };
   for (const auto reason : freshness) {
     const auto next = confirmed_state_after(snapshot_with_unknown(reason), high);
     QC_CHECK(next.has_value());
   }
+}
+
+QC_TEST("timer_command", "contrary evidence replaces the cache with the observed state") {
+  // ExternalStateTraffic / AmbiguousOemYield / ContradictoryTail are not
+  // freshness: each is raised by positive evidence that some OTHER actor just
+  // moved the fan (round 3, fable + codex + opus). Keeping the stale confirmed
+  // value made the timer select override an OEM remote press — someone turns
+  // the fan LOW downstairs, someone upstairs picks "4 hours", and the fan
+  // jumps back to HIGH from an entity nobody used to change speed. The
+  // snapshot already carries the observed state as last_diagnostic; use it.
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const auto observed_low =
+      FanState::command(Speed::Low, Duration::Continuous);
+  const ::quietcool::AuthorityLossReason contrary[] = {
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic,
+      ::quietcool::AuthorityLossReason::AmbiguousOemYield,
+      ::quietcool::AuthorityLossReason::ContradictoryTail,
+  };
+  for (const auto reason : contrary) {
+    auto snapshot = snapshot_with_unknown(reason);
+    std::get<::quietcool::UnknownStateAuthority>(snapshot.state)
+        .last_diagnostic = observed_low;
+    const auto next = confirmed_state_after(snapshot, high);
+    QC_CHECK(next.has_value());
+    QC_CHECK_EQ(next->canonical_byte(), observed_low.canonical_byte());
+  }
+}
+
+QC_TEST("timer_command", "contrary evidence without an observed state clears the cache") {
+  // No diagnostic to fall back on: the confirmed value is known-contradicted,
+  // so the only honest cache is empty — the stopped-fan LOW rule, the safe
+  // direction.
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const auto next = confirmed_state_after(
+      snapshot_with_unknown(
+          ::quietcool::AuthorityLossReason::ExternalStateTraffic),
+      high);
+  QC_CHECK(!next.has_value());
 }
 
 QC_TEST("timer_command", "identity invalidations clear the cache") {
@@ -329,6 +367,54 @@ QC_TEST("timer_command", "revalidation keeps the cache") {
   const auto high = FanState::command(Speed::High, Duration::Continuous);
   const auto next = confirmed_state_after(snapshot, high);
   QC_CHECK(next.has_value());
+}
+
+QC_TEST("timer_command", "apply snapshot caches capability and confirmed state") {
+  TimerSelectCache cache;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  snapshot.state = ::quietcool::ConfirmedStateAuthority{
+      high,
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0,
+      2,
+      std::nullopt,
+      std::nullopt,
+      1};
+  snapshot.speed_capability = ::quietcool::SpeedCapability::Three;
+  snapshot.timer = ::quietcool::NoActiveTimerAuthority{};
+
+  const auto option = timer_select_apply_snapshot(cache, snapshot, "");
+
+  QC_CHECK(cache.confirmed.has_value());
+  QC_CHECK_EQ(cache.confirmed->canonical_byte(), high.canonical_byte());
+  QC_CHECK(cache.capability.has_value());
+  QC_CHECK(option.has_value());
+  QC_CHECK(std::string(option.value()) == "None");
+}
+
+QC_TEST("timer_command", "apply snapshot suppresses a republish of the shown option") {
+  // Snapshots arrive every effect-drain round — essentially every loop tick —
+  // so an undeduped select would stream one native-API message per tick
+  // (round 3, opus, measured at 50 publishes in 50 idle ticks on the
+  // undeduped diagnostics). Same option in, nothing out.
+  TimerSelectCache cache;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.timer = ::quietcool::NoActiveTimerAuthority{};
+  QC_CHECK(!timer_select_apply_snapshot(cache, snapshot, "None").has_value());
+  QC_CHECK(timer_select_apply_snapshot(cache, snapshot, "2 hours").has_value());
+  // No shown option yet -> publish.
+  QC_CHECK(timer_select_apply_snapshot(cache, snapshot, nullptr).has_value());
+}
+
+QC_TEST("timer_command", "apply snapshot clears the cache on a re-binding") {
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Continuous);
+  const auto snapshot = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::SenderChanged);
+  timer_select_apply_snapshot(cache, snapshot, "");
+  QC_CHECK(!cache.confirmed.has_value());
 }
 
 QC_TEST("timer_command", "a confirmed off duration never publishes a stop") {

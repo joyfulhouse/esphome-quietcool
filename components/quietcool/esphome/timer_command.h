@@ -92,6 +92,25 @@ std::optional<::quietcool::FanState> confirmed_state_after(
     const ::quietcool::AuthoritySnapshot& authority,
     const std::optional<::quietcool::FanState>& previous);
 
+// Everything the select entity remembers between snapshots, held in one value
+// so the whole per-snapshot update is a single linked, tested call. Round 3
+// proved by mutation that logic left in quietcool_timer_select.cpp is
+// unreachable by any test in this repo (the file is excluded from
+// ADAPTER_SOURCES): deleting its cache update left every suite green.
+struct TimerSelectCache final {
+  std::optional<::quietcool::FanState> confirmed;
+  std::optional<::quietcool::SpeedCapability> capability;
+};
+
+// Applies one authority snapshot to the cache and returns the option to
+// publish — already deduplicated against the currently shown option, because
+// snapshots arrive every effect-drain round and an undeduped republish is one
+// native-API message per loop tick (round 3, opus, measured). `shown_option`
+// is the entity's current option, or ""/nullptr when it has none.
+std::optional<const char*> timer_select_apply_snapshot(
+    TimerSelectCache& cache, const ::quietcool::AuthoritySnapshot& authority,
+    const char* shown_option);
+
 // The option to publish for a confirmed authority snapshot, or nullopt to
 // publish nothing at all.
 //

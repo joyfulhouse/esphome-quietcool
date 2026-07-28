@@ -46,15 +46,11 @@ class QuietCoolTimerSelect final : public Component,
 
  private:
   QuietCoolComponent* controller_{nullptr};
-  // The CURRENTLY confirmed fan state, mirrored from every authority snapshot
-  // and CLEARED whenever the snapshot's state is not confirmed. Deliberately
-  // not latched: a stale value here aims an energizing command with a state
-  // the fan no longer has (round-1 findings — timer-expiry and re-binding).
-  // Held here rather than read from the fan entity so the two entities stay
-  // independent — the select must not depend on the fan having been
-  // constructed or registered.
-  std::optional<::quietcool::FanState> confirmed_;
-  std::optional<::quietcool::SpeedCapability> capability_;
+  // All snapshot-derived memory, updated exclusively by the linked, tested
+  // timer_select_apply_snapshot — this file deliberately holds no update rule
+  // of its own (rounds 1-3; see TimerSelectCache's comment). Held here rather
+  // than read from the fan entity so the two entities stay independent.
+  TimerSelectCache cache_;
 };
 
 }  // namespace esphome::quietcool
