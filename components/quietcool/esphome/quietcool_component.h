@@ -77,6 +77,15 @@ class QuietCoolComponent final : public Component {
   void request_forget();
   ::quietcool::CoreSnapshot snapshot() const;
 
+  // Monotonic radio diagnostics, restored after the YAML->C++ migration
+  // dropped them: never reset outside a reboot. `tx_count_` is the instrument
+  // that once proved this bridge was not jamming the OEM remote — it stayed
+  // flat through the remote's retry storm, which showed the storm was not
+  // this bridge's own traffic. Losing it removed the evidence.
+  std::uint32_t tx_count() const { return tx_count_; }
+  std::uint32_t rx_valid_count() const { return rx_valid_count_; }
+  std::uint32_t rx_rejected_count() const { return rx_rejected_count_; }
+
 #ifdef QUIETCOOL_HOST_TEST
   // Test seams (issue #9). Overflow of the exact-max effect and callback queues
   // is an invariant breach the real core cannot reach through the public
@@ -150,6 +159,18 @@ class QuietCoolComponent final : public Component {
   // one-shot latch keeps a sustained storm from logging every loop.
   std::uint32_t last_budget_exhaustions_{0};
   bool budget_warning_active_{false};
+  // Radio diagnostics. rx_valid_count_ / rx_rejected_count_ are declared and
+  // gettable here but NOT YET incremented: see
+  // radio_counters_test.cpp and the task-3 report for why. Summary: the
+  // accept/reject decision (ResponseClassifier::classify landing on
+  // InvalidOrIrrelevant or not) is made entirely inside
+  // ConfirmationCore::on_frame, which this task may not modify, and is not
+  // recoverable from on_radio_packet's only observable — on_frame's returned
+  // CoreEffects — without misclassifying the common case (a still-accumulating
+  // consensus candidate legitimately returns empty effects).
+  std::uint32_t tx_count_{0};
+  std::uint32_t rx_valid_count_{0};
+  std::uint32_t rx_rejected_count_{0};
 };
 
 }  // namespace esphome::quietcool

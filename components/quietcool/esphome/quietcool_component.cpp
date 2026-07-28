@@ -228,6 +228,12 @@ void QuietCoolComponent::apply_burst_event(
     apply_effects(core_.on_tx_started(started->token, now_ms), now_ms);
   } else if (const auto* complete =
                  std::get_if<::quietcool::BurstComplete>(&event)) {
+    // Counts actual transmissions, not commands accepted: BurstComplete only
+    // fires once the real 3-frame burst has gone out over the air (never for
+    // a request that was refused, deduplicated, or joined to an in-flight
+    // transaction — none of those reach BurstTransmitter::accept() again, so
+    // none produce a new BurstStarted/BurstComplete pair).
+    ++tx_count_;
     apply_effects(core_.on_tx_complete(complete->token, now_ms), now_ms);
   } else if (const auto* rejected =
                  std::get_if<::quietcool::BurstRejected>(&event)) {
