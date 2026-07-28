@@ -171,6 +171,11 @@ replaced by whichever lone fan happened to transmit. Full details are in the
   transmits and then waits, and the shown value moves when evidence arrives, not
   when you click. A refused command leaves it unchanged.
 
+  Note the two senses of `None`: as a **display** it means "no timer
+  programmed" — true for a continuously running fan and for a stopped one
+  (whether the fan is running is the fan entity's job to show). **Selecting**
+  it is what transmits run-continuously.
+
   There is no "off" in this list — stopping the fan belongs to the fan entity.
   On the wire, duration `0x0` stops the fan and `0xF` runs it continuously; both
   mean "no countdown", which is why they look redundant, but they are opposites.

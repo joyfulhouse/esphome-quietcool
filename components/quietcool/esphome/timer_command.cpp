@@ -1,6 +1,7 @@
 #include "timer_command.h"
 
 #include "fan_command.h"
+#include "fan_feedback.h"
 
 namespace esphome::quietcool {
 
@@ -39,20 +40,32 @@ static_assert(sizeof(kSelectionByIndex) / sizeof(kSelectionByIndex[0]) ==
                   sizeof(kTimerOptions) / sizeof(kTimerOptions[0]),
               "every option string must have exactly one selection");
 
-// The option for a wire duration. Off degrades to "None" rather than gaining an
-// option of its own: the select's vocabulary has no stop, by design.
-const char* option_for_duration(::quietcool::Duration duration) {
+// The selection for a wire duration. Off degrades to Continuous ("None")
+// rather than gaining an option of its own: the select's vocabulary has no
+// stop, by design.
+TimerSelection selection_for_duration(::quietcool::Duration duration) {
   switch (duration) {
-    case ::quietcool::Duration::Hours1:  return "1 hour";
-    case ::quietcool::Duration::Hours2:  return "2 hours";
-    case ::quietcool::Duration::Hours4:  return "4 hours";
-    case ::quietcool::Duration::Hours8:  return "8 hours";
-    case ::quietcool::Duration::Hours12: return "12 hours";
+    case ::quietcool::Duration::Hours1:  return TimerSelection::Hours1;
+    case ::quietcool::Duration::Hours2:  return TimerSelection::Hours2;
+    case ::quietcool::Duration::Hours4:  return TimerSelection::Hours4;
+    case ::quietcool::Duration::Hours8:  return TimerSelection::Hours8;
+    case ::quietcool::Duration::Hours12: return TimerSelection::Hours12;
     case ::quietcool::Duration::Continuous:
     case ::quietcool::Duration::Off:
       break;
   }
-  return "None";
+  return TimerSelection::Continuous;
+}
+
+// The option for a wire duration, DERIVED from kTimerOptions via the selection
+// ordinal rather than restated as string literals. A second list of literals
+// here is the round-1 opus finding: rename an option in both select.py and
+// kTimerOptions -- the exact edit the codegen-drift test blesses -- and the
+// stale literal would still be published, which Select::publish_state refuses
+// (no such option), leaving the entity permanently stateless in Home Assistant
+// while it keeps transmitting.
+const char* option_for_duration(::quietcool::Duration duration) {
+  return option_for_selection(selection_for_duration(duration));
 }
 
 }  // namespace
@@ -67,6 +80,24 @@ std::optional<TimerSelection> selection_for_option(const std::string& option) {
 
 const char* option_for_selection(TimerSelection selection) {
   return kTimerOptions[static_cast<std::size_t>(selection)];
+}
+
+::quietcool::FanState timer_command_from_confirmed(
+    const std::optional<::quietcool::FanState>& confirmed,
+    std::optional<::quietcool::SpeedCapability> capability,
+    TimerSelection requested) {
+  // The band pair is asymmetric on purpose: the confirmed level is read against
+  // the ENTITY band (the count the level was published in), while the outgoing
+  // nibble is formed against the COMMAND band, which is 2 while capability is
+  // unknown and therefore structurally cannot form MED (issues #30, #31). A
+  // stale confirmed MED under an unknown capability clamps to HIGH -- one press
+  // in the safe direction, never a stop. Do not "simplify" this to one band.
+  const auto feedback =
+      confirmed ? authority_to_feedback(*confirmed, entity_speed_count(capability))
+                : FanFeedback{};
+  return timer_command_from_intent(requested, feedback.on,
+                                   feedback.speed.value_or(1),
+                                   command_speed_count(capability));
 }
 
 std::optional<const char*> timer_option_for_authority(

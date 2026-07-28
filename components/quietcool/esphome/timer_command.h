@@ -55,6 +55,25 @@ std::optional<TimerSelection> selection_for_option(const std::string& option);
 // The inverse. Total over the enum.
 const char* option_for_selection(TimerSelection selection);
 
+// The whole confirmed-state -> timer-command composition, in one linked and
+// tested function: which band bounds the confirmed level (the ENTITY band) and
+// which band forms the wire nibble (the COMMAND band). This pair-selection is
+// the code that decides whether MED can reach the fan from the timer path, so
+// it must not be composed inline in the untestable entity file (adversarial
+// review, opus round 1: swapping the two bands there recreates issue #30 with
+// every suite green).
+//
+// `confirmed` is the last CONFIRMED FanState, or nullopt when authority is not
+// currently confirmed — invalidated by a timer expiry, a re-binding, or an
+// in-flight command. nullopt and a confirmed OFF both take the documented
+// stopped-fan rule: start at LOW. Passing a stale cache here instead of nullopt
+// is the round-1 high finding: a fan whose timer expired, or a freshly-bound
+// different fan, would be started at the PREVIOUS state's speed.
+::quietcool::FanState timer_command_from_confirmed(
+    const std::optional<::quietcool::FanState>& confirmed,
+    std::optional<::quietcool::SpeedCapability> capability,
+    TimerSelection requested);
+
 // The option to publish for a confirmed authority snapshot, or nullopt to
 // publish nothing at all.
 //

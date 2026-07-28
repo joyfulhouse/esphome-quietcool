@@ -1,7 +1,5 @@
 #pragma once
 
-#include "quietcool/ports/authority_publication_gate.h"
-#include "fan_feedback.h"
 #include "quietcool_component.h"
 #include "timer_command.h"
 
@@ -48,13 +46,15 @@ class QuietCoolTimerSelect final : public Component,
 
  private:
   QuietCoolComponent* controller_{nullptr};
-  // The confirmed fan state this entity last saw, used to choose the speed
-  // nibble that accompanies a timer duration. Held here rather than read from
-  // the fan entity so the two entities stay independent — the select must not
-  // depend on the fan having been constructed or registered.
+  // The CURRENTLY confirmed fan state, mirrored from every authority snapshot
+  // and CLEARED whenever the snapshot's state is not confirmed. Deliberately
+  // not latched: a stale value here aims an energizing command with a state
+  // the fan no longer has (round-1 findings — timer-expiry and re-binding).
+  // Held here rather than read from the fan entity so the two entities stay
+  // independent — the select must not depend on the fan having been
+  // constructed or registered.
   std::optional<::quietcool::FanState> confirmed_;
   std::optional<::quietcool::SpeedCapability> capability_;
-  ::quietcool::AuthorityPublicationGate publication_gate_;
 };
 
 }  // namespace esphome::quietcool

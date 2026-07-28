@@ -246,7 +246,7 @@ QC_TEST("adapter", "last tx command sensor is untouched by the boot query") {
   QC_CHECK(sensor.published().empty());
 }
 
-QC_TEST("adapter", "last valid rx frame sensor publishes the accepted frame byte as uppercase hex") {
+QC_TEST("adapter", "last valid rx frame sensor publishes state frames as uppercase hex") {
   ScopedPreferences preferences;
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
@@ -255,13 +255,35 @@ QC_TEST("adapter", "last valid rx frame sensor publishes the accepted frame byte
   host_test::set_millis(0);
   component.setup();
 
-  // The exact 6-byte OEM query for kSenderSeed, matching radio_counters_test.cpp.
+  // A state frame (0x9F = LOW|Continuous, duplicated trailer) — the kind of
+  // decode this diagnostic exists for.
+  const std::array<std::uint8_t, 6> state_frame{0xCB, 0x00, 0x47, 0x39, 0x9F, 0x9F};
+  component.on_radio_packet(
+      ::quietcool::ByteView(state_frame.data(), state_frame.size()));
+
+  QC_CHECK(!sensor.published().empty());
+  QC_CHECK_EQ(sensor.published().back(), std::string("0x9F"));
+}
+
+QC_TEST("adapter", "last valid rx frame sensor ignores query frames") {
+  // An ExactQuery's marker byte is 0x66 — a protocol marker, not a fan state.
+  // Publishing it made "Last Valid RX Frame" display 0x66 every time the OEM
+  // remote polled (adversarial round 1, opus). The frame still counts as
+  // VALID; only the text sensor skips it.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  text_sensor::TextSensor sensor;
+  component.set_last_rx_frame_sensor(&sensor);
+  host_test::set_millis(0);
+  component.setup();
+
   const std::array<std::uint8_t, 6> query_frame{0xCB, 0x00, 0x47, 0x39, 0x66, 0x66};
   component.on_radio_packet(
       ::quietcool::ByteView(query_frame.data(), query_frame.size()));
 
-  QC_CHECK(!sensor.published().empty());
-  QC_CHECK_EQ(sensor.published().back(), std::string("0x66"));
+  QC_CHECK(sensor.published().empty());
+  QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(1));
 }
 
 QC_TEST("adapter", "last valid rx frame sensor is untouched by a rejected frame") {

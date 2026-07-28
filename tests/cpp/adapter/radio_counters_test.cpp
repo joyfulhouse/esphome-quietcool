@@ -140,11 +140,17 @@ QC_TEST("adapter", "rx_rejected_count_increments_on_a_rejected_frame") {
   QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(0));
 }
 
-QC_TEST("adapter",
-        "rx_rejected_count_increments_while_unprovisioned_with_no_sender_to_validate") {
+QC_TEST("adapter", "unprovisioned frames are not counted at all") {
   // No ScopedPreferences/setup(): provisioned_sender_ stays nullopt, exactly
   // like an unprovisioned unit (bare construction, matching
   // authority_fanout_test.cpp's pattern for a test that never calls setup()).
+  //
+  // Reversed from the first implementation by adversarial round 1 (fable +
+  // opus, independently): with no sender there is nothing to validate
+  // against, and the only unprovisioned traffic that matters is a Learn
+  // window — where the frames the core is ACCEPTING as learn evidence would
+  // have inflated RX Rejected precisely while an operator watches the
+  // diagnostics to see whether pairing is working.
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey,
                                kJitterSeed);
@@ -154,9 +160,7 @@ QC_TEST("adapter",
   component.on_radio_packet(
       ::quietcool::ByteView(query_frame.data(), query_frame.size()));
 
-  // Nothing to validate against, so counted rejected rather than dropped
-  // silently from the diagnostic — matches legacy's sender-mismatch outcome.
-  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(1));
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(0));
   QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(0));
 }
 

@@ -24,15 +24,28 @@ void QuietCoolTimerSelect::publish_authority(
   // fan rather than the freshness of what we know about it (issue #31).
   capability_ = authority.speed_capability;
 
-  // The speed nibble a timer command carries comes only from CONFIRMED state,
-  // through the same gate the fan entity uses.
-  if (const auto confirmed = publication_gate_.next(authority))
+  // confirmed_ mirrors the snapshot's CURRENT state authority, every
+  // publication — confirmed in, cleared out. It must NOT latch through a
+  // revision gate the way the fan's display value does: an invalidation
+  // (timer expiry, Forget/Learn re-binding, an in-flight command) must empty
+  // this cache, or the next timer command is aimed with a state the fan no
+  // longer has. Round 1 found both energizing shapes of that staleness: a fan
+  // whose timer expired re-started as running-HIGH instead of stopped-LOW
+  // (codex, high), and a freshly-bound fan started at the PREVIOUS fan's
+  // speed (opus). Not-confirmed maps to nullopt, which
+  // timer_command_from_confirmed treats as the documented stopped-fan rule.
+  if (const auto* confirmed =
+          std::get_if<::quietcool::ConfirmedStateAuthority>(&authority.state))
     confirmed_ = confirmed->state;
+  else
+    confirmed_ = std::nullopt;
 
   // The published option comes from the timer authority itself, which the
   // authority store only ever writes from confirmed evidence. nullopt means
   // "not known" — leave the shown option alone rather than assert a timer state
-  // nothing supports.
+  // nothing supports. Note the DISPLAY sense of "None" is "no timer
+  // programmed", which is true for a stopped fan too; only the COMMAND sense
+  // of selecting it transmits run-continuously.
   if (const auto option = timer_option_for_authority(authority))
     publish_state(*option);
 }
@@ -51,17 +64,13 @@ void QuietCoolTimerSelect::control(const std::string& value) {
     return;
   }
 
-  // Speed round-trips through the ENTITY band and back through the COMMAND
-  // band, and that asymmetry is deliberate. While capability is unknown the
-  // command band is 2, which structurally cannot form MED — so a confirmed MED
-  // clamps to HIGH rather than reaching a fan that may not have MED at all
-  // (issues #30, #31). Do not "simplify" this to one band.
-  const auto feedback =
-      confirmed_ ? authority_to_feedback(*confirmed_, entity_speed_count(capability_))
-                 : FanFeedback{};
-  const auto command = timer_command_from_intent(
-      *selection, feedback.on, feedback.speed.value_or(1),
-      command_speed_count(capability_));
+  // The confirmed-state -> command composition, including the entity/command
+  // band pair, lives in timer_command_from_confirmed — a linked, host-tested
+  // pure function — precisely so this untestable entity file holds no band
+  // decision (round 1, opus: composed inline here, swapping the two bands
+  // recreated issue #30 with every suite green).
+  const auto command =
+      timer_command_from_confirmed(confirmed_, capability_, *selection);
 
   ESP_LOGD(TAG, "Timer '%s' queued as 0x%02X; awaiting confirmation",
            value.c_str(), command.outbound_command_byte());

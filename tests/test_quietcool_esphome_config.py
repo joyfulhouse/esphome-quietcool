@@ -3501,16 +3501,28 @@ CPP_CONFIG = ROOT / "quietcool-cpp-lora32.yaml"
 
 _CPP_TIMER_ENTITY = "Fan Timer"
 
-_CPP_RESTORED_DIAGNOSTICS = (
-    "Last TX Command",
-    "Last Valid RX Frame",
-    "Last Confirmed Fan State",
-    "Fan Speed Capability",
-    "Remote Sender ID",
-    "TX Count",
-    "RX Valid Count",
-    "RX Rejected Count",
-)
+# name -> the `kind:` key that performs the actual binding. Asserting the name
+# alone is not enough (adversarial round 1, opus + codex): swap two kind lines
+# between blocks and ESPHome validates, the firmware flashes, and TX Count
+# reports RX frames — a silently mislabelled counter, worse than a missing one.
+_CPP_RESTORED_DIAGNOSTICS = {
+    "Last TX Command": "last_tx_command",
+    "Last Valid RX Frame": "last_rx_frame",
+    "Last Confirmed Fan State": "last_confirmed_state",
+    "Fan Speed Capability": "speed_capability",
+    "Remote Sender ID": "remote_sender_id",
+    "TX Count": "tx_count",
+    "RX Valid Count": "rx_valid_count",
+    "RX Rejected Count": "rx_rejected_count",
+}
+
+
+def _strip_yaml_comments(text: str) -> str:
+    """Drop full-line comments so a deleted entity left behind as
+    `# name: "TX Count"` cannot satisfy a presence assertion."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
 
 _CPP_TIMER_OPTIONS = ("None", "1 hour", "2 hours", "4 hours", "8 hours", "12 hours")
 
@@ -3551,7 +3563,12 @@ class CppConfigBindingTest(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.text = CPP_CONFIG.read_text()
+        # Declarations are asserted against comment-STRIPPED text: a
+        # commented-out declaration is an absent declaration and must fail.
+        # The documentation tests use self.raw — documentation lives in
+        # comments by design.
+        self.raw = CPP_CONFIG.read_text()
+        self.text = _strip_yaml_comments(self.raw)
 
     def test_every_restored_entity_is_declared(self) -> None:
         for name in (_CPP_TIMER_ENTITY, *_CPP_RESTORED_DIAGNOSTICS):
@@ -3564,6 +3581,17 @@ class CppConfigBindingTest(unittest.TestCase):
                 self.assertIn(
                     "disabled_by_default: true", _entity_block(self.text, name)
                 )
+
+    def test_every_restored_diagnostic_binds_its_own_kind(self) -> None:
+        # The kind key IS the binding; the name is only a label. Each entity's
+        # block must carry the quietcool platform, the controller, and exactly
+        # its own kind — so two blocks with swapped kinds fail by name.
+        for name, kind in _CPP_RESTORED_DIAGNOSTICS.items():
+            with self.subTest(entity=name):
+                block = _entity_block(self.text, name)
+                self.assertIn("platform: quietcool", block)
+                self.assertIn("controller_id: quietcool_controller", block)
+                self.assertIn(f"kind: {kind}", block)
 
     def test_the_timer_select_is_not_disabled_by_default(self) -> None:
         # The diagnostics are opt-in; the control the feature exists for is not.
@@ -3581,7 +3609,7 @@ class CppConfigBindingTest(unittest.TestCase):
         # kTimerOptions ordinal), so the YAML cannot restate it without
         # duplicating a source of truth. What the YAML must carry is the
         # energizing warning next to the entity a user actually clicks.
-        header = self.text.split("select:", 1)[0]
+        header = self.raw.split("select:", 1)[0]
         self.assertRegex(header, r"ENERGIZING")
 
     def test_the_config_documents_off_versus_continuous(self) -> None:
@@ -3589,13 +3617,13 @@ class CppConfigBindingTest(unittest.TestCase):
         # this file must meet it here, not only in the design doc. Asserted as
         # meaning, not mere presence: a bare assertIn("Off", ...) would pass on
         # any file mentioning the word anywhere.
-        self.assertRegex(self.text, r"Off\b[^\n]*\bSTOPPED")
-        self.assertRegex(self.text, r"Continuous\b[^\n]*\bRUNS")
+        self.assertRegex(self.raw, r"Off\b[^\n]*\bSTOPPED")
+        self.assertRegex(self.raw, r"Continuous\b[^\n]*\bRUNS")
 
     def test_the_stale_no_timer_entity_note_is_gone(self) -> None:
         # The header claimed "No Fan Timer select entity yet" for the whole life
         # of the C++ track. Leaving it would make the file contradict itself.
-        self.assertNotIn("No Fan Timer select entity yet", self.text)
+        self.assertNotIn("No Fan Timer select entity yet", self.raw)
 
     def test_select_codegen_options_match_the_cpp_option_table(self) -> None:
         # select.py's TIMER_OPTIONS index IS the TimerSelection ordinal, and

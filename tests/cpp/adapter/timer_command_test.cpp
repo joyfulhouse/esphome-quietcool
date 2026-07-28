@@ -148,6 +148,93 @@ QC_TEST("timer_command", "no active timer publishes none") {
   QC_CHECK(std::string(timer_option_for_authority(snapshot).value()) == "None");
 }
 
+QC_TEST("timer_command", "every duration option maps back to its own string") {
+  // option_for_duration must be DERIVED from kTimerOptions, not a second list
+  // of string literals: a coordinated rename of an option in select.py and
+  // kTimerOptions would otherwise leave the feedback path publishing the old
+  // string, which ESPHome's Select rejects as an invalid option — the entity
+  // goes permanently stateless in HA while still transmitting (adversarial
+  // review, opus round 1). Every timed duration is asserted, not a sample.
+  const struct { ::quietcool::Duration duration; const char* option; } cases[] = {
+      {::quietcool::Duration::Hours1, "1 hour"},
+      {::quietcool::Duration::Hours2, "2 hours"},
+      {::quietcool::Duration::Hours4, "4 hours"},
+      {::quietcool::Duration::Hours8, "8 hours"},
+      {::quietcool::Duration::Hours12, "12 hours"},
+      {::quietcool::Duration::Continuous, "None"},
+  };
+  for (const auto& c : cases) {
+    ::quietcool::AuthoritySnapshot snapshot{};
+    ::quietcool::ProgrammedDurationAuthority programmed{};
+    programmed.duration = c.duration;
+    snapshot.timer = programmed;
+    const auto option = timer_option_for_authority(snapshot);
+    QC_CHECK(option.has_value());
+    QC_CHECK(std::string(option.value()) == c.option);
+    // And the published string must be one the entity's option list contains,
+    // or Select::publish_state refuses it.
+    QC_CHECK(selection_for_option(option.value()).has_value());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The full confirmed-state -> command composition. This is the code that
+// decides whether MED can reach the fan from the timer path, so it lives here
+// as ONE linked function rather than being composed inline in the untestable
+// entity file (adversarial review, opus round 1: with the two band calls
+// swapped, a timer on a running 2-speed fan transmits MED and stops it, and
+// every suite stays green).
+// ---------------------------------------------------------------------------
+
+QC_TEST("timer_command", "confirmed high with unknown capability stays high") {
+  // Band round trip under unknown capability: entity band 3 in, command band 2
+  // out. A confirmed HIGH must come back out as HIGH, never MED.
+  const auto confirmed = FanState::command(Speed::High, Duration::Continuous);
+  const auto command = timer_command_from_confirmed(
+      confirmed, std::nullopt, TimerSelection::Hours2);
+  QC_CHECK_EQ(command.speed().value(), Speed::High);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0xB2);
+}
+
+QC_TEST("timer_command", "confirmed medium with unknown capability cannot resend medium") {
+  // The safety property the band split exists for: while capability is
+  // unknown the command band structurally cannot form MED. A stale confirmed
+  // MED clamps to HIGH — one press in the safe direction, never a stop.
+  const auto confirmed = FanState::command(Speed::Medium, Duration::Continuous);
+  const auto command = timer_command_from_confirmed(
+      confirmed, std::nullopt, TimerSelection::Hours1);
+  QC_CHECK(command.speed().value() != Speed::Medium);
+  QC_CHECK_EQ(command.speed().value(), Speed::High);
+}
+
+QC_TEST("timer_command", "confirmed medium with confirmed three speeds keeps medium") {
+  const auto confirmed = FanState::command(Speed::Medium, Duration::Continuous);
+  const auto command = timer_command_from_confirmed(
+      confirmed, ::quietcool::SpeedCapability::Three, TimerSelection::Hours4);
+  QC_CHECK_EQ(command.speed().value(), Speed::Medium);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0xA4);
+}
+
+QC_TEST("timer_command", "no confirmed state is a stopped fan and starts at low") {
+  // The stale-cache fix (codex high + opus medium, round 1): when authority is
+  // invalidated — timer expiry, re-binding, in-flight command — the caller
+  // passes nullopt, and the command falls back to the documented stopped-fan
+  // rule: start at LOW. Never the previous fan's speed.
+  const auto command = timer_command_from_confirmed(
+      std::nullopt, std::nullopt, TimerSelection::Hours2);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0x92);
+  QC_CHECK_EQ(command.speed().value(), Speed::Low);
+}
+
+QC_TEST("timer_command", "a confirmed stopped fan starts at low not its remembered speed") {
+  // confirmed_ holding an OFF report must behave exactly like no report: LOW.
+  const auto confirmed = FanState::command(Speed::High, Duration::Off);
+  const auto command = timer_command_from_confirmed(
+      confirmed, ::quietcool::SpeedCapability::Three, TimerSelection::Hours8);
+  QC_CHECK_EQ(command.speed().value(), Speed::Low);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0x98);
+}
+
 QC_TEST("timer_command", "a confirmed off duration never publishes a stop") {
   // Duration::Off should not reach a timer authority, but if it ever does the
   // select must fall back to "None" — the option list has no way to express a

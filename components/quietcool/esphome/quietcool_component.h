@@ -11,6 +11,7 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/core/component.h"
+#include "esphome/core/log.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -44,7 +45,15 @@ class QuietCoolComponent final : public Component {
 
   void add_authority_publisher(AuthorityPublisher* publisher) {
     if (publisher == nullptr) return;
-    if (authority_publisher_count_ >= kMaxAuthorityPublishers) return;
+    if (authority_publisher_count_ >= kMaxAuthorityPublishers) {
+      // Loudly, not silently (round 1, opus): the dropped entity keeps its
+      // controller_ pointer and can still TRANSMIT — it just never receives a
+      // snapshot, so e.g. a dropped timer select would aim every command with
+      // no confirmed state and nothing anywhere would say why.
+      ESP_LOGE("quietcool", "authority publisher dropped: capacity %u exceeded",
+               static_cast<unsigned>(kMaxAuthorityPublishers));
+      return;
+    }
     authority_publishers_[authority_publisher_count_++] = publisher;
   }
   void set_state_known_sensor(binary_sensor::BinarySensor* sensor) {
@@ -207,6 +216,14 @@ class QuietCoolComponent final : public Component {
   std::uint32_t tx_count_{0};
   std::uint32_t rx_valid_count_{0};
   std::uint32_t rx_rejected_count_{0};
+  // Last TX Command's latch: set when a TransactionCommand burst is ACCEPTED,
+  // published (and cleared) when its burst COMPLETES, so the diagnostic can
+  // never name a byte that a radio fault kept off the air (round 1, codex).
+  std::optional<std::uint8_t> pending_tx_command_byte_;
+  // Throttle for the rejected-counter's entity updates; the counter itself is
+  // exact. 5 s bounds native-API traffic in a noisy RF environment.
+  static constexpr ::quietcool::MonotonicMs kRejectedPublishIntervalMs = 5000;
+  ::quietcool::MonotonicMs last_rejected_publish_ms_{0};
   // Mirrors ConfirmationCore's own sender_, so on_radio_packet can validate
   // an incoming frame the same way core eventually will, without reaching
   // into core. Updated at exactly the three sites where core's sender_
