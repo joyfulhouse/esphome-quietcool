@@ -71,11 +71,63 @@ QC_TEST("adapter", "an effectless batch still delivers exactly one snapshot") {
   CountingPublisher publisher;
   component.add_authority_publisher(&publisher);
 
+  binary_sensor::BinarySensor state_known;
+  component.set_state_known_sensor(&state_known);
+
   ::quietcool::CoreEffects batch;
   QC_CHECK(batch.add(::quietcool::RequestRadioReset{}));
   component.drive_effects_for_test(batch);
 
   QC_CHECK_EQ(publisher.calls, 1);
+  // And the SINK half of the post-drain channel (round 10, opus): it is the
+  // only path carrying effect-less invalidations to the six sink-owned
+  // entities, and deleting it previously left both suites green.
+  QC_CHECK_EQ(state_known.published().size(), std::size_t(1));
+}
+
+// Records whether the authority publisher had already been served when the
+// sink's Fan State Known publication fires.
+class SinkOrderObserver final : public binary_sensor::BinarySensor {
+ public:
+  const CountingPublisher* publisher{nullptr};
+  int publisher_calls_at_publish{-1};
+  void publish_state(bool state) override {
+    binary_sensor::BinarySensor::publish_state(state);
+    if (publisher != nullptr && publisher_calls_at_publish < 0)
+      publisher_calls_at_publish = publisher->calls;
+  }
+};
+
+QC_TEST("adapter", "publishers are served before the sink in one delivery") {
+  // Round 10 (codex, high): the sink's *_Known publications fire
+  // automations, and one reading the fan entity must see it already at THIS
+  // snapshot's state — the sink published first, so a rising Fan State Known
+  // automation read a stale fan entity and could transmit from it. The
+  // reverse staleness fails closed (a momentarily-false Known flag skips).
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CountingPublisher publisher;
+  SinkOrderObserver state_known;
+  state_known.publisher = &publisher;
+  component.add_authority_publisher(&publisher);
+  component.set_state_known_sensor(&state_known);
+
+  ::quietcool::AuthoritySnapshot confirmed{};
+  confirmed.state = ::quietcool::ConfirmedStateAuthority{
+      ::quietcool::FanState::command(::quietcool::Speed::High,
+                                     ::quietcool::Duration::Continuous),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0,
+      2,
+      std::nullopt,
+      std::nullopt,
+      1};
+  ::quietcool::CoreEffects batch;
+  QC_CHECK(batch.add(::quietcool::PublishAuthorityEffect{confirmed}));
+  component.drive_effects_for_test(batch);
+
+  QC_CHECK(state_known.publisher_calls_at_publish >= 1);
 }
 
 QC_TEST("adapter", "registering past capacity degrades instead of displacing") {

@@ -236,8 +236,9 @@ void QuietCoolComponent::apply_effects(
     // PublishAuthorityEffect, so an effect-driven fan-out silently missed
     // exactly the invalidations the timer select's cache rule exists to see.
     const auto authority = core_.snapshot(publish_ms).authority;
-    events_.publish_authority(authority, publish_ms);
+    // Same publisher-before-sink order as the in-place channel (round 10).
     publish_authority_snapshot(authority);
+    events_.publish_authority(authority, publish_ms);
   };
   // Only the top-level drain runs work and can exhaust its budget; a re-entrant
   // apply_effects (an automation firing during apply()) hits the draining_
@@ -364,8 +365,14 @@ void QuietCoolComponent::apply_effect(
     // the sink and fan by revision, the select by shown option, the text
     // diagnostics by last-published string. The sink's clock was set by the
     // apply lambda immediately before this branch runs.
-    events_.publish_authority(authority->authority, events_.now_ms());
+    // Publishers BEFORE the sink, in both channels (round 10, codex): the
+    // sink's *_Known publications fire automations, and one reading the fan
+    // entity must see it already at this snapshot's state — a stale read
+    // there transmitted. The reverse staleness (an automation on the fan
+    // entity reading a one-delivery-old Known flag) fails CLOSED: Known
+    // flags gate trust, and a momentary false skips rather than transmits.
     publish_authority_snapshot(authority->authority);
+    events_.publish_authority(authority->authority, events_.now_ms());
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {
@@ -413,9 +420,7 @@ void QuietCoolComponent::apply_burst_event(
       tx_count_sensor_->publish_state(static_cast<float>(tx_count_));
     if (pending_tx_command_.has_value() &&
         pending_tx_command_->token == completed_token) {
-      if (last_tx_command_sensor_ != nullptr)
-        last_tx_command_sensor_->publish_state(
-            format_hex_byte(pending_tx_command_->byte));
+      publish_last_tx_command(pending_tx_command_->byte);
       pending_tx_command_.reset();
     }
   } else if (const auto* rejected =
@@ -426,21 +431,23 @@ void QuietCoolComponent::apply_burst_event(
     apply_effects(core_.on_tx_rejected(rejected->token, now_ms), now_ms);
   } else if (const auto* fault =
                  std::get_if<::quietcool::BurstFault>(&event)) {
+    // A fault after frames already went out is a PARTIAL transmission, and
+    // the fan may well have acted on it — the 3-frame burst is redundancy,
+    // not a threshold — so the byte that reached the air is still recorded
+    // (round 9, codex). But core learns of the fault FIRST, mirroring the
+    // complete branch's rule exactly (round 10, opus: publishing first let a
+    // synchronous automation command against a core still holding a live
+    // in-flight burst). frames_sent is captured before on_tx_fault because
+    // the drain it triggers may restart the transmitter.
+    std::optional<std::uint8_t> partial_tx_byte;
     if (pending_tx_command_.has_value() &&
         pending_tx_command_->token == fault->token) {
-      // A fault after frames already went out is a PARTIAL transmission, and
-      // the fan may well have acted on it — the 3-frame burst is redundancy,
-      // not a threshold. Publishing then clearing keeps Last TX Command
-      // honest about what reached the air (round 9, codex); frames_sent
-      // still reflects the faulted burst here because the transmitter's
-      // fault path does not reset it.
-      if (burst_.snapshot().frames_sent > 0 &&
-          last_tx_command_sensor_ != nullptr)
-        last_tx_command_sensor_->publish_state(
-            format_hex_byte(pending_tx_command_->byte));
+      if (burst_.snapshot().frames_sent > 0)
+        partial_tx_byte = pending_tx_command_->byte;
       pending_tx_command_.reset();
     }
     apply_effects(core_.on_tx_fault(fault->token, now_ms), now_ms);
+    if (partial_tx_byte) publish_last_tx_command(*partial_tx_byte);
   }
 }
 
@@ -455,6 +462,17 @@ void QuietCoolComponent::publish_authority_snapshot(
   for (std::size_t index = 0; index < authority_publisher_count_; ++index)
     authority_publishers_[index]->publish_authority(authority);
   publish_authority_diagnostics(authority);
+}
+
+// Change-gated like Last Valid RX Frame and for the same reason (round 10,
+// opus): a fault storm re-attempts one byte, and ungated the sensor emitted
+// one identical native-API publication — and one automation trigger — per
+// faulted attempt.
+void QuietCoolComponent::publish_last_tx_command(std::uint8_t byte) {
+  if (published_tx_byte_ == byte) return;
+  published_tx_byte_ = byte;
+  if (last_tx_command_sensor_ != nullptr)
+    last_tx_command_sensor_->publish_state(format_hex_byte(byte));
 }
 
 void QuietCoolComponent::publish_authority_diagnostics(

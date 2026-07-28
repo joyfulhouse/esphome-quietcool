@@ -227,6 +227,20 @@ QC_TEST("adapter", "last tx command sensor publishes the outbound state byte as 
   QC_CHECK_EQ(sensor.published().back(), std::string("0xB1"));
 }
 
+// Reads the core's in-flight state at the exact moment Last TX Command
+// publishes: the core must already have been told about the completion or
+// fault (rounds 2/10 rule), so no live TX may remain.
+class LastTxOrderObserver final : public text_sensor::TextSensor {
+ public:
+  QuietCoolComponent* component{nullptr};
+  bool saw_live_tx_at_publish{false};
+  void publish_state(const std::string& value) override {
+    text_sensor::TextSensor::publish_state(value);
+    if (component != nullptr && component->snapshot().live_tx.has_value())
+      saw_live_tx_at_publish = true;
+  }
+};
+
 QC_TEST("adapter", "a fault after a transmitted frame still publishes last tx command") {
   // A fault mid-burst is a PARTIAL transmission — the 3-frame burst is
   // redundancy, not a threshold — and the fan may have acted on the frames
@@ -237,14 +251,15 @@ QC_TEST("adapter", "a fault after a transmitted frame still publishes last tx co
   radio.push_result(::quietcool::RadioSendResult::Sent);
   radio.push_result(::quietcool::RadioSendResult::Fault);
   QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
-  text_sensor::TextSensor sensor;
+  LastTxOrderObserver sensor;
+  sensor.component = &component;
   component.set_last_tx_command_sensor(&sensor);
   host_test::set_millis(0);
   component.setup();
 
   component.request_state(FanState::command(Speed::High, Duration::Hours1));
 
-  for (std::size_t pass = 0; pass < 30 && sensor.published().empty(); ++pass) {
+  for (std::size_t pass = 0; pass < 60; ++pass) {
     host_test::advance_millis(50);
     component.call_loop();
   }
@@ -254,6 +269,14 @@ QC_TEST("adapter", "a fault after a transmitted frame still publishes last tx co
   QC_CHECK(radio.packets().size() >= 2);
   QC_CHECK(!sensor.published().empty());
   QC_CHECK_EQ(sensor.published().back(), std::string("0xB1"));
+  // Core learned of the fault BEFORE the publish (round 10, opus: publishing
+  // first let a synchronous automation command against a core still holding
+  // the in-flight burst).
+  QC_CHECK(!sensor.saw_live_tx_at_publish);
+  // Change-gated (round 10, opus): the recovery retry re-airs the same byte
+  // and its completion must not re-publish — ungated, a fault storm emitted
+  // one identical publication and automation trigger per attempt.
+  QC_CHECK_EQ(sensor.published().size(), std::size_t(1));
 }
 
 QC_TEST("adapter", "a fault before any frame transmits publishes nothing") {

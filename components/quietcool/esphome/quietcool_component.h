@@ -218,6 +218,7 @@ class QuietCoolComponent final : public Component {
   void apply_effect(const ::quietcool::CoreEffect& effect);
   void publish_authority_snapshot(
       const ::quietcool::AuthoritySnapshot& authority);
+  void publish_last_tx_command(std::uint8_t byte);
   void flush_rx_counter_publications(::quietcool::MonotonicMs now_ms);
   void apply_burst_event(const ::quietcool::BurstEvent& event,
                          ::quietcool::MonotonicMs now_ms);
@@ -270,6 +271,9 @@ class QuietCoolComponent final : public Component {
     std::uint8_t byte;
   };
   std::optional<PendingTxCommand> pending_tx_command_;
+  // Change gate for Last TX Command (round 10): a fault storm repeats one
+  // byte; identical values publish once.
+  std::optional<std::uint8_t> published_tx_byte_;
   // RX counter entity updates are flushed from loop(), not per packet: a storm
   // (RF noise, or the provisioned remote retrying) otherwise produces one
   // native-API publish plus one synchronous on_value opportunity per packet
