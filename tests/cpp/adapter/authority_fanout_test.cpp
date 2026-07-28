@@ -12,6 +12,8 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 
+#include "esphome/core/preferences.h"
+
 #include "support/test.h"
 #include "support/test_doubles.h"
 
@@ -269,6 +271,74 @@ QC_TEST("adapter", "state known is already true when confirmed publishes in the 
   QC_CHECK(!status.published().empty());
   QC_CHECK_EQ(status.published().back(), std::string("confirmed"));
   QC_CHECK(status.state_known_true_at_confirmed);
+}
+
+// Owns the stub NVS for one test and restores the global on the way out —
+// same shape as diagnostic_publication_test.cpp's.
+class ScopedPreferences final {
+ public:
+  ScopedPreferences() {
+    previous_ = global_preferences;
+    global_preferences = &preferences_;
+  }
+  ~ScopedPreferences() { global_preferences = previous_; }
+
+ private:
+  ESPPreferences preferences_;
+  ESPPreferences* previous_;
+};
+
+// A publisher whose delivery callback COMMANDS the fan — the reentrancy that
+// changes core authority mid-delivery (round 11, codex).
+class CommandingPublisher final : public AuthorityPublisher {
+ public:
+  QuietCoolComponent* component{nullptr};
+  bool commanded{false};
+  void publish_authority(const ::quietcool::AuthoritySnapshot&) override {
+    if (component != nullptr && !commanded) {
+      commanded = true;
+      component->request_state(::quietcool::FanState::command(
+          ::quietcool::Speed::High, ::quietcool::Duration::Continuous));
+    }
+  }
+};
+
+QC_TEST("adapter", "a snapshot made stale mid-delivery never reaches the sink") {
+  // Round 11 (codex): a publisher's synchronous automation can command
+  // between the publisher stage and the sink stage, invalidating the very
+  // authority being delivered. Handing the sink the stale confirmed snapshot
+  // would raise Fan State Known on trust the core just withdrew; the
+  // revision re-check drops the stale tail, and the reentrant batch's own
+  // post-drain delivery carries the fresh state instead.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CommandingPublisher commander;
+  commander.component = &component;
+  binary_sensor::BinarySensor state_known;
+  component.setup();
+  component.add_authority_publisher(&commander);
+  component.set_state_known_sensor(&state_known);
+
+  ::quietcool::AuthoritySnapshot confirmed{};
+  confirmed.state = ::quietcool::ConfirmedStateAuthority{
+      ::quietcool::FanState::command(::quietcool::Speed::High,
+                                     ::quietcool::Duration::Continuous),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0,
+      2,
+      std::nullopt,
+      std::nullopt,
+      0};
+  confirmed.revision = component.snapshot().authority.revision;
+  component.publish_authority_for_test(confirmed);
+
+  // The reentrant command invalidated authority; the sink must never have
+  // been told the stale "known" — every publication it received is false.
+  QC_CHECK(commander.commanded);
+  for (const bool published : state_known.published())
+    QC_CHECK(!published);
 }
 
 }  // namespace

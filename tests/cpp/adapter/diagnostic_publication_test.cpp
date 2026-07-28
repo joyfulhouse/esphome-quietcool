@@ -70,7 +70,12 @@ AuthoritySnapshot confirmed_snapshot(FanState state,
       std::nullopt, std::nullopt, 1};
   snapshot.timer = UnknownTimerAuthority{TimerLossReason::Unknown, 0};
   snapshot.speed_capability = capability;
-  snapshot.revision = 1;
+  // Matches the untouched core store's revision (0): the delivery function's
+  // reentrancy re-check compares this crafted snapshot's revision against the
+  // live core, and a mismatch is treated as "a publisher automation commanded
+  // mid-delivery" — which suppresses the sink/diagnostic stages under test
+  // (round 11, codex).
+  snapshot.revision = 0;
   return snapshot;
 }
 
@@ -277,6 +282,18 @@ QC_TEST("adapter", "a fault after a transmitted frame still publishes last tx co
   // and its completion must not re-publish — ungated, a fault storm emitted
   // one identical publication and automation trigger per attempt.
   QC_CHECK_EQ(sensor.published().size(), std::size_t(1));
+
+  // And the direction that gives the diagnostic its value (round 11, opus):
+  // a genuinely DIFFERENT byte must still publish. A one-token
+  // over-tightening (has_value() instead of ==) froze the sensor at the
+  // first byte since boot forever, with both suites green.
+  component.request_state(FanState::command(Speed::Low, Duration::Hours2));
+  for (std::size_t pass = 0; pass < 60 && sensor.published().size() < 2; ++pass) {
+    host_test::advance_millis(50);
+    component.call_loop();
+  }
+  QC_CHECK_EQ(sensor.published().size(), std::size_t(2));
+  QC_CHECK_EQ(sensor.published().back(), std::string("0x92"));
 }
 
 QC_TEST("adapter", "a fault before any frame transmits publishes nothing") {

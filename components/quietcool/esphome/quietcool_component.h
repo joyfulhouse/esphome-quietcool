@@ -201,7 +201,7 @@ class QuietCoolComponent final : public Component {
   // is now the honest seam onto the SAME publish_authority_snapshot the
   // post-drain lambda calls.
   void publish_authority_for_test(const ::quietcool::AuthoritySnapshot& a) {
-    publish_authority_snapshot(a);
+    deliver_authority(a, clock_.now_ms());
   }
   void drive_effects_for_test(const ::quietcool::CoreEffects& effects) {
     apply_effects(effects, 0);
@@ -216,8 +216,8 @@ class QuietCoolComponent final : public Component {
   bool enqueue_effects(const ::quietcool::CoreEffects& effects,
                        ::quietcool::MonotonicMs now_ms);
   void apply_effect(const ::quietcool::CoreEffect& effect);
-  void publish_authority_snapshot(
-      const ::quietcool::AuthoritySnapshot& authority);
+  void deliver_authority(const ::quietcool::AuthoritySnapshot& authority,
+                         ::quietcool::MonotonicMs now_ms);
   void publish_last_tx_command(std::uint8_t byte);
   void flush_rx_counter_publications(::quietcool::MonotonicMs now_ms);
   void apply_burst_event(const ::quietcool::BurstEvent& event,

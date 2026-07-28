@@ -51,14 +51,15 @@ void QuietCoolTimerSelect::control(const std::string& value) {
   }
 
   // Refresh the cache from the controller's CURRENT snapshot before
-  // composing (round 5, codex): within one snapshot delivery the event sink
-  // publishes before this entity's cache updates, so a synchronous automation
-  // riding e.g. Fan State Known could otherwise command from one-snapshot-
-  // stale state. CACHE ONLY — deliberately no publish_state here (round 6,
-  // codex): publishing inside control() let the OUTER press supersede a
-  // synchronous on_value automation's nested command; the shown option keeps
-  // moving exclusively on the authority fan-out channel. The discarded return
-  // value is that unpublished option.
+  // composing (rounds 5-11): this entity's channel-fed cache can lag the core
+  // by one delivery — publisher-array ORDER decides who hears a snapshot
+  // first, and a synchronous automation can command between deliveries — so
+  // the press always composes from the live core state, immune to fan-out
+  // ordering entirely. CACHE ONLY — deliberately no publish_state here
+  // (round 6, codex): publishing inside control() let the OUTER press
+  // supersede a synchronous on_value automation's nested command; the shown
+  // option keeps moving exclusively on the authority fan-out channel. The
+  // discarded return value is that unpublished option.
   const auto authority = controller_->snapshot().authority;
   (void)timer_select_apply_snapshot(cache_, authority, "");
 

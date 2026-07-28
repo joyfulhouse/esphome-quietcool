@@ -100,6 +100,15 @@ std::optional<::quietcool::FanState> confirmed_state_after(
 struct TimerSelectCache final {
   std::optional<::quietcool::FanState> confirmed;
   std::optional<::quietcool::SpeedCapability> capability;
+  // The earliest moment the current timer is PROVEN to have run out —
+  // an anchored deadline, or a programmed duration's observation time plus
+  // its length. Persisted here because a freshness invalidation of the TIMER
+  // authority (a Refresh, an OEM poll) discards the variant carrying the
+  // deadline while the speed cache rightly survives (round 11, codex): a
+  // press after the real expiry must still take the stopped-fan LOW rule.
+  // Cleared by a confirmed no-active-timer and by identity invalidations —
+  // fan A's deadline must not presume fan B stopped.
+  std::optional<::quietcool::MonotonicMs> expiry_bound;
 };
 
 // Applies one authority snapshot to the cache and returns the option to

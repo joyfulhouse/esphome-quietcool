@@ -167,22 +167,6 @@ std::optional<::quietcool::FanState> confirmed_state_after(
   return previous;
 }
 
-std::optional<const char*> timer_select_apply_snapshot(
-    TimerSelectCache& cache, const ::quietcool::AuthoritySnapshot& authority,
-    const char* shown_option) {
-  // Capability first and unconditionally: it is sticky (a property of the
-  // bound fan, issue #31), while the confirmed state obeys the reason-
-  // discriminating rule above.
-  cache.capability = authority.speed_capability;
-  cache.confirmed = confirmed_state_after(authority, cache.confirmed);
-  const auto option = timer_option_for_authority(authority);
-  if (!option) return std::nullopt;
-  if (shown_option != nullptr && shown_option[0] != '\0' &&
-      std::string(shown_option) == *option)
-    return std::nullopt;
-  return option;
-}
-
 namespace {
 
 // Milliseconds a timed duration runs for. The timed enumerators' values ARE
@@ -207,6 +191,50 @@ std::optional<::quietcool::MonotonicMs> duration_run_ms(
 
 }  // namespace
 
+std::optional<const char*> timer_select_apply_snapshot(
+    TimerSelectCache& cache, const ::quietcool::AuthoritySnapshot& authority,
+    const char* shown_option) {
+  // Capability first and unconditionally: it is sticky (a property of the
+  // bound fan, issue #31), while the confirmed state obeys the reason-
+  // discriminating rule above.
+  cache.capability = authority.speed_capability;
+  cache.confirmed = confirmed_state_after(authority, cache.confirmed);
+  // The expiry bound follows the timer authority when one is visible and
+  // SURVIVES the unknown-timer variants (freshness); see its declaration.
+  if (const auto* anchored =
+          std::get_if<::quietcool::LocallyAnchoredTimerAuthority>(
+              &authority.timer)) {
+    cache.expiry_bound = anchored->expiry_ms;
+  } else if (const auto* programmed =
+                 std::get_if<::quietcool::ProgrammedDurationAuthority>(
+                     &authority.timer)) {
+    if (const auto run_ms = duration_run_ms(programmed->duration))
+      cache.expiry_bound = programmed->observed_ms + *run_ms;
+    else
+      cache.expiry_bound.reset();
+  } else if (std::get_if<::quietcool::NoActiveTimerAuthority>(&authority.timer)) {
+    cache.expiry_bound.reset();
+  }
+  if (const auto* unknown =
+          std::get_if<::quietcool::UnknownStateAuthority>(&authority.state)) {
+    switch (unknown->reason) {
+      case ::quietcool::AuthorityLossReason::Unprovisioned:
+      case ::quietcool::AuthorityLossReason::SenderChanged:
+      case ::quietcool::AuthorityLossReason::LearningStarted:
+        cache.expiry_bound.reset();
+        break;
+      default:
+        break;
+    }
+  }
+  const auto option = timer_option_for_authority(authority);
+  if (!option) return std::nullopt;
+  if (shown_option != nullptr && shown_option[0] != '\0' &&
+      std::string(shown_option) == *option)
+    return std::nullopt;
+  return option;
+}
+
 ::quietcool::FanState timer_command_for_press(
     TimerSelectCache& cache,
     const ::quietcool::AuthoritySnapshot& authority,
@@ -226,6 +254,11 @@ std::optional<::quietcool::MonotonicMs> duration_run_ms(
     if (const auto run_ms = duration_run_ms(programmed->duration))
       timer_ran_out = now_ms >= programmed->observed_ms + *run_ms;
   }
+  // The persisted bound covers deadlines the CURRENT variant no longer
+  // carries — a freshness invalidation of the timer authority moments before
+  // expiry (round 11, codex).
+  if (!timer_ran_out && cache.expiry_bound)
+    timer_ran_out = now_ms >= *cache.expiry_bound;
   if (timer_ran_out) {
     // Persist the presumption: the press's own request_state is about to
     // invalidate the timer authority it was derived from, and

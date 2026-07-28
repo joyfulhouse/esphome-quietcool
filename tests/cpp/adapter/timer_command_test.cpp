@@ -612,5 +612,97 @@ QC_TEST("timer_command", "a due press clears the cached confirmed state") {
   QC_CHECK(!cache.confirmed.has_value());
 }
 
+namespace {
+::quietcool::AuthoritySnapshot snapshot_with_anchored(std::uint64_t expiry_ms) {
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.timer = ::quietcool::LocallyAnchoredTimerAuthority{
+      ::quietcool::Duration::Hours1,
+      ::quietcool::TransactionId(1),
+      ::quietcool::AttemptNumber(1),
+      0,
+      expiry_ms,
+      ::quietcool::EvidenceSource::PostCommandConsensus};
+  return snapshot;
+}
+}  // namespace
+
+QC_TEST("timer_command", "an expiry bound survives a freshness timer invalidation") {
+  // Round 11 (codex, high): a Refresh or an OEM query can invalidate the
+  // TIMER authority to Unknown moments before the deadline, while the speed
+  // cache rightly survives (freshness). The deadline knowledge must survive
+  // with it, or a press after the real expiry composes from the retained
+  // confirmed HIGH and restarts the stopped fan at HIGH.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  // Timer authority invalidated (freshness) — the state cache keeps HIGH.
+  ::quietcool::AuthoritySnapshot invalidated{};
+  invalidated.state = anchored.state;
+  invalidated.timer =
+      ::quietcool::UnknownTimerAuthority{::quietcool::TimerLossReason::Unknown, 0};
+  (void)timer_select_apply_snapshot(cache, invalidated, "");
+  QC_CHECK(cache.confirmed.has_value());
+
+  // Press after the remembered deadline: presumed stopped, LOW rule.
+  const auto late = timer_command_for_press(cache, invalidated, 3600001,
+                                            TimerSelection::Continuous);
+  QC_CHECK_EQ(late.outbound_command_byte(), 0x9F);
+  QC_CHECK_EQ(late.speed().value(), Speed::Low);
+}
+
+QC_TEST("timer_command", "an expiry bound does not fire before its deadline") {
+  TimerSelectCache cache;
+  (void)timer_select_apply_snapshot(cache, snapshot_with_anchored(3600000), "");
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot invalidated{};
+  invalidated.timer =
+      ::quietcool::UnknownTimerAuthority{::quietcool::TimerLossReason::Unknown, 0};
+  const auto early = timer_command_for_press(cache, invalidated, 1800000,
+                                             TimerSelection::Continuous);
+  QC_CHECK_EQ(early.outbound_command_byte(), 0xBF);
+}
+
+QC_TEST("timer_command", "confirmed no-active-timer clears the expiry bound") {
+  TimerSelectCache cache;
+  (void)timer_select_apply_snapshot(cache, snapshot_with_anchored(3600000), "");
+  ::quietcool::AuthoritySnapshot cleared{};
+  cleared.timer = ::quietcool::NoActiveTimerAuthority{};
+  (void)timer_select_apply_snapshot(cache, cleared, "");
+  cache.confirmed = FanState::command(Speed::High, Duration::Continuous);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  const auto press = timer_command_for_press(cache, cleared, 4000000,
+                                             TimerSelection::Continuous);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xBF);
+}
+
+QC_TEST("timer_command", "a re-binding clears the previous fan's expiry bound") {
+  // Fan A's deadline must not presume fan B stopped: after Forget/Learn and a
+  // fresh confirmation, a press past A's old deadline composes from B's
+  // confirmed state.
+  TimerSelectCache cache;
+  (void)timer_select_apply_snapshot(cache, snapshot_with_anchored(3600000), "");
+  (void)timer_select_apply_snapshot(
+      cache,
+      snapshot_with_unknown(::quietcool::AuthorityLossReason::SenderChanged), "");
+  ::quietcool::AuthoritySnapshot fresh{};
+  fresh.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Continuous),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 2};
+  fresh.speed_capability = ::quietcool::SpeedCapability::Three;
+  (void)timer_select_apply_snapshot(cache, fresh, "");
+  const auto press = timer_command_for_press(cache, fresh, 4000000,
+                                             TimerSelection::Continuous);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xBF);
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

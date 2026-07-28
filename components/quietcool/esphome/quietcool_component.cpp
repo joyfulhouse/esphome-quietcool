@@ -236,9 +236,8 @@ void QuietCoolComponent::apply_effects(
     // PublishAuthorityEffect, so an effect-driven fan-out silently missed
     // exactly the invalidations the timer select's cache rule exists to see.
     const auto authority = core_.snapshot(publish_ms).authority;
-    // Same publisher-before-sink order as the in-place channel (round 10).
-    publish_authority_snapshot(authority);
-    events_.publish_authority(authority, publish_ms);
+    // Same staged delivery as the in-place channel (rounds 10-11).
+    deliver_authority(authority, publish_ms);
   };
   // Only the top-level drain runs work and can exhaust its budget; a re-entrant
   // apply_effects (an automation firing during apply()) hits the draining_
@@ -365,14 +364,7 @@ void QuietCoolComponent::apply_effect(
     // the sink and fan by revision, the select by shown option, the text
     // diagnostics by last-published string. The sink's clock was set by the
     // apply lambda immediately before this branch runs.
-    // Publishers BEFORE the sink, in both channels (round 10, codex): the
-    // sink's *_Known publications fire automations, and one reading the fan
-    // entity must see it already at this snapshot's state — a stale read
-    // there transmitted. The reverse staleness (an automation on the fan
-    // entity reading a one-delivery-old Known flag) fails CLOSED: Known
-    // flags gate trust, and a momentary false skips rather than transmits.
-    publish_authority_snapshot(authority->authority);
-    events_.publish_authority(authority->authority, events_.now_ms());
+    deliver_authority(authority->authority, events_.now_ms());
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {
@@ -457,10 +449,31 @@ void QuietCoolComponent::apply_burst_event(
 // the production wiring. Publishers must tolerate repeated identical
 // snapshots: the fan gates on revision, the select dedupes against its shown
 // option.
-void QuietCoolComponent::publish_authority_snapshot(
-    const ::quietcool::AuthoritySnapshot& authority) {
+void QuietCoolComponent::deliver_authority(
+    const ::quietcool::AuthoritySnapshot& authority,
+    ::quietcool::MonotonicMs now_ms) {
+  // One delivery, three stages, in failure-direction order (rounds 10-11):
+  //  1. PUBLISHERS (fan, select) — the entities whose displayed state other
+  //     automations read before acting; they must be current first.
+  //  2. SINK (*_Known flags, status) — its automations then see updated
+  //     entities. The trade: on an INVALIDATION delivery, an automation on a
+  //     stage-3 diagnostic reads a momentarily stale-TRUE Known flag (round
+  //     11, opus, measured in both orders) — accepted because the fan's
+  //     publication gate keeps the fan silent on invalidations, capability is
+  //     sticky, and any press composes from the live core snapshot, so the
+  //     stale flag has no transmit surface; the promotion direction it buys
+  //     (fan correct before Known rises) does.
+  //  3. DIAGNOSTICS — display only, last.
+  // Between 1 and 2: a publisher's synchronous automation may have COMMANDED
+  // and changed core authority (round 11, codex). Delivering this snapshot's
+  // now-stale Known flags would claim trust the core just withdrew; the
+  // reentrant batch has already re-armed publication, so the post-drain
+  // delivery — always the latest revision, always last (round 11, opus) —
+  // carries the fresh state to the sink instead.
   for (std::size_t index = 0; index < authority_publisher_count_; ++index)
     authority_publishers_[index]->publish_authority(authority);
+  if (core_.snapshot(now_ms).authority.revision != authority.revision) return;
+  events_.publish_authority(authority, now_ms);
   publish_authority_diagnostics(authority);
 }
 
