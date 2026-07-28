@@ -53,13 +53,18 @@ class QuietCoolComponent final : public Component {
       // no confirmed state and nothing anywhere would say why.
       ESP_LOGE("quietcool", "authority publisher dropped: capacity %u exceeded",
                static_cast<unsigned>(kMaxAuthorityPublishers));
-      // And loudly at the component level (round 3, codex): a dropped entity
-      // still holds its controller pointer and can TRANSMIT — a timer select
-      // that never receives a snapshot aims every command from an empty
-      // cache. A config that manages to register five publishers is a config
-      // error, and it should look like one in Home Assistant, not like a fan
-      // that mysteriously always starts LOW.
-      this->mark_failed();
+      // Terminal degradation, not mark_failed (rounds 3-4). Round 3 (codex):
+      // a dropped entity still holds its controller pointer and can TRANSMIT,
+      // so the failure must be loud and latched, not a fan that mysteriously
+      // always starts LOW. Round 4 (opus): mark_failed alone left degraded_
+      // false — surviving entities kept accepting commands that could never
+      // transmit — while ALSO stopping loop(), the worst of both. degrade()
+      // is the project's one terminal path (issue #9): Controller Fault
+      // raises, every *_Known flag drops, all entry points latch shut, and
+      // the condition reads as what it is — a configuration error — in Home
+      // Assistant. The branch is unreachable in the shipped configs (two
+      // publishers of four).
+      degrade("authority publisher capacity exceeded (config error)");
       return;
     }
     authority_publishers_[authority_publisher_count_++] = publisher;

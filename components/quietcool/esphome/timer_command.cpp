@@ -125,16 +125,24 @@ std::optional<::quietcool::FanState> confirmed_state_after(
     case ::quietcool::AuthorityLossReason::LearningStarted:
     case ::quietcool::AuthorityLossReason::EstimatedTimerDeadline:
       return std::nullopt;
-    // CONTRARY EVIDENCE (round 3, all three engines): each of these is raised
-    // by positive evidence that some OTHER actor just moved the fan, so the
-    // cached confirmed value is known-contradicted. The snapshot carries the
-    // externally observed state as last_diagnostic — use it, so a timer
-    // pressed during the OEM holdoff runs the fan at the speed the remote
-    // just chose rather than silently overriding it. Without a diagnostic,
-    // the only honest cache is empty (the stopped-fan LOW rule).
+    // CONTRARY EVIDENCE, RECORDED (rounds 3-4): ExternalStateTraffic is
+    // raised by HandleExternalState, which writes the triggering frame into
+    // last_diagnostic immediately first — record_diagnostic's ONLY call site
+    // in the repo — so the fallback is fresh by construction. A timer pressed
+    // during the OEM holdoff then runs the fan at the speed the remote just
+    // chose rather than silently overriding it.
+    //
+    // AmbiguousOemYield and ContradictoryTail are deliberately NOT here,
+    // though they also carry contrary evidence: the core never records
+    // theirs, so at this layer last_diagnostic is absent or arbitrarily stale
+    // for them. Round 4 measured what trusting it did — a single
+    // contradicting tail frame (the documented stale-echo signature, often
+    // the fan's own echo) turned a confirmed-HIGH fan's "4 hours" into
+    // LOW+4h, and a stale diagnostic silently substituted a 12-hour-old
+    // observation for a newer confirmed state. They stay on the keep side
+    // below; recording their evidence at the raise sites would be a core
+    // change this branch deliberately excludes.
     case ::quietcool::AuthorityLossReason::ExternalStateTraffic:
-    case ::quietcool::AuthorityLossReason::AmbiguousOemYield:
-    case ::quietcool::AuthorityLossReason::ContradictoryTail:
       return unknown->last_diagnostic;
     // Freshness only: we are momentarily unsure, but nothing claims the fan
     // moved. Clearing on these turned the primary "set HIGH, then set a
@@ -148,6 +156,8 @@ std::optional<::quietcool::FanState> confirmed_state_after(
     case ::quietcool::AuthorityLossReason::LocalCommandPending:
     case ::quietcool::AuthorityLossReason::ManualRevalidationPending:
     case ::quietcool::AuthorityLossReason::ExactOemQuery:
+    case ::quietcool::AuthorityLossReason::AmbiguousOemYield:
+    case ::quietcool::AuthorityLossReason::ContradictoryTail:
     case ::quietcool::AuthorityLossReason::ConsensusTimeout:
     case ::quietcool::AuthorityLossReason::TransactionExhausted:
     case ::quietcool::AuthorityLossReason::RadioUnavailable:

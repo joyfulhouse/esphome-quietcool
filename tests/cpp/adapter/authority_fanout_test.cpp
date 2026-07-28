@@ -5,6 +5,8 @@
 
 #include "quietcool/esphome/quietcool_component.h"
 
+#include "esphome/components/binary_sensor/binary_sensor.h"
+
 #include "support/test.h"
 #include "support/test_doubles.h"
 
@@ -44,17 +46,28 @@ QC_TEST("adapter", "every registered publisher receives a snapshot") {
   QC_CHECK_EQ(second.calls, 1);
 }
 
-QC_TEST("adapter", "registering past capacity does not displace an existing publisher") {
+QC_TEST("adapter", "registering past capacity degrades instead of displacing") {
+  // Rounds 3-4: an over-capacity registration is a CONFIG error. Dropping it
+  // silently left an entity that transmits but never hears (round 3, codex);
+  // mark_failed stopped loop() while leaving the entry points open (round 4,
+  // opus). The project's one terminal path is degrade(): latched, loud, and
+  // no publisher — existing or new — receives anything afterwards.
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  binary_sensor::BinarySensor fault;
+  component.set_controller_fault_sensor(&fault);
   CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
   for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
 
   publish_once(component);
 
-  // The first kMax are kept; the overflow one is dropped, never swapped in.
-  QC_CHECK_EQ(publishers[0].calls, 1);
+  // Terminal: the overflow publisher was never swapped in, the Controller
+  // Fault problem sensor raised, and the degraded controller publishes to
+  // nobody.
   QC_CHECK_EQ(publishers[QuietCoolComponent::kMaxAuthorityPublishers].calls, 0);
+  QC_CHECK(!fault.published().empty());
+  QC_CHECK(fault.published().back());
+  QC_CHECK_EQ(publishers[0].calls, 0);
 }
 
 }  // namespace

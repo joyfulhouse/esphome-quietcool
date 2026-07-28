@@ -305,42 +305,66 @@ QC_TEST("timer_command", "freshness invalidations keep the cache") {
   }
 }
 
-QC_TEST("timer_command", "contrary evidence replaces the cache with the observed state") {
-  // ExternalStateTraffic / AmbiguousOemYield / ContradictoryTail are not
-  // freshness: each is raised by positive evidence that some OTHER actor just
-  // moved the fan (round 3, fable + codex + opus). Keeping the stale confirmed
-  // value made the timer select override an OEM remote press — someone turns
-  // the fan LOW downstairs, someone upstairs picks "4 hours", and the fan
-  // jumps back to HIGH from an entity nobody used to change speed. The
-  // snapshot already carries the observed state as last_diagnostic; use it.
+QC_TEST("timer_command", "external state traffic replaces the cache with the observed state") {
+  // ExternalStateTraffic is raised by HandleExternalState, which records the
+  // triggering frame into last_diagnostic IMMEDIATELY before invalidating —
+  // the one loss reason whose diagnostic is fresh by construction (round 4,
+  // all three engines traced the single writer). Keeping the stale confirmed
+  // value here made the timer select override an OEM remote press: someone
+  // turns the fan LOW downstairs, someone upstairs picks "4 hours", and the
+  // fan jumps back to HIGH from an entity nobody used to change speed.
   const auto high = FanState::command(Speed::High, Duration::Continuous);
   const auto observed_low =
       FanState::command(Speed::Low, Duration::Continuous);
-  const ::quietcool::AuthorityLossReason contrary[] = {
-      ::quietcool::AuthorityLossReason::ExternalStateTraffic,
-      ::quietcool::AuthorityLossReason::AmbiguousOemYield,
-      ::quietcool::AuthorityLossReason::ContradictoryTail,
-  };
-  for (const auto reason : contrary) {
-    auto snapshot = snapshot_with_unknown(reason);
-    std::get<::quietcool::UnknownStateAuthority>(snapshot.state)
-        .last_diagnostic = observed_low;
-    const auto next = confirmed_state_after(snapshot, high);
-    QC_CHECK(next.has_value());
-    QC_CHECK_EQ(next->canonical_byte(), observed_low.canonical_byte());
-  }
+  auto snapshot = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic);
+  std::get<::quietcool::UnknownStateAuthority>(snapshot.state)
+      .last_diagnostic = observed_low;
+  const auto next = confirmed_state_after(snapshot, high);
+  QC_CHECK(next.has_value());
+  QC_CHECK_EQ(next->canonical_byte(), observed_low.canonical_byte());
 }
 
-QC_TEST("timer_command", "contrary evidence without an observed state clears the cache") {
-  // No diagnostic to fall back on: the confirmed value is known-contradicted,
-  // so the only honest cache is empty — the stopped-fan LOW rule, the safe
-  // direction.
+QC_TEST("timer_command", "external state traffic without an observed state clears the cache") {
+  // Defensive only — ExternalStateTraffic cannot actually arrive without a
+  // recorded diagnostic — but if it ever did, the known-contradicted confirmed
+  // value must not survive; empty cache is the stopped-fan LOW rule.
   const auto high = FanState::command(Speed::High, Duration::Continuous);
   const auto next = confirmed_state_after(
       snapshot_with_unknown(
           ::quietcool::AuthorityLossReason::ExternalStateTraffic),
       high);
   QC_CHECK(!next.has_value());
+}
+
+QC_TEST("timer_command", "ambiguous yield and tail contradiction keep the cache") {
+  // These two also carry contrary evidence — but the core never RECORDS it
+  // (record_diagnostic has exactly one call site, HandleExternalState), so at
+  // this layer last_diagnostic is absent or arbitrarily stale for them. Wave 3
+  // put them on the diagnostic-fallback branch anyway, and round 4 MEASURED
+  // the consequence: a single contradicting tail frame — the documented
+  // stale-echo signature, often the fan's own echo — cleared the cache and
+  // turned a confirmed-HIGH fan's "4 hours" into LOW+4h; a stale diagnostic
+  // silently substituted a 12-hour-old observation for a newer confirmed
+  // state. Keeping the last CONFIRMED value is the least-wrong option this
+  // layer can implement; recording the evidence at the two raise sites would
+  // be a core change this branch deliberately excludes.
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const auto stale_low = FanState::command(Speed::Low, Duration::Continuous);
+  const ::quietcool::AuthorityLossReason unrecorded[] = {
+      ::quietcool::AuthorityLossReason::AmbiguousOemYield,
+      ::quietcool::AuthorityLossReason::ContradictoryTail,
+  };
+  for (const auto reason : unrecorded) {
+    // Even with a (necessarily stale) diagnostic present, keep the confirmed
+    // value — the diagnostic's age is unknowable here.
+    auto snapshot = snapshot_with_unknown(reason);
+    std::get<::quietcool::UnknownStateAuthority>(snapshot.state)
+        .last_diagnostic = stale_low;
+    const auto next = confirmed_state_after(snapshot, high);
+    QC_CHECK(next.has_value());
+    QC_CHECK_EQ(next->canonical_byte(), high.canonical_byte());
+  }
 }
 
 QC_TEST("timer_command", "identity invalidations clear the cache") {

@@ -3633,6 +3633,19 @@ class CppConfigBindingTest(unittest.TestCase):
             "disabled_by_default: true", _entity_block(self.text, _CPP_TIMER_ENTITY)
         )
 
+    def test_the_timer_select_lives_under_a_select_section(self) -> None:
+        # Section-aware, not just block-aware (round 4, codex): deleting the
+        # top-level `select:` header would fold Fan Timer into the preceding
+        # section — ESPHome rejects that, but every block-scoped assertion
+        # here would still pass. Find the top-level select: header and require
+        # the Fan Timer declaration to sit between it and the next top-level
+        # key.
+        section = re.search(
+            r"(?ms)^select:\n(.*?)(?=^\S|\Z)", self.text
+        )
+        self.assertIsNotNone(section, "no top-level select: section")
+        self.assertIn(f'name: "{_CPP_TIMER_ENTITY}"', section.group(1))
+
     def test_the_timer_select_is_a_quietcool_platform_entity(self) -> None:
         # Line-anchored like the diagnostics (round 3, codex): substring
         # matching accepted `platform: quietcool_typo`.
