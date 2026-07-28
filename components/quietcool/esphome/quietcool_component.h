@@ -69,7 +69,7 @@ class QuietCoolComponent final : public Component {
     }
     authority_publishers_[authority_publisher_count_++] = publisher;
   }
-  // Every event-sink setter replays a latched degradation (round 5, all
+  // Every event-sink setter replays a latched degradation (rounds 5-6, all
   // three finding engines): degrade() can fire during entity WIRING — the
   // publisher-overflow path runs from set_controller, and generated setup
   // orders fan: before binary_sensor: — so a sensor registered after the
@@ -98,6 +98,7 @@ class QuietCoolComponent final : public Component {
   }
   void set_timer_remaining_sensor(sensor::Sensor* sensor) {
     events_.set_timer_remaining_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_command_status_sensor(text_sensor::TextSensor* sensor) {
     events_.set_command_status_sensor(sensor);
@@ -105,6 +106,7 @@ class QuietCoolComponent final : public Component {
   }
   void set_evidence_source_sensor(text_sensor::TextSensor* sensor) {
     events_.set_evidence_source_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   // Restored diagnostics (Task 4, issue #28's dropped entities). These five
   // live directly on the component rather than on EspHomeEventSink: their
@@ -140,6 +142,11 @@ class QuietCoolComponent final : public Component {
   void request_learn(::quietcool::LearnMode mode);
   void request_forget();
   ::quietcool::CoreSnapshot snapshot() const;
+  // For entities that must refuse work after terminal degradation (round 6):
+  // the select is a separate Component, so nothing else tells it the
+  // controller died.
+  bool degraded() const { return degraded_; }
+  ::quietcool::MonotonicMs now_ms() const { return clock_.now_ms(); }
 
   // Monotonic radio diagnostics, restored after the YAML->C++ migration
   // dropped them: never reset outside a reboot. `tx_count_` is the instrument

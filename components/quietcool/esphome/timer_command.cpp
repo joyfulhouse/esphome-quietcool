@@ -183,6 +183,18 @@ std::optional<const char*> timer_select_apply_snapshot(
   return option;
 }
 
+::quietcool::FanState timer_command_for_press(
+    const TimerSelectCache& cache,
+    const ::quietcool::AuthoritySnapshot& authority,
+    ::quietcool::MonotonicMs now_ms, TimerSelection requested) {
+  const auto* anchored =
+      std::get_if<::quietcool::LocallyAnchoredTimerAuthority>(&authority.timer);
+  const bool estimate_due = anchored != nullptr && now_ms >= anchored->expiry_ms;
+  return timer_command_from_confirmed(
+      estimate_due ? std::nullopt : cache.confirmed, cache.capability,
+      requested);
+}
+
 std::optional<const char*> timer_option_for_authority(
     const ::quietcool::AuthoritySnapshot& authority) {
   if (const auto* anchored =

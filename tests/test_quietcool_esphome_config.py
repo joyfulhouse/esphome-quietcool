@@ -3648,6 +3648,15 @@ class CppConfigBindingTest(unittest.TestCase):
             ),
             "sensor": ("TX Count", "RX Valid Count", "RX Rejected Count"),
         }
+        # Parity with the canonical list (round 6, opus): a ninth diagnostic
+        # added to _CPP_RESTORED_DIAGNOSTICS is picked up by every other test
+        # in this class automatically — this hand-written section map must
+        # fail loudly until the new entity is placed in a section, or it
+        # silently covers whatever its local literal happens to say.
+        self.assertEqual(
+            {name for names in sections.values() for name in names},
+            set(_CPP_RESTORED_DIAGNOSTICS),
+        )
         for section_key, names in sections.items():
             body = re.search(
                 rf"(?ms)^{section_key}:\n(.*?)(?=^\S|\Z)", self.text

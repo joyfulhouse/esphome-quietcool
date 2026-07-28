@@ -452,5 +452,46 @@ QC_TEST("timer_command", "a confirmed off duration never publishes a stop") {
   QC_CHECK(std::string(timer_option_for_authority(snapshot).value()) == "None");
 }
 
+QC_TEST("timer_command", "a press composes from confirmed state while a timer is not due") {
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.timer = ::quietcool::LocallyAnchoredTimerAuthority{
+      ::quietcool::Duration::Hours1,
+      ::quietcool::TransactionId(1),
+      ::quietcool::AttemptNumber(1),
+      0,
+      3600000,  // expires at t=1h
+      ::quietcool::EvidenceSource::PostCommandConsensus};
+  const auto command = timer_command_for_press(
+      cache, snapshot, 1800000 /* t=30min */, TimerSelection::Continuous);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0xBF);
+}
+
+QC_TEST("timer_command", "a press after the estimated deadline takes the stopped fan rule") {
+  // Round 6 (codex): the estimated deadline is processed by poll(), so a
+  // press landing in the tick where it is due-but-unprocessed still sees the
+  // confirmed running state in the snapshot — and "None" would then transmit
+  // a HIGH restart at the exact moment the fan is presumed to have stopped.
+  // A due estimate means the confirmed state is no longer trustworthy for
+  // composition: fall back to the stopped-fan LOW rule.
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.timer = ::quietcool::LocallyAnchoredTimerAuthority{
+      ::quietcool::Duration::Hours1,
+      ::quietcool::TransactionId(1),
+      ::quietcool::AttemptNumber(1),
+      0,
+      3600000,
+      ::quietcool::EvidenceSource::PostCommandConsensus};
+  const auto command = timer_command_for_press(
+      cache, snapshot, 3600001 /* just past expiry */, TimerSelection::Continuous);
+  QC_CHECK_EQ(command.outbound_command_byte(), 0x9F);
+  QC_CHECK_EQ(command.speed().value(), Speed::Low);
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

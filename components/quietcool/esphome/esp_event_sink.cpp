@@ -1,5 +1,7 @@
 #include "esp_event_sink.h"
 
+#include <cmath>
+
 #include "esphome/core/log.h"
 
 #include <limits>
@@ -212,6 +214,12 @@ void EspHomeEventSink::publish_controller_failed() {
     timer_remaining_known_->publish_state(false);
   if (confirmed_off_ != nullptr) confirmed_off_->publish_state(false);
   if (command_status_ != nullptr) command_status_->publish_state("unavailable");
+  // Round 6 (codex): these two otherwise retained their last live values
+  // forever — Home Assistant showing "55 minutes remaining" and
+  // "post_command" beside a raised Controller Fault. NaN renders as
+  // unavailable for a sensor.
+  if (timer_remaining_ != nullptr) timer_remaining_->publish_state(NAN);
+  if (evidence_source_ != nullptr) evidence_source_->publish_state("unavailable");
 }
 
 void EspHomeEventSink::on_core_event(const ::quietcool::CoreEvent& event) {

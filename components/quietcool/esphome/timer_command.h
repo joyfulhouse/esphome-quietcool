@@ -111,6 +111,19 @@ std::optional<const char*> timer_select_apply_snapshot(
     TimerSelectCache& cache, const ::quietcool::AuthoritySnapshot& authority,
     const char* shown_option);
 
+// The command for a user press, composed against the CURRENT snapshot. Beyond
+// timer_command_from_confirmed it applies one press-time rule: a locally
+// anchored timer whose estimated deadline has already passed means the fan is
+// presumed stopped even if the snapshot still shows a confirmed running state
+// — the deadline is processed by poll(), and a press can land in the tick
+// where it is due but unprocessed (round 6, codex). Composing from the stale
+// confirmed state there would restart the just-stopped fan at its old speed;
+// the due estimate takes the stopped-fan LOW rule instead.
+::quietcool::FanState timer_command_for_press(
+    const TimerSelectCache& cache,
+    const ::quietcool::AuthoritySnapshot& authority,
+    ::quietcool::MonotonicMs now_ms, TimerSelection requested);
+
 // The option to publish for a confirmed authority snapshot, or nullopt to
 // publish nothing at all.
 //

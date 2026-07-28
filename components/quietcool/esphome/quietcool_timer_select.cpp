@@ -34,6 +34,13 @@ void QuietCoolTimerSelect::control(const std::string& value) {
     ESP_LOGE(TAG, "Timer refused: controller is not configured");
     return;
   }
+  if (controller_->degraded()) {
+    // The degradation contract says control and observation are OVER (issue
+    // #9); request_state would silently no-op, so refuse loudly instead of
+    // logging "queued" for a command that can never transmit (round 6).
+    ESP_LOGE(TAG, "Timer refused: controller is degraded");
+    return;
+  }
 
   const auto selection = selection_for_option(value);
   if (!selection) {
@@ -47,25 +54,20 @@ void QuietCoolTimerSelect::control(const std::string& value) {
   // composing (round 5, codex): within one snapshot delivery the event sink
   // publishes before this entity's cache updates, so a synchronous automation
   // riding e.g. Fan State Known could otherwise command from one-snapshot-
-  // stale state. Pulling at press time makes the composition immune to
-  // fan-out ordering entirely. Same linked function as the channel path; a
-  // publish it deduces is legitimate and deduped identically.
-  {
-    const auto shown = this->current_option();
-    if (const auto option = timer_select_apply_snapshot(
-            cache_, controller_->snapshot().authority,
-            shown.empty() ? "" : shown.c_str()))
-      publish_state(*option);
-  }
+  // stale state. CACHE ONLY — deliberately no publish_state here (round 6,
+  // codex): publishing inside control() let the OUTER press supersede a
+  // synchronous on_value automation's nested command; the shown option keeps
+  // moving exclusively on the authority fan-out channel. The discarded return
+  // value is that unpublished option.
+  const auto authority = controller_->snapshot().authority;
+  (void)timer_select_apply_snapshot(cache_, authority, "");
 
-  // The confirmed-state -> command composition, including the entity/command
-  // band pair, lives in timer_command_from_confirmed — a linked, host-tested
-  // pure function — precisely so this untestable entity file holds no band
-  // decision (round 1, opus: composed inline here, swapping the two bands
-  // recreated issue #30 with every suite green).
-  const auto command = timer_command_from_confirmed(cache_.confirmed,
-                                                    cache_.capability,
-                                                    *selection);
+  // The whole press composition — the entity/command band pair and the
+  // due-deadline rule — is one linked, host-tested pure function; this
+  // untestable entity file holds no band decision (rounds 1-6).
+  const auto command = timer_command_for_press(cache_, authority,
+                                               controller_->now_ms(),
+                                               *selection);
 
   ESP_LOGD(TAG, "Timer '%s' queued as 0x%02X; awaiting confirmation",
            value.c_str(), command.outbound_command_byte());
