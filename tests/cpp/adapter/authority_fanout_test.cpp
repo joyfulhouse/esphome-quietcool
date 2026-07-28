@@ -47,8 +47,14 @@ QC_TEST("adapter", "every registered publisher receives a snapshot") {
 
   publish_once(component);
 
-  QC_CHECK_EQ(first.calls, 1);
-  QC_CHECK_EQ(second.calls, 1);
+  // AT LEAST once, not exactly once (round 8, codex): an effect-carrying
+  // batch delivers in place — so a TransactionFinished later in the same
+  // batch sees entities already updated — AND post-drain, which covers the
+  // invalidations that emit no effect. Deduplication is every consumer's
+  // job, and each one has a gate (revision, shown option, last-published
+  // text); a bare counting publisher like this one sees both deliveries.
+  QC_CHECK(first.calls >= 1);
+  QC_CHECK_EQ(first.calls, second.calls);
 }
 
 QC_TEST("adapter", "registering past capacity degrades instead of displacing") {
@@ -97,19 +103,41 @@ QC_TEST("adapter", "a fault sensor registered after degradation still raises") {
   CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
   for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
 
-  // Degraded before the sensors exist; registration must replay it — for the
-  // two wave-6 additions as well as the fault (round 7).
+  // Degraded before the sensor exists; registration must replay it.
   binary_sensor::BinarySensor fault;
-  sensor::Sensor timer_remaining;
-  text_sensor::TextSensor evidence_source;
   component.set_controller_fault_sensor(&fault);
-  component.set_timer_remaining_sensor(&timer_remaining);
-  component.set_evidence_source_sensor(&evidence_source);
 
   QC_CHECK(!fault.published().empty());
   QC_CHECK(fault.published().back());
+}
+
+QC_TEST("adapter", "timer remaining registered alone after degradation replays NaN") {
+  // ONLY this sensor registers (round 8, opus): with several sensors
+  // registered in sequence, a later setter's replay publishes to ALL of them,
+  // so an earlier sensor's assertion passed even with its own replay line
+  // deleted — the registration order was doing the work, not the code under
+  // test. One sensor per case leaves nothing to mask it.
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
+  for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
+
+  sensor::Sensor timer_remaining;
+  component.set_timer_remaining_sensor(&timer_remaining);
+
   QC_CHECK(!timer_remaining.published().empty());
   QC_CHECK(std::isnan(timer_remaining.published().back()));
+}
+
+QC_TEST("adapter", "evidence source registered alone after degradation replays unavailable") {
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
+  for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
+
+  text_sensor::TextSensor evidence_source;
+  component.set_evidence_source_sensor(&evidence_source);
+
   QC_CHECK(!evidence_source.published().empty());
   QC_CHECK_EQ(evidence_source.published().back(), std::string("unavailable"));
 }

@@ -351,11 +351,18 @@ void QuietCoolComponent::apply_effect(
       ESP_LOGW(kTag, "Unable to persist requested core state");
     return;
   }
-  if (std::holds_alternative<::quietcool::PublishAuthorityEffect>(effect)) {
-    // Consumed deliberately without acting: authority reaches entities via
-    // the post-drain snapshot fan-out in apply_effects (round 2, codex high),
-    // which also covers the invalidations that emit no effect at all. Acting
-    // here too would double-publish every effect-carrying batch.
+  if (const auto* authority =
+          std::get_if<::quietcool::PublishAuthorityEffect>(&effect)) {
+    // Fanned out IN PLACE, not only post-drain (round 8, codex): the core
+    // emits this effect in ORDER with its other effects, and a
+    // TransactionFinished later in the same batch synchronously publishes
+    // "confirmed" — an automation riding that status must see the fan entity
+    // already at its confirmed state, not one batch behind. The post-drain
+    // fan-out remains for the invalidations that emit no effect at all
+    // (round 2); double delivery is safe because every consumer dedupes —
+    // the sink and fan by revision, the select by shown option, the text
+    // diagnostics by last-published string.
+    publish_authority_snapshot(authority->authority);
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {

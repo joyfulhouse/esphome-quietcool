@@ -537,6 +537,45 @@ QC_TEST("timer_command", "an expired programmed duration takes the stopped fan r
   QC_CHECK_EQ(command.speed().value(), Speed::Low);
 }
 
+QC_TEST("timer_command", "the programmed duration boundary is exact for every timed duration") {
+  // Table-driven and boundary-exact (round 8, opus): the earlier probes sat
+  // 45+ minutes from the boundary, so a 2.8% error in the hour constant —
+  // ~10 minutes on a 4h timer — survived, and only Hours4 was exercised at
+  // all. duration_run_ms is deliberately a local copy of the core's
+  // anonymous-namespace duration_ms (exporting it would be a core change);
+  // this table is what pins the two to the same arithmetic.
+  const struct { ::quietcool::Duration duration; std::uint64_t hours; } cases[] = {
+      {::quietcool::Duration::Hours1, 1},  {::quietcool::Duration::Hours2, 2},
+      {::quietcool::Duration::Hours4, 4},  {::quietcool::Duration::Hours8, 8},
+      {::quietcool::Duration::Hours12, 12},
+  };
+  for (const auto& c : cases) {
+    const std::uint64_t observed = 500;
+    const std::uint64_t expiry = observed + c.hours * 3600000ULL;
+    ::quietcool::AuthoritySnapshot snapshot{};
+    ::quietcool::ProgrammedDurationAuthority programmed{};
+    programmed.duration = c.duration;
+    programmed.observed_ms = observed;
+    snapshot.timer = programmed;
+    // One millisecond before the bound: still composes from confirmed HIGH.
+    TimerSelectCache before;
+    before.confirmed = FanState::command(Speed::High, Duration::Continuous);
+    before.capability = ::quietcool::SpeedCapability::Three;
+    QC_CHECK_EQ(timer_command_for_press(before, snapshot, expiry - 1,
+                                        TimerSelection::Continuous)
+                    .outbound_command_byte(),
+                0xBF);
+    // Exactly the bound: presumed stopped, LOW rule (pins >=, not >).
+    TimerSelectCache at;
+    at.confirmed = FanState::command(Speed::High, Duration::Continuous);
+    at.capability = ::quietcool::SpeedCapability::Three;
+    QC_CHECK_EQ(timer_command_for_press(at, snapshot, expiry,
+                                        TimerSelection::Continuous)
+                    .outbound_command_byte(),
+                0x9F);
+  }
+}
+
 QC_TEST("timer_command", "a programmed duration not yet due composes from confirmed state") {
   TimerSelectCache cache;
   cache.confirmed = FanState::command(Speed::High, Duration::Hours4);
