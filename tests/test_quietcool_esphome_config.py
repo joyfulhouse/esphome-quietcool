@@ -3497,5 +3497,126 @@ class PreviewRendererTest(unittest.TestCase):
             self.assertIn("legacy", str(candidates[1]))
 
 
+CPP_CONFIG = ROOT / "quietcool-cpp-lora32.yaml"
+
+_CPP_TIMER_ENTITY = "Fan Timer"
+
+_CPP_RESTORED_DIAGNOSTICS = (
+    "Last TX Command",
+    "Last Valid RX Frame",
+    "Last Confirmed Fan State",
+    "Fan Speed Capability",
+    "Remote Sender ID",
+    "TX Count",
+    "RX Valid Count",
+    "RX Rejected Count",
+)
+
+_CPP_TIMER_OPTIONS = ("None", "1 hour", "2 hours", "4 hours", "8 hours", "12 hours")
+
+
+def _entity_block(text: str, name: str) -> str:
+    """The single YAML list item declaring `name`.
+
+    Per-entity scoping is the whole point: a file-wide
+    assertIn("disabled_by_default: true", text) passes as long as SOME entity
+    is disabled, which is exactly the false green that let issue #28 through.
+    """
+    marker = f'name: "{name}"'
+    index = text.find(marker)
+    if index == -1:
+        # Fail as a missing declaration rather than raising ValueError out of a
+        # helper, which reads as a broken test instead of a caught regression.
+        raise AssertionError(f"{name} is not declared in {CPP_CONFIG.name}")
+    start = text.rindex("\n  - ", 0, index) + 1
+    nxt = text.find("\n  - ", index)
+    end = len(text) if nxt == -1 else nxt
+    return text[start:end]
+
+
+class CppConfigBindingTest(unittest.TestCase):
+    """Every entity the component can drive must be DECLARED in the shipped
+    C++ config.
+
+    This class exists because nothing else in this suite asserts anything about
+    quietcool-cpp-lora32.yaml — the other 147 tests all target the frozen
+    legacy config. That blind spot is precisely how issue #28 happened: the
+    Controller Fault sensor was implemented, unit-tested, adversarially reviewed
+    and attested, and still never reached the hardware, because no YAML line
+    declared it. An implementation without a binding is indistinguishable from
+    no implementation, so the binding gets tests of its own.
+
+    Scope note: these assert DECLARATION, not behavior. They cannot tell you the
+    entity works — only that it exists in the config the device is built from.
+    """
+
+    def setUp(self) -> None:
+        self.text = CPP_CONFIG.read_text()
+
+    def test_every_restored_entity_is_declared(self) -> None:
+        for name in (_CPP_TIMER_ENTITY, *_CPP_RESTORED_DIAGNOSTICS):
+            with self.subTest(entity=name):
+                self.assertIn(f'name: "{name}"', self.text)
+
+    def test_every_restored_diagnostic_is_disabled_by_default(self) -> None:
+        for name in _CPP_RESTORED_DIAGNOSTICS:
+            with self.subTest(entity=name):
+                self.assertIn(
+                    "disabled_by_default: true", _entity_block(self.text, name)
+                )
+
+    def test_the_timer_select_is_not_disabled_by_default(self) -> None:
+        # The diagnostics are opt-in; the control the feature exists for is not.
+        self.assertNotIn(
+            "disabled_by_default: true", _entity_block(self.text, _CPP_TIMER_ENTITY)
+        )
+
+    def test_the_timer_select_is_a_quietcool_platform_entity(self) -> None:
+        block = _entity_block(self.text, _CPP_TIMER_ENTITY)
+        self.assertIn("platform: quietcool", block)
+        self.assertIn("controller_id: quietcool_controller", block)
+
+    def test_the_timer_options_are_documented_where_they_are_declared(self) -> None:
+        # The option list itself lives in select.py (it must match the C++
+        # kTimerOptions ordinal), so the YAML cannot restate it without
+        # duplicating a source of truth. What the YAML must carry is the
+        # energizing warning next to the entity a user actually clicks.
+        header = self.text.split("select:", 1)[0]
+        self.assertRegex(header, r"ENERGIZING")
+
+    def test_the_config_documents_off_versus_continuous(self) -> None:
+        # The distinction is counter-intuitive enough that a maintainer editing
+        # this file must meet it here, not only in the design doc. Asserted as
+        # meaning, not mere presence: a bare assertIn("Off", ...) would pass on
+        # any file mentioning the word anywhere.
+        self.assertRegex(self.text, r"Off\b[^\n]*\bSTOPPED")
+        self.assertRegex(self.text, r"Continuous\b[^\n]*\bRUNS")
+
+    def test_the_stale_no_timer_entity_note_is_gone(self) -> None:
+        # The header claimed "No Fan Timer select entity yet" for the whole life
+        # of the C++ track. Leaving it would make the file contradict itself.
+        self.assertNotIn("No Fan Timer select entity yet", self.text)
+
+    def test_select_codegen_options_match_the_cpp_option_table(self) -> None:
+        # select.py's TIMER_OPTIONS index IS the TimerSelection ordinal, and
+        # kTimerOptions is indexed by that same ordinal. If the two lists drift,
+        # a user picking "4 hours" transmits some other duration.
+        python_options = (ROOT / "components/quietcool/select.py").read_text()
+        cpp_options = (
+            ROOT / "components/quietcool/esphome/timer_command.h"
+        ).read_text()
+        python_list = re.search(
+            r"TIMER_OPTIONS\s*=\s*\[([^\]]*)\]", python_options
+        ).group(1)
+        cpp_list = re.search(
+            r"kTimerOptions\[\]\s*=\s*\{([^}]*)\}", cpp_options
+        ).group(1)
+        self.assertEqual(
+            re.findall(r'"([^"]+)"', python_list),
+            re.findall(r'"([^"]+)"', cpp_list),
+        )
+        self.assertEqual(re.findall(r'"([^"]+)"', python_list), list(_CPP_TIMER_OPTIONS))
+
+
 if __name__ == "__main__":
     unittest.main()

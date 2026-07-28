@@ -21,7 +21,7 @@
 - `tests/cpp/Makefile` `ADAPTER_SOURCES` filters out `.cpp` files deriving from ESPHome entity base classes. Any new entity `.cpp` must be added to that filter, and therefore all its logic must live in pure functions that *are* linked.
 - Mutation-test every new assertion: `rm -rf tests/cpp/build` before each run; empty output means "did not compile", never "passed".
 - **No timer command may be transmitted on-air until the maintainer confirms an open window.** Compiling and host tests are unrestricted.
-- Build with `/Users/bryanli/Projects/joyfulhouse/esphome-config/.venv/bin/esphome` (2026.7.2); config must still show `type: esp-idf` and `loop_task_stack_size: 16384`.
+- Build with the esphome-config checkout's `.venv/bin/esphome` (2026.7.2); config must still show `type: esp-idf` and `loop_task_stack_size: 16384`.
 
 ---
 
@@ -134,7 +134,7 @@ TEST(continuous_selection_matches_the_fan_entitys_on_command) {
 
 Run:
 ```bash
-cd /Users/bryanli/Projects/joyfulhouse/esphome-quietcool
+cd <esphome-quietcool checkout>
 rm -rf tests/cpp/build && make -C tests/cpp test-adapter
 ```
 Expected: compile failure — `quietcool/esphome/timer_command.h: No such file or directory`.
@@ -562,7 +562,7 @@ get none.
 
 ```bash
 rm -rf tests/cpp/build && make -C tests/cpp test-adapter
-cd /Users/bryanli/Projects/joyfulhouse/esphome-config \
+cd <esphome-config checkout> \
   && .venv/bin/esphome config quietcool-lora32-downstairs.yaml | tail -3
 ```
 Expected: adapter tests PASS; config still `INFO Configuration is valid!`
@@ -828,7 +828,7 @@ delete the diagnostics-not-carried-over paragraph, and add a short note that
 
 ```bash
 python3 -m unittest tests.test_quietcool_esphome_config -v 2>&1 | tail -5
-cd /Users/bryanli/Projects/joyfulhouse/esphome-config
+cd <esphome-config checkout>
 .venv/bin/esphome config quietcool-lora32-downstairs.yaml | tail -3
 .venv/bin/esphome config quietcool-lora32-upstairs.yaml | tail -3
 ```
@@ -871,11 +871,11 @@ open-window requirement already documented for fan operation.
 - [ ] **Step 2: Full local verification**
 
 ```bash
-cd /Users/bryanli/Projects/joyfulhouse/esphome-quietcool
+cd <esphome-quietcool checkout>
 rm -rf tests/cpp/build
 make -C tests/cpp test && make -C tests/cpp test-adapter && make -C tests/cpp test-sanitized
 python3 -m unittest tests.test_quietcool_esphome_config 2>&1 | tail -3
-cd /Users/bryanli/Projects/joyfulhouse/esphome-config && .venv/bin/esphome compile quietcool-lora32-downstairs.yaml 2>&1 | tail -6
+cd <esphome-config checkout> && .venv/bin/esphome compile quietcool-lora32-downstairs.yaml 2>&1 | tail -6
 ```
 Expected: every suite PASS; `INFO Successfully compiled program.`; RAM and
 flash figures reported (compare against the pre-change baseline of RAM 33.9%,

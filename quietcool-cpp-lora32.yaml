@@ -21,14 +21,17 @@
 #     not HH:MM:SS.
 #   - No on-display LEARN/ID-SAVED prompts (learn progress is visible in
 #     logs and via the Learn button's entity); learn itself works.
-#   - No Fan Timer select entity yet; timer commands come from the OEM
-#     remote or future component work.
 #   - An unprovisioned boot or a Forget does NOT auto-open the 15-minute
 #     learn window the YAML build had; press the Learn button explicitly.
-#   - Diagnostics not carried over: Last TX Command, Last Valid RX Frame,
-#     Last Confirmed Fan State, Fan Speed Capability, Remote Sender ID,
-#     TX/RX counters, probe/PRG/Restart buttons. The C++ build's
+#   - Diagnostics not carried over: probe/PRG buttons. The C++ build's
 #     Fan Evidence Source text sensor is new.
+#
+# Duration nibble semantics, because they are counter-intuitive:
+#   - nibble 0x0 is Off, and means the fan is STOPPED;
+#   - nibble 0xF is Continuous, and means the fan RUNS with no timer.
+# Both describe "no countdown", which is why they read as redundant, but they
+# are opposites — collapsing them would make "clear the timer" transmit a stop
+# command. See docs/claude/2026-07-28-timer-control-and-diagnostics-design.md.
 
 substitutions:
   device_name: quietcool-lora32
@@ -261,6 +264,41 @@ text_sensor:
     kind: evidence_source
     name: "Fan Evidence Source"
 
+  # -------------------------------------------------------------------------
+  # Diagnostics restored from the pre-cutover YAML build, all disabled by
+  # default: they cost nothing until someone opts in, and they are the
+  # instruments that settle "is the bridge misbehaving or is the fan?".
+  # -------------------------------------------------------------------------
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: last_tx_command
+    name: "Last TX Command"
+    disabled_by_default: true
+
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: last_rx_frame
+    name: "Last Valid RX Frame"
+    disabled_by_default: true
+
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: last_confirmed_state
+    name: "Last Confirmed Fan State"
+    disabled_by_default: true
+
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: speed_capability
+    name: "Fan Speed Capability"
+    disabled_by_default: true
+
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: remote_sender_id
+    name: "Remote Sender ID"
+    disabled_by_default: true
+
   # Restored from the pre-cutover build: dropping it was undocumented and
   # orphans any dashboard or automation referencing quietcool-lora32's
   # IP Address entity.
@@ -295,6 +333,32 @@ button:
 
 
 # =============================================================================
+# Fan Timer
+#
+# EVERY option transmits, and every option is ENERGIZING:
+#   - a duration (1/2/4/8/12 hours) runs the fan for that long, and on a
+#     STOPPED fan it STARTS it, at LOW;
+#   - "None" means no timer — the fan runs until stopped — and so RESTARTS a
+#     fan whose timer had already expired.
+#
+# This is not a passive settings control. Open a window before running the fan:
+# a whole-house fan can backdraft combustion appliances.
+#
+# On the wire a command is speed|duration in one byte. Duration nibble 0x0 is
+# Off, which STOPS the fan; 0xF is Continuous, which RUNS it with no timer.
+# Those two read as redundant ("no timer either way") and are opposites — see
+# docs/claude/2026-07-28-timer-control-and-diagnostics-design.md section 1.
+# The select therefore cannot express Off at all; stopping the fan belongs to
+# the fan entity.
+# =============================================================================
+select:
+  - platform: quietcool
+    id: fan_timer_select
+    controller_id: quietcool_controller
+    name: "Fan Timer"
+
+
+# =============================================================================
 # Telemetry sensors (display-only; nothing here reaches any TX/RX path)
 # =============================================================================
 sensor:
@@ -303,6 +367,28 @@ sensor:
     controller_id: quietcool_controller
     kind: timer_remaining
     name: "Timer Remaining"
+
+  # Radio counters, disabled by default. TX Count specifically: a FLAT TX Count
+  # through the OEM remote's retry storm is what once exonerated this bridge of
+  # jamming the remote. Losing it removed the instrument that settled the
+  # question, which is why it is back.
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: tx_count
+    name: "TX Count"
+    disabled_by_default: true
+
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: rx_valid_count
+    name: "RX Valid Count"
+    disabled_by_default: true
+
+  - platform: quietcool
+    controller_id: quietcool_controller
+    kind: rx_rejected_count
+    name: "RX Rejected Count"
+    disabled_by_default: true
 
   - platform: wifi_signal
     id: wifi_signal_sensor
