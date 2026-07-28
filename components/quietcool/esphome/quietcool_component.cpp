@@ -1,5 +1,7 @@
 #include "quietcool_component.h"
 
+#include "quietcool/core/frame_codec.h"
+
 #include "esphome/core/log.h"
 
 #include <variant>
@@ -31,7 +33,13 @@ void QuietCoolComponent::setup() {
   // degradation, when this latch is false — so normal startup is unaffected.
   if (degraded_) return;
   const auto now_ms = clock_.now_ms();
-  apply_effects(core_.restore(preferences_.load(), now_ms), now_ms);
+  const auto restored = preferences_.load();
+  // Mirrors what core_.restore() below is about to adopt as its own sender_
+  // (handle_restore: sender_ = valid ? restored.sender : nullopt) — load()
+  // has already validated the record, so `restored` here is exactly what
+  // core will treat as valid too. See provisioned_sender_'s declaration.
+  provisioned_sender_ = restored.sender;
+  apply_effects(core_.restore(restored, now_ms), now_ms);
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
 }
 
@@ -73,6 +81,28 @@ void QuietCoolComponent::dump_config() {
 // set before those publications, every such call returns here.
 void QuietCoolComponent::on_radio_packet(::quietcool::ByteView packet) {
   if (degraded_) return;
+  // RX Valid/Rejected are frame-validation counters (does this frame decode
+  // against the provisioned sender?), matching what the legacy YAML build
+  // measured — NOT ConfirmationCore::on_frame's classifier-relevance verdict,
+  // which is core-private and not safely recoverable from its returned
+  // CoreEffects (see the task-3 report). FrameCodec::decode_strict is a pure
+  // static function, so calling it here duplicates a cheap decode of a
+  // ~10-byte frame rather than reaching into core's classification state;
+  // core will decode the same bytes again inside on_frame() below. Do not
+  // "optimise" this into sharing on_frame's internal decode result — that
+  // would require exposing core-private state, which is the change this
+  // adapter-only observation was chosen specifically to avoid.
+  if (provisioned_sender_) {
+    if (::quietcool::FrameCodec::decode_strict(packet, *provisioned_sender_))
+      ++rx_valid_count_;
+    else
+      ++rx_rejected_count_;
+  } else {
+    // Unprovisioned: no sender to validate against. Counted rejected rather
+    // than silently dropped from the diagnostic, matching legacy's outcome
+    // for an unrecognized sender.
+    ++rx_rejected_count_;
+  }
   const auto now_ms = clock_.now_ms();
   apply_effects(core_.on_frame(packet, now_ms), now_ms);
 }
@@ -196,6 +226,19 @@ void QuietCoolComponent::apply_effect(
   }
   if (const auto* persistence =
           std::get_if<::quietcool::RequestPersistenceEffect>(&effect)) {
+    // Mirrors core's own sender_ mutations (confirmation_core.cpp: Forget's
+    // handle_forget() and Learn's handle_learning_frame() Learned branch),
+    // which are always emitted in lockstep with exactly these two
+    // PersistenceKind values. Updated unconditionally — regardless of
+    // whether the durable write below succeeds — because core's in-RAM
+    // sender_ already changed either way; only the durable copy is at risk.
+    if (persistence->request.kind ==
+        ::quietcool::PersistenceKind::SaveProvisioning) {
+      provisioned_sender_ = persistence->request.sender;
+    } else if (persistence->request.kind ==
+               ::quietcool::PersistenceKind::EraseProvisioning) {
+      provisioned_sender_.reset();
+    }
     if (!preferences_.apply(persistence->request))
       ESP_LOGW(kTag, "Unable to persist requested core state");
     return;

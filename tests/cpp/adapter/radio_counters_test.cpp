@@ -8,21 +8,18 @@
 // event sink through the component's public entry points; only ESPHome's
 // entity, logging, preferences and timing surface is stubbed.
 //
-// RX_VALID_COUNT / RX_REJECTED_COUNT: see the task report
-// (.superpowers/sdd/2026-07-28-timer-control-and-diagnostics-plan/task-3-report.md)
-// for why only the TX counter is exercised here. In short: `on_radio_packet`
-// has no accept/reject branch of its own — it is a single unconditional call
-// into `ConfirmationCore::on_frame`, and the accept/reject decision
-// (`ResponseClassifier::classify` landing on `InvalidOrIrrelevant` or not) is
-// made entirely inside core, which this task may not modify. The candidate
-// proxy — treating an empty `CoreEffects` return as "rejected" — is not
-// faithful: `confirmation_reducer.cpp`'s TrackCandidate handling returns `{}`
-// for a genuinely accepted `LocalResponseCandidate` every time consensus has
-// not yet been reached, which `consensus_tracker.cpp` requires 2-3 independent
-// candidates for — meaning the first accepted response frame in literally
-// every exchange would be miscounted as rejected. That is not an edge case;
-// it is the common case, and coding it up would ship an inaccurate instrument
-// of exactly the kind this diagnostic exists to prevent.
+// RX_VALID_COUNT / RX_REJECTED_COUNT are FRAME-VALIDATION counters, not
+// classifier-relevance counters — see the task-3 report for the full history.
+// `on_radio_packet` has no accept/reject branch of its own to observe (it is
+// a single unconditional call into `ConfirmationCore::on_frame`), and the
+// classifier's accept/reject verdict is not recoverable from on_frame's
+// returned CoreEffects without misclassifying the common case (a
+// still-accumulating consensus candidate legitimately returns empty
+// effects). The legacy YAML build settled what these counters actually
+// measured: whether the frame decodes against the provisioned sender
+// (`FrameCodec::decode_strict`, a pure static function — calling it here is
+// not a core modification, and duplicates only a cheap decode of a ~10-byte
+// frame rather than reaching into core's private classification state).
 
 #include "quietcool/esphome/quietcool_component.h"
 
@@ -32,6 +29,7 @@
 #include "support/test.h"
 #include "support/test_doubles.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -92,6 +90,74 @@ QC_TEST("adapter", "tx_count_increments_once_per_completed_burst") {
     component.call_loop();
   }
   QC_CHECK_EQ(component.tx_count(), std::uint32_t(1));
+}
+
+QC_TEST("adapter", "rx_valid_count_increments_on_an_accepted_frame") {
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey,
+                               kJitterSeed);
+  host_test::set_millis(0);
+  // Binds provisioned_sender_ via the compiled seed (kSenderSeed), since NVS
+  // is empty — see preferences_adapter.cpp's apply_compiled_seed.
+  component.setup();
+
+  QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(0));
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(0));
+
+  // The exact 6-byte OEM query for kSenderSeed (0xCB004739), matching
+  // frame_codec_test.cpp's "query uses exact six-byte wire order" — a frame
+  // FrameCodec::decode_strict genuinely accepts against this sender.
+  const std::array<std::uint8_t, 6> query_frame{0xCB, 0x00, 0x47, 0x39,
+                                                0x66, 0x66};
+  component.on_radio_packet(
+      ::quietcool::ByteView(query_frame.data(), query_frame.size()));
+
+  QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(1));
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(0));
+}
+
+QC_TEST("adapter", "rx_rejected_count_increments_on_a_rejected_frame") {
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey,
+                               kJitterSeed);
+  host_test::set_millis(0);
+  component.setup();
+
+  QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(0));
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(0));
+
+  // A 5-byte frame: FrameCodec::decode_strict genuinely rejects every length
+  // other than 6 (FrameDecodeError::InvalidLength) — see
+  // frame_codec_test.cpp's "strict decoder rejects lengths sender tails and
+  // states". Not a guess at what looks malformed; pinned by that test.
+  const std::array<std::uint8_t, 5> short_frame{0xCB, 0x00, 0x47, 0x39, 0x66};
+  component.on_radio_packet(
+      ::quietcool::ByteView(short_frame.data(), short_frame.size()));
+
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(1));
+  QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(0));
+}
+
+QC_TEST("adapter",
+        "rx_rejected_count_increments_while_unprovisioned_with_no_sender_to_validate") {
+  // No ScopedPreferences/setup(): provisioned_sender_ stays nullopt, exactly
+  // like an unprovisioned unit (bare construction, matching
+  // authority_fanout_test.cpp's pattern for a test that never calls setup()).
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey,
+                               kJitterSeed);
+
+  const std::array<std::uint8_t, 6> query_frame{0xCB, 0x00, 0x47, 0x39,
+                                                0x66, 0x66};
+  component.on_radio_packet(
+      ::quietcool::ByteView(query_frame.data(), query_frame.size()));
+
+  // Nothing to validate against, so counted rejected rather than dropped
+  // silently from the diagnostic — matches legacy's sender-mismatch outcome.
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(1));
+  QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(0));
 }
 
 }  // namespace

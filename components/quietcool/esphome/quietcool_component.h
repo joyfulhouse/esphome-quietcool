@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace esphome::quietcool {
 
@@ -159,18 +160,24 @@ class QuietCoolComponent final : public Component {
   // one-shot latch keeps a sustained storm from logging every loop.
   std::uint32_t last_budget_exhaustions_{0};
   bool budget_warning_active_{false};
-  // Radio diagnostics. rx_valid_count_ / rx_rejected_count_ are declared and
-  // gettable here but NOT YET incremented: see
-  // radio_counters_test.cpp and the task-3 report for why. Summary: the
-  // accept/reject decision (ResponseClassifier::classify landing on
-  // InvalidOrIrrelevant or not) is made entirely inside
-  // ConfirmationCore::on_frame, which this task may not modify, and is not
-  // recoverable from on_radio_packet's only observable — on_frame's returned
-  // CoreEffects — without misclassifying the common case (a still-accumulating
-  // consensus candidate legitimately returns empty effects).
+  // Radio diagnostics (see radio_counters_test.cpp and the task-3 report).
+  // rx_valid_count_ / rx_rejected_count_ are FRAME-VALIDATION counters — did
+  // the frame decode against the provisioned sender — not classifier-
+  // relevance counters: ConfirmationCore::on_frame's accept/reject verdict
+  // is not recoverable from its returned CoreEffects without misclassifying
+  // the common case (a still-accumulating consensus candidate legitimately
+  // returns empty effects), and that verdict is core-private regardless.
   std::uint32_t tx_count_{0};
   std::uint32_t rx_valid_count_{0};
   std::uint32_t rx_rejected_count_{0};
+  // Mirrors ConfirmationCore's own sender_, so on_radio_packet can validate
+  // an incoming frame the same way core eventually will, without reaching
+  // into core. Updated at exactly the three sites where core's sender_
+  // itself changes: restore() (setup()), Forget's EraseProvisioning, and
+  // Learn's SaveProvisioning (see quietcool_component.cpp) — confirmed
+  // against confirmation_core.cpp, where those are the only three sender_
+  // assignments. Used only by the RX counters above.
+  std::optional<::quietcool::SenderId> provisioned_sender_;
 };
 
 }  // namespace esphome::quietcool
