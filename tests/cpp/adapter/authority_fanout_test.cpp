@@ -163,5 +163,61 @@ QC_TEST("adapter", "evidence source registered alone after degradation replays u
   QC_CHECK_EQ(evidence_source.published().back(), std::string("unavailable"));
 }
 
+// Observes what Fan State Known reads at the exact moment "confirmed"
+// publishes — the mid-batch ordering wave 9's sink delivery exists for.
+class StatusOrderObserver final : public text_sensor::TextSensor {
+ public:
+  binary_sensor::BinarySensor* state_known{nullptr};
+  bool state_known_true_at_confirmed{false};
+  void publish_state(const std::string& value) override {
+    text_sensor::TextSensor::publish_state(value);
+    if (value == "confirmed" && state_known != nullptr &&
+        !state_known->published().empty())
+      state_known_true_at_confirmed = state_known->published().back();
+  }
+};
+
+QC_TEST("adapter", "state known is already true when confirmed publishes in the same batch") {
+  // Round 10 (fable): the sink half of the in-place delivery was deletable —
+  // the exact-count tests count only AuthorityPublisher calls, and the sink
+  // is not a publisher. This observer runs INSIDE the batch, at the moment
+  // Command Confirmation Status publishes "confirmed", and requires Fan
+  // State Known to have already been published true by the in-place sink
+  // delivery. With only the post-drain channel, it reads the PREVIOUS
+  // batch's false.
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  binary_sensor::BinarySensor state_known;
+  StatusOrderObserver status;
+  status.state_known = &state_known;
+  component.set_state_known_sensor(&state_known);
+  component.set_command_status_sensor(&status);
+
+  ::quietcool::AuthoritySnapshot confirmed{};
+  confirmed.state = ::quietcool::ConfirmedStateAuthority{
+      ::quietcool::FanState::command(::quietcool::Speed::High,
+                                     ::quietcool::Duration::Continuous),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0,
+      2,
+      std::nullopt,
+      std::nullopt,
+      1};
+  ::quietcool::CoreEffects batch;
+  QC_CHECK(batch.add(::quietcool::PublishAuthorityEffect{confirmed}));
+  QC_CHECK(batch.add(::quietcool::PublishCoreEvent{
+      {::quietcool::CoreEventKind::TransactionFinished,
+       ::quietcool::CoordinatorState::Idle,
+       std::nullopt,
+       ::quietcool::TransactionOutcome::Confirmed,
+       std::nullopt}}));
+  component.drive_effects_for_test(batch);
+
+  QC_CHECK(!status.published().empty());
+  QC_CHECK_EQ(status.published().back(), std::string("confirmed"));
+  QC_CHECK(status.state_known_true_at_confirmed);
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

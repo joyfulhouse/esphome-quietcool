@@ -11,7 +11,9 @@ class TextSensor {
  public:
   virtual ~TextSensor() = default;
 
-  void publish_state(const std::string& state) {
+  // Virtual like the binary-sensor stub's: observer tests override it to
+  // assert mid-batch ordering (round 10).
+  virtual void publish_state(const std::string& state) {
     state_ = state;
     has_state_ = true;
     published_.push_back(state);

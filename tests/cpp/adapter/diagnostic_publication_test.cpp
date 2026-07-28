@@ -256,6 +256,31 @@ QC_TEST("adapter", "a fault after a transmitted frame still publishes last tx co
   QC_CHECK_EQ(sensor.published().back(), std::string("0xB1"));
 }
 
+QC_TEST("adapter", "a fault before any frame transmits publishes nothing") {
+  // Mirror of the partial-fault case (round 10, fable): frame 1 itself
+  // faults, so frames_sent == 0 and NOTHING went on air — publishing here
+  // would be the round-1 defect again, a diagnostic naming a byte that never
+  // transmitted. The frames_sent > 0 guard is what this pins.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  radio.push_result(::quietcool::RadioSendResult::Fault);
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  text_sensor::TextSensor sensor;
+  component.set_last_tx_command_sensor(&sensor);
+  host_test::set_millis(0);
+  component.setup();
+
+  component.request_state(FanState::command(Speed::High, Duration::Hours1));
+
+  for (std::size_t pass = 0; pass < 30; ++pass) {
+    host_test::advance_millis(50);
+    component.call_loop();
+  }
+
+  QC_CHECK(!radio.packets().empty());
+  QC_CHECK(sensor.published().empty());
+}
+
 // Guards the TxReason::TransactionCommand filter: a query burst (0x66) must
 // never be mistaken for a command byte.
 QC_TEST("adapter", "last tx command sensor is untouched by the boot query") {
