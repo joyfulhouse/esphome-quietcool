@@ -71,6 +71,34 @@ class QuietCoolComponent final : public Component {
   void set_evidence_source_sensor(text_sensor::TextSensor* sensor) {
     events_.set_evidence_source_sensor(sensor);
   }
+  // Restored diagnostics (Task 4, issue #28's dropped entities). These five
+  // live directly on the component rather than on EspHomeEventSink: their
+  // sources (the echo-guard TX byte, the last accepted RX frame,
+  // provisioned_sender_) are adapter-local observations events_ never sees.
+  void set_last_tx_command_sensor(text_sensor::TextSensor* sensor) {
+    last_tx_command_sensor_ = sensor;
+  }
+  void set_last_rx_frame_sensor(text_sensor::TextSensor* sensor) {
+    last_rx_frame_sensor_ = sensor;
+  }
+  void set_last_confirmed_state_sensor(text_sensor::TextSensor* sensor) {
+    last_confirmed_state_sensor_ = sensor;
+  }
+  void set_speed_capability_sensor(text_sensor::TextSensor* sensor) {
+    speed_capability_sensor_ = sensor;
+  }
+  void set_remote_sender_id_sensor(text_sensor::TextSensor* sensor) {
+    remote_sender_id_sensor_ = sensor;
+  }
+  // The three counters restored in Task 3 (tx_count() etc.); this task only
+  // adds their entities and publication.
+  void set_tx_count_sensor(sensor::Sensor* sensor) { tx_count_sensor_ = sensor; }
+  void set_rx_valid_count_sensor(sensor::Sensor* sensor) {
+    rx_valid_count_sensor_ = sensor;
+  }
+  void set_rx_rejected_count_sensor(sensor::Sensor* sensor) {
+    rx_rejected_count_sensor_ = sensor;
+  }
   void on_radio_packet(::quietcool::ByteView packet);
   void request_state(::quietcool::FanState requested);
   void request_manual_refresh();
@@ -141,6 +169,15 @@ class QuietCoolComponent final : public Component {
                          ::quietcool::MonotonicMs now_ms);
   void degrade(const char* reason);
   void note_budget_exhaustion();
+  // Publishes Last Confirmed Fan State and Fan Speed Capability from the
+  // authority snapshot the PublishAuthorityEffect branch of apply_effect()
+  // already carries — the same site every other AuthorityPublisher is fanned
+  // out from, and the only site both fields' sources are confirmed-only.
+  void publish_authority_diagnostics(
+      const ::quietcool::AuthoritySnapshot& authority);
+  // Publishes Remote Sender ID from provisioned_sender_. Called at exactly
+  // the three sites provisioned_sender_ itself changes (see its declaration).
+  void publish_remote_sender_id();
 
   EspMonotonicClock clock_;
   ::quietcool::Radio& radio_;
@@ -176,8 +213,23 @@ class QuietCoolComponent final : public Component {
   // itself changes: restore() (setup()), Forget's EraseProvisioning, and
   // Learn's SaveProvisioning (see quietcool_component.cpp) — confirmed
   // against confirmation_core.cpp, where those are the only three sender_
-  // assignments. Used only by the RX counters above.
+  // assignments. Used by the RX counters above and by Remote Sender ID below.
   std::optional<::quietcool::SenderId> provisioned_sender_;
+  // Restored diagnostics (Task 4). Last TX Command is published only for
+  // TxReason::TransactionCommand (never a query burst) at the same
+  // RequestTxBurst acceptance site that feeds the capability echo guard
+  // (issue #31) — see confirmation_reducer.cpp's own_outbound_byte. Last
+  // Valid RX Frame is published alongside rx_valid_count_. Neither byte is
+  // latched as state here: each is read directly off the effect/packet that
+  // is already in hand at its one publication site.
+  text_sensor::TextSensor* last_tx_command_sensor_{nullptr};
+  text_sensor::TextSensor* last_rx_frame_sensor_{nullptr};
+  text_sensor::TextSensor* last_confirmed_state_sensor_{nullptr};
+  text_sensor::TextSensor* speed_capability_sensor_{nullptr};
+  text_sensor::TextSensor* remote_sender_id_sensor_{nullptr};
+  sensor::Sensor* tx_count_sensor_{nullptr};
+  sensor::Sensor* rx_valid_count_sensor_{nullptr};
+  sensor::Sensor* rx_rejected_count_sensor_{nullptr};
 };
 
 }  // namespace esphome::quietcool

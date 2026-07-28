@@ -12,6 +12,11 @@ CONF_KIND = "kind"
 TEXT_SENSOR_SETTERS = {
     "command_status": "set_command_status_sensor",
     "evidence_source": "set_evidence_source_sensor",
+    "last_tx_command": "set_last_tx_command_sensor",
+    "last_rx_frame": "set_last_rx_frame_sensor",
+    "last_confirmed_state": "set_last_confirmed_state_sensor",
+    "speed_capability": "set_speed_capability_sensor",
+    "remote_sender_id": "set_remote_sender_id_sensor",
 }
 
 

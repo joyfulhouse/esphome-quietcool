@@ -1,5 +1,6 @@
 #include "quietcool_component.h"
 
+#include "diagnostic_format.h"
 #include "quietcool/core/frame_codec.h"
 
 #include "esphome/core/log.h"
@@ -39,6 +40,7 @@ void QuietCoolComponent::setup() {
   // has already validated the record, so `restored` here is exactly what
   // core will treat as valid too. See provisioned_sender_'s declaration.
   provisioned_sender_ = restored.sender;
+  publish_remote_sender_id();
   apply_effects(core_.restore(restored, now_ms), now_ms);
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
 }
@@ -93,15 +95,26 @@ void QuietCoolComponent::on_radio_packet(::quietcool::ByteView packet) {
   // would require exposing core-private state, which is the change this
   // adapter-only observation was chosen specifically to avoid.
   if (provisioned_sender_) {
-    if (::quietcool::FrameCodec::decode_strict(packet, *provisioned_sender_))
+    if (::quietcool::FrameCodec::decode_strict(packet, *provisioned_sender_)) {
       ++rx_valid_count_;
-    else
+      if (rx_valid_count_sensor_ != nullptr)
+        rx_valid_count_sensor_->publish_state(static_cast<float>(rx_valid_count_));
+      // packet.size() == 6 here: decode_strict's length check is the first
+      // thing it does, so a successful decode already proved this.
+      if (last_rx_frame_sensor_ != nullptr)
+        last_rx_frame_sensor_->publish_state(format_hex_byte(packet[4]));
+    } else {
       ++rx_rejected_count_;
+      if (rx_rejected_count_sensor_ != nullptr)
+        rx_rejected_count_sensor_->publish_state(static_cast<float>(rx_rejected_count_));
+    }
   } else {
     // Unprovisioned: no sender to validate against. Counted rejected rather
     // than silently dropped from the diagnostic, matching legacy's outcome
     // for an unrecognized sender.
     ++rx_rejected_count_;
+    if (rx_rejected_count_sensor_ != nullptr)
+      rx_rejected_count_sensor_->publish_state(static_cast<float>(rx_rejected_count_));
   }
   const auto now_ms = clock_.now_ms();
   apply_effects(core_.on_frame(packet, now_ms), now_ms);
@@ -209,7 +222,18 @@ void QuietCoolComponent::apply_effect(
     const ::quietcool::CoreEffect& effect) {
   if (const auto* request =
           std::get_if<::quietcool::RequestTxBurst>(&effect)) {
-    if (burst_.accept(request->request) == ::quietcool::TxAcceptResult::Busy &&
+    const auto accept_result = burst_.accept(request->request);
+    // Last TX Command (Task 4): the in-flight outbound byte, latched only for
+    // a real state command (never a query burst) — the same restriction
+    // confirmation_reducer.cpp applies to the capability echo guard's
+    // own_outbound_byte.
+    if (accept_result == ::quietcool::TxAcceptResult::Accepted &&
+        request->request.reason == ::quietcool::TxReason::TransactionCommand &&
+        last_tx_command_sensor_ != nullptr) {
+      last_tx_command_sensor_->publish_state(
+          format_hex_byte(request->request.payload.bytes[4]));
+    }
+    if (accept_result == ::quietcool::TxAcceptResult::Busy &&
         !core_callbacks_.enqueue(::quietcool::CoreCallbackKind::TxRejected,
                                  request->request.token)) {
       degrade("core callback queue capacity exceeded (tx rejected)");
@@ -235,9 +259,11 @@ void QuietCoolComponent::apply_effect(
     if (persistence->request.kind ==
         ::quietcool::PersistenceKind::SaveProvisioning) {
       provisioned_sender_ = persistence->request.sender;
+      publish_remote_sender_id();
     } else if (persistence->request.kind ==
                ::quietcool::PersistenceKind::EraseProvisioning) {
       provisioned_sender_.reset();
+      publish_remote_sender_id();
     }
     if (!preferences_.apply(persistence->request))
       ESP_LOGW(kTag, "Unable to persist requested core state");
@@ -247,6 +273,7 @@ void QuietCoolComponent::apply_effect(
           std::get_if<::quietcool::PublishAuthorityEffect>(&effect)) {
     for (std::size_t index = 0; index < authority_publisher_count_; ++index)
       authority_publishers_[index]->publish_authority(authority->authority);
+    publish_authority_diagnostics(authority->authority);
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {
@@ -277,6 +304,8 @@ void QuietCoolComponent::apply_burst_event(
     // transaction — none of those reach BurstTransmitter::accept() again, so
     // none produce a new BurstStarted/BurstComplete pair).
     ++tx_count_;
+    if (tx_count_sensor_ != nullptr)
+      tx_count_sensor_->publish_state(static_cast<float>(tx_count_));
     apply_effects(core_.on_tx_complete(complete->token, now_ms), now_ms);
   } else if (const auto* rejected =
                  std::get_if<::quietcool::BurstRejected>(&event)) {
@@ -285,6 +314,21 @@ void QuietCoolComponent::apply_burst_event(
                  std::get_if<::quietcool::BurstFault>(&event)) {
     apply_effects(core_.on_tx_fault(fault->token, now_ms), now_ms);
   }
+}
+
+void QuietCoolComponent::publish_authority_diagnostics(
+    const ::quietcool::AuthoritySnapshot& authority) {
+  if (last_confirmed_state_sensor_ != nullptr)
+    last_confirmed_state_sensor_->publish_state(
+        format_last_confirmed_state(authority.state));
+  if (speed_capability_sensor_ != nullptr)
+    speed_capability_sensor_->publish_state(
+        format_speed_capability(authority.speed_capability));
+}
+
+void QuietCoolComponent::publish_remote_sender_id() {
+  if (remote_sender_id_sensor_ != nullptr)
+    remote_sender_id_sensor_->publish_state(format_sender_id(provisioned_sender_));
 }
 
 }  // namespace esphome::quietcool
