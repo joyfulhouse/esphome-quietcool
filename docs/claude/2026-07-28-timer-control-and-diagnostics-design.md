@@ -1,7 +1,9 @@
 # Timer control and restored diagnostics — design
 
 Date: 2026-07-28
-Status: approved, not yet implemented
+Status: implemented on `feat/timer-control-and-diagnostics`; awaiting adversarial
+review and hardware verification. §3.5 carries a correction found during
+implementation.
 Scope: `components/quietcool/esphome/`, `quietcool-cpp-lora32.yaml`, tests
 
 The C++ component replaced the legacy YAML build in every respect except one
@@ -207,8 +209,27 @@ incremented at the radio boundary:
 | Entity | Incremented when |
 |---|---|
 | `TX Count` | a burst transmission completes |
-| `RX Valid Count` | a frame decodes and is accepted |
-| `RX Rejected Count` | a frame is received and rejected |
+| `RX Valid Count` | a received frame passes `FrameCodec::decode_strict` |
+| `RX Rejected Count` | a received frame fails it, or arrives unprovisioned |
+
+> **Corrected during implementation.** This section first defined the RX
+> counters as "accepted" versus "rejected" in the classifier's sense. That is
+> not implementable from the adapter and would have been wrong anyway.
+> `on_radio_packet` has no accept/reject branch — the relevance decision lives
+> inside `ConfirmationCore::on_frame`, which this work may not modify — and the
+> obvious proxy is a trap: `on_frame` returns empty `CoreEffects` for a
+> genuinely accepted frame whenever consensus is not yet reached, which is the
+> *common* case, since consensus needs 2-3 independent candidates. Treating
+> emptiness as rejection would have systematically miscounted normal traffic.
+>
+> The legacy build settles the semantics: it incremented its rejected counter at
+> frame-**validation** failures (`legacy/quietcool-lora32.yaml` lines 655, 713,
+> 1017, 1022, 1027, 1032 — length, tail, sender mismatch, invalid state) and its
+> valid counter at 984 and 1054. Those map exactly onto `FrameDecodeError`. So
+> the counters key on `FrameCodec::decode_strict`, a static pure function the
+> adapter may *call* without modifying core, against a cached
+> `provisioned_sender_`. The core decodes again; that duplicate decode is
+> deliberate and inert — do not "optimize" it by reaching into core.
 
 `TX Count` is called out specifically: a flat TX Count through the OEM remote's
 retry storm is the evidence that exonerated the bridge of jamming the remote.

@@ -157,12 +157,28 @@ replaced by whichever lone fan happened to transmit. Full details are in the
   command alone, because hearing the command does not prove that the fan
   accepted it. Press **Refresh Fan State** to request query-consensus evidence.
   A downstream HA automation is a separate explicit command source.
-- **Timers.** The C++ build does not yet expose a Fan Timer *select* entity;
-  send timed modes from the OEM remote. The read-only `Timer Remaining` sensor
-  and the OLED countdown reflect a timer only after this controller's own
-  exchange is query-confirmed (gated by `Timer State Known`); a passively heard
-  report showing an active timer has unknown age and cannot authorize a
-  countdown.
+- **Timers.** The **Fan Timer** select runs the fan for 1 / 2 / 4 / 8 / 12
+  hours, or `None` for no timer at all.
+
+  **Every option transmits, and every option runs the fan.** Picking a duration
+  while the fan is stopped **starts it**, at Low. `None` does not mean "do
+  nothing" — it means "no timer, run until stopped", so on a fan whose timer has
+  already expired and which has therefore stopped, `None` **restarts it**. The
+  protocol has no non-actuating way to clear a timer, which is why the harmless-
+  looking option is not harmless. Open a window before running the fan.
+
+  The select shows only what the fan has **confirmed**: picking an option
+  transmits and then waits, and the shown value moves when evidence arrives, not
+  when you click. A refused command leaves it unchanged.
+
+  There is no "off" in this list — stopping the fan belongs to the fan entity.
+  On the wire, duration `0x0` stops the fan and `0xF` runs it continuously; both
+  mean "no countdown", which is why they look redundant, but they are opposites.
+
+  The read-only `Timer Remaining` sensor and the OLED countdown reflect a timer
+  only after this controller's own exchange is query-confirmed (gated by
+  `Timer State Known`); a passively heard report showing an active timer has
+  unknown age and cannot authorize a countdown.
 
 ## 7. Optional: temperatures on the OLED
 
@@ -193,12 +209,13 @@ learn its own remote. The pattern is in
 ## Entity reference
 
 These are the entities on the **C++ build** (`quietcool-cpp-lora32.yaml`). The
-legacy YAML build exposes a different, larger diagnostic set (a Fan Timer
-select, `Remote Sender ID`, TX/RX counters, `Last TX Command`, and more).
+diagnostics marked *disabled by default* exist but are hidden until you enable
+them in Home Assistant.
 
 | Entity | Type | Purpose |
 | --- | --- | --- |
-| `QuietCool Fan` | fan | Off / Low / High, plus Medium once the fan confirms three speeds — the only fan control |
+| `QuietCool Fan` | fan | Off / Low / High, plus Medium once the fan confirms three speeds |
+| `Fan Timer` | select | None / 1 / 2 / 4 / 8 / 12 hours. **Every option runs the fan** — a duration starts a stopped fan at Low, and `None` (no timer, run continuously) restarts a fan whose timer expired |
 | `Timer Remaining` | sensor | Confirmed countdown in minutes (also on the OLED) |
 | `Fan State Known` | binary sensor (diagnostic) | On only when the fan entity is backed by correlated physical evidence |
 | `Fan Confirmed Off` | binary sensor (diagnostic) | Atomic Off assertion; false combines running and unknown |
@@ -212,6 +229,13 @@ select, `Remote Sender ID`, TX/RX counters, `Last TX Command`, and more).
 | `Forget Remote ID` | button (config, disabled by default) | Erase the stored ID and return to learn mode |
 | `Battery Voltage` / `Battery Level` | sensors | On-board LiPo monitoring |
 | `WiFi Signal`, `Uptime`, `IP Address`, `Restart` | misc | Housekeeping |
+| `Last TX Command` | text sensor (diagnostic, disabled by default) | The last command byte this controller transmitted, e.g. `0xB1` |
+| `Last Valid RX Frame` | text sensor (diagnostic, disabled by default) | The last frame that passed validation |
+| `Last Confirmed Fan State` | text sensor (diagnostic, disabled by default) | The confirmed state, e.g. `high 1h`; `unknown` when nothing is confirmed |
+| `Fan Speed Capability` | text sensor (diagnostic, disabled by default) | `1`, `2`, `3`, or `unknown` — never a fabricated value |
+| `Remote Sender ID` | text sensor (diagnostic, disabled by default) | The bound fan's ID, e.g. `0xCB004739` |
+| `TX Count` | sensor (diagnostic, disabled by default) | Transmissions since boot. A **flat** count while the OEM remote retries is what proves this bridge is not jamming it |
+| `RX Valid Count` / `RX Rejected Count` | sensors (diagnostic, disabled by default) | Frames that passed / failed validation since boot |
 
 The `Learn Remote ID` and `Forget Remote ID` buttons live in the device's
 **Configuration** section and ship **disabled by default**. On the C++ build
