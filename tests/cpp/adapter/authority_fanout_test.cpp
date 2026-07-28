@@ -60,6 +60,24 @@ QC_TEST("adapter", "every registered publisher receives a snapshot") {
   QC_CHECK_EQ(second.calls, 2);
 }
 
+QC_TEST("adapter", "an effectless batch still delivers exactly one snapshot") {
+  // Pins the POST-DRAIN channel itself (round 9, opus): it is the only
+  // channel carrying the invalidations that emit no effect at all — the
+  // estimated-timer-deadline path among them — and with only the
+  // effect-carrying count asserted, deleting it was provable green before
+  // the exact counts landed. One effectless batch, exactly one delivery.
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CountingPublisher publisher;
+  component.add_authority_publisher(&publisher);
+
+  ::quietcool::CoreEffects batch;
+  QC_CHECK(batch.add(::quietcool::RequestRadioReset{}));
+  component.drive_effects_for_test(batch);
+
+  QC_CHECK_EQ(publisher.calls, 1);
+}
+
 QC_TEST("adapter", "registering past capacity degrades instead of displacing") {
   // Rounds 3-4: an over-capacity registration is a CONFIG error. Dropping it
   // silently left an entity that transmits but never hears (round 3, codex);
