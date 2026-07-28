@@ -456,13 +456,13 @@ void QuietCoolComponent::deliver_authority(
   //  1. PUBLISHERS (fan, select) — the entities whose displayed state other
   //     automations read before acting; they must be current first.
   //  2. SINK (*_Known flags, status) — its automations then see updated
-  //     entities. The trade: on an INVALIDATION delivery, an automation on a
-  //     stage-3 diagnostic reads a momentarily stale-TRUE Known flag (round
-  //     11, opus, measured in both orders) — accepted because the fan's
-  //     publication gate keeps the fan silent on invalidations, capability is
-  //     sticky, and any press composes from the live core snapshot, so the
-  //     stale flag has no transmit surface; the promotion direction it buys
-  //     (fan correct before Known rises) does.
+  //     entities. The residual trade of running the sink before stage 3
+  //     (round 12, fable — recorded the right way around this time): a
+  //     stage-2 sink automation reads stage-3 diagnostic TEXT one delivery
+  //     stale. Accepted: the diagnostics are display-only, disabled by
+  //     default, and no press composes from them; while a stage-3 automation
+  //     reading the Known flags — the direction that fails OPEN on an
+  //     invalidation — sees them already updated.
   //  3. DIAGNOSTICS — display only, last.
   // Between 1 and 2: a publisher's synchronous automation may have COMMANDED
   // and changed core authority (round 11, codex). Delivering this snapshot's
@@ -472,7 +472,11 @@ void QuietCoolComponent::deliver_authority(
   // carries the fresh state to the sink instead.
   for (std::size_t index = 0; index < authority_publisher_count_; ++index)
     authority_publishers_[index]->publish_authority(authority);
-  if (core_.snapshot(now_ms).authority.revision != authority.revision) return;
+  // Strictly AHEAD, not merely different: reentrancy can only advance the
+  // store's monotonic revision past the snapshot in hand — a delivered
+  // revision ahead of the core is unconstructible in production, and != would
+  // make the test seam's crafted snapshots indistinguishable from staleness.
+  if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
   events_.publish_authority(authority, now_ms);
   publish_authority_diagnostics(authority);
 }

@@ -341,5 +341,52 @@ QC_TEST("adapter", "a snapshot made stale mid-delivery never reaches the sink") 
     QC_CHECK(!published);
 }
 
+// Reads Fan State Known at the moment Last Confirmed Fan State publishes its
+// falling transition — the order stage 2 before stage 3 exists for.
+class DiagnosticOrderObserver final : public text_sensor::TextSensor {
+ public:
+  binary_sensor::BinarySensor* state_known{nullptr};
+  bool known_false_at_unknown{false};
+  void publish_state(const std::string& value) override {
+    text_sensor::TextSensor::publish_state(value);
+    if (value == "unknown" && state_known != nullptr &&
+        !state_known->published().empty())
+      known_false_at_unknown = !state_known->published().back();
+  }
+};
+
+QC_TEST("adapter", "the known flag falls before the diagnostic text goes unknown") {
+  // Round 12 (fable): the sink-before-diagnostics half of the staged order
+  // was unbound — swapping the two stages silently restores the round-11
+  // fails-open window, where a diagnostic automation read a stale-TRUE Known
+  // flag on an invalidation delivery.
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  binary_sensor::BinarySensor state_known;
+  DiagnosticOrderObserver diagnostic;
+  diagnostic.state_known = &state_known;
+  component.set_state_known_sensor(&state_known);
+  component.set_last_confirmed_state_sensor(&diagnostic);
+
+  // A confirmed delivery, then an invalidation delivery.
+  ::quietcool::AuthoritySnapshot confirmed{};
+  confirmed.state = ::quietcool::ConfirmedStateAuthority{
+      ::quietcool::FanState::command(::quietcool::Speed::High,
+                                     ::quietcool::Duration::Continuous),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 0};
+  component.publish_authority_for_test(confirmed);
+  // Distinct revision so the sink's own revision gate treats this as a new
+  // authority rather than swallowing it.
+  ::quietcool::AuthoritySnapshot invalidated{};
+  invalidated.revision = 1;
+  component.publish_authority_for_test(invalidated);
+
+  QC_CHECK(!diagnostic.published().empty());
+  QC_CHECK_EQ(diagnostic.published().back(), std::string("unknown"));
+  QC_CHECK(diagnostic.known_false_at_unknown);
+}
+
 }  // namespace
 }  // namespace esphome::quietcool
