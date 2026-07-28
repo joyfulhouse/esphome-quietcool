@@ -70,5 +70,24 @@ QC_TEST("adapter", "registering past capacity degrades instead of displacing") {
   QC_CHECK_EQ(publishers[0].calls, 0);
 }
 
+QC_TEST("adapter", "a fault sensor registered after degradation still raises") {
+  // Generated setup wires fan: before binary_sensor:, so a degrade() fired
+  // during publisher registration (the overflow path) predates the fault
+  // sensor's existence. The setter must replay the latched state or the
+  // "Controller Fault raises" promise silently depends on registration order
+  // (round 5, all three finding engines).
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  CountingPublisher publishers[QuietCoolComponent::kMaxAuthorityPublishers + 1];
+  for (auto& publisher : publishers) component.add_authority_publisher(&publisher);
+
+  // Degraded before the sensor exists; registration must replay it.
+  binary_sensor::BinarySensor fault;
+  component.set_controller_fault_sensor(&fault);
+
+  QC_CHECK(!fault.published().empty());
+  QC_CHECK(fault.published().back());
+}
+
 }  // namespace
 }  // namespace esphome::quietcool

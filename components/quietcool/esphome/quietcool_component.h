@@ -69,26 +69,39 @@ class QuietCoolComponent final : public Component {
     }
     authority_publishers_[authority_publisher_count_++] = publisher;
   }
+  // Every event-sink setter replays a latched degradation (round 5, all
+  // three finding engines): degrade() can fire during entity WIRING — the
+  // publisher-overflow path runs from set_controller, and generated setup
+  // orders fan: before binary_sensor: — so a sensor registered after the
+  // latch would otherwise never learn the controller is dead, and the
+  // overflow's "Controller Fault raises" promise silently depended on
+  // registration order.
   void set_state_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_state_known_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_timer_program_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_timer_program_known_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_timer_remaining_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_timer_remaining_known_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_confirmed_off_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_confirmed_off_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_controller_fault_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_controller_fault_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_timer_remaining_sensor(sensor::Sensor* sensor) {
     events_.set_timer_remaining_sensor(sensor);
   }
   void set_command_status_sensor(text_sensor::TextSensor* sensor) {
     events_.set_command_status_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_evidence_source_sensor(text_sensor::TextSensor* sensor) {
     events_.set_evidence_source_sensor(sensor);

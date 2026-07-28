@@ -43,6 +43,21 @@ void QuietCoolTimerSelect::control(const std::string& value) {
     return;
   }
 
+  // Refresh the cache from the controller's CURRENT snapshot before
+  // composing (round 5, codex): within one snapshot delivery the event sink
+  // publishes before this entity's cache updates, so a synchronous automation
+  // riding e.g. Fan State Known could otherwise command from one-snapshot-
+  // stale state. Pulling at press time makes the composition immune to
+  // fan-out ordering entirely. Same linked function as the channel path; a
+  // publish it deduces is legitimate and deduped identically.
+  {
+    const auto shown = this->current_option();
+    if (const auto option = timer_select_apply_snapshot(
+            cache_, controller_->snapshot().authority,
+            shown.empty() ? "" : shown.c_str()))
+      publish_state(*option);
+  }
+
   // The confirmed-state -> command composition, including the entity/command
   // band pair, lives in timer_command_from_confirmed — a linked, host-tested
   // pure function — precisely so this untestable entity file holds no band

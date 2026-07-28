@@ -3633,6 +3633,30 @@ class CppConfigBindingTest(unittest.TestCase):
             "disabled_by_default: true", _entity_block(self.text, _CPP_TIMER_ENTITY)
         )
 
+    def test_every_restored_diagnostic_lives_under_its_own_section(self) -> None:
+        # Section map for ALL restored entities (round 5, codex): deleting a
+        # top-level text_sensor:/sensor: header folds its entities into the
+        # preceding section — ESPHome rejects that, but block-scoped
+        # assertions still passed for everything except Fan Timer.
+        sections = {
+            "text_sensor": (
+                "Last TX Command",
+                "Last Valid RX Frame",
+                "Last Confirmed Fan State",
+                "Fan Speed Capability",
+                "Remote Sender ID",
+            ),
+            "sensor": ("TX Count", "RX Valid Count", "RX Rejected Count"),
+        }
+        for section_key, names in sections.items():
+            body = re.search(
+                rf"(?ms)^{section_key}:\n(.*?)(?=^\S|\Z)", self.text
+            )
+            self.assertIsNotNone(body, f"no top-level {section_key}: section")
+            for name in names:
+                with self.subTest(entity=name):
+                    self.assertIn(f'name: "{name}"', body.group(1))
+
     def test_the_timer_select_lives_under_a_select_section(self) -> None:
         # Section-aware, not just block-aware (round 4, codex): deleting the
         # top-level `select:` header would fold Fan Timer into the preceding
