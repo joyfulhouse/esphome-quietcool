@@ -24,21 +24,12 @@ void QuietCoolTimerSelect::publish_authority(
   // fan rather than the freshness of what we know about it (issue #31).
   capability_ = authority.speed_capability;
 
-  // confirmed_ mirrors the snapshot's CURRENT state authority, every
-  // publication — confirmed in, cleared out. It must NOT latch through a
-  // revision gate the way the fan's display value does: an invalidation
-  // (timer expiry, Forget/Learn re-binding, an in-flight command) must empty
-  // this cache, or the next timer command is aimed with a state the fan no
-  // longer has. Round 1 found both energizing shapes of that staleness: a fan
-  // whose timer expired re-started as running-HIGH instead of stopped-LOW
-  // (codex, high), and a freshly-bound fan started at the PREVIOUS fan's
-  // speed (opus). Not-confirmed maps to nullopt, which
-  // timer_command_from_confirmed treats as the documented stopped-fan rule.
-  if (const auto* confirmed =
-          std::get_if<::quietcool::ConfirmedStateAuthority>(&authority.state))
-    confirmed_ = confirmed->state;
-  else
-    confirmed_ = std::nullopt;
+  // The cache-update rule lives in confirmed_state_after — linked and tested —
+  // because both wrong versions of it were found adversarially: latching
+  // through invalidations aimed commands with a state the fan no longer had
+  // (round 1), and clearing on every invalidation turned "set HIGH, then set a
+  // timer" into LOW+duration (round 2). This line only marshals.
+  confirmed_ = confirmed_state_after(authority, confirmed_);
 
   // The published option comes from the timer authority itself, which the
   // authority store only ever writes from confirmed evidence. nullopt means
@@ -46,8 +37,14 @@ void QuietCoolTimerSelect::publish_authority(
   // nothing supports. Note the DISPLAY sense of "None" is "no timer
   // programmed", which is true for a stopped fan too; only the COMMAND sense
   // of selecting it transmits run-continuously.
-  if (const auto option = timer_option_for_authority(authority))
-    publish_state(*option);
+  //
+  // Deduplicated against the currently shown option: snapshots now arrive on
+  // every effect-drain round (see the post-drain fan-out), so re-publishing an
+  // unchanged option would spam the native API every loop tick.
+  if (const auto option = timer_option_for_authority(authority)) {
+    if (this->current_option().empty() || !(this->current_option() == *option))
+      publish_state(*option);
+  }
 }
 
 void QuietCoolTimerSelect::control(const std::string& value) {

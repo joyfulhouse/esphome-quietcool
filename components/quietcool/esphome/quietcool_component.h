@@ -161,6 +161,15 @@ class QuietCoolComponent final : public Component {
   // the effects that follow it in the same batch. Authority fan-out is
   // exercised through this same seam with a PublishAuthorityEffect batch,
   // rather than a dedicated publish hook.
+  // Task 2 deliberately declined this hook while the effect branch was the
+  // production path a hand-built PublishAuthorityEffect could exercise. The
+  // round-2 delivery fix moved production to the post-drain snapshot, whose
+  // source is the real core — un-injectable from a host test — so this hook
+  // is now the honest seam onto the SAME publish_authority_snapshot the
+  // post-drain lambda calls.
+  void publish_authority_for_test(const ::quietcool::AuthoritySnapshot& a) {
+    publish_authority_snapshot(a);
+  }
   void drive_effects_for_test(const ::quietcool::CoreEffects& effects) {
     apply_effects(effects, 0);
   }
@@ -174,6 +183,9 @@ class QuietCoolComponent final : public Component {
   bool enqueue_effects(const ::quietcool::CoreEffects& effects,
                        ::quietcool::MonotonicMs now_ms);
   void apply_effect(const ::quietcool::CoreEffect& effect);
+  void publish_authority_snapshot(
+      const ::quietcool::AuthoritySnapshot& authority);
+  void flush_rx_counter_publications(::quietcool::MonotonicMs now_ms);
   void apply_burst_event(const ::quietcool::BurstEvent& event,
                          ::quietcool::MonotonicMs now_ms);
   void degrade(const char* reason);
@@ -217,13 +229,28 @@ class QuietCoolComponent final : public Component {
   std::uint32_t rx_valid_count_{0};
   std::uint32_t rx_rejected_count_{0};
   // Last TX Command's latch: set when a TransactionCommand burst is ACCEPTED,
-  // published (and cleared) when its burst COMPLETES, so the diagnostic can
-  // never name a byte that a radio fault kept off the air (round 1, codex).
-  std::optional<std::uint8_t> pending_tx_command_byte_;
-  // Throttle for the rejected-counter's entity updates; the counter itself is
-  // exact. 5 s bounds native-API traffic in a noisy RF environment.
-  static constexpr ::quietcool::MonotonicMs kRejectedPublishIntervalMs = 5000;
-  ::quietcool::MonotonicMs last_rejected_publish_ms_{0};
+  // published when the burst carrying the SAME token COMPLETES, and cleared on
+  // that burst's rejection, fault, or revocation — so the diagnostic can never
+  // name a byte that never went on the air (rounds 1 and 2).
+  struct PendingTxCommand final {
+    ::quietcool::TxToken token;
+    std::uint8_t byte;
+  };
+  std::optional<PendingTxCommand> pending_tx_command_;
+  // RX counter entity updates are flushed from loop(), not per packet: a storm
+  // (RF noise, or the provisioned remote retrying) otherwise produces one
+  // native-API publish plus one synchronous on_value opportunity per packet
+  // (round 2). The counters themselves stay exact; only entity updates are
+  // paced, and the loop flush publishes the final total after a storm ends —
+  // per-packet throttling alone left the shown value stale until the NEXT
+  // packet, which may be days (round 2, all three engines).
+  static constexpr ::quietcool::MonotonicMs kRxCounterPublishIntervalMs = 1000;
+  ::quietcool::MonotonicMs last_rx_counter_publish_ms_{0};
+  std::uint32_t published_rx_valid_count_{0};
+  std::uint32_t published_rx_rejected_count_{0};
+  // Last Valid RX Frame publishes only when the byte CHANGES: a retry storm
+  // repeats one byte, so change-gating is the natural rate limit.
+  std::optional<std::uint8_t> published_rx_frame_byte_;
   // Mirrors ConfirmationCore's own sender_, so on_radio_packet can validate
   // an incoming frame the same way core eventually will, without reaching
   // into core. Updated at exactly the three sites where core's sender_

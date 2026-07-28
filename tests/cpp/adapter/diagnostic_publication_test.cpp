@@ -74,13 +74,14 @@ AuthoritySnapshot confirmed_snapshot(FanState state,
   return snapshot;
 }
 
-// Drives publication through the real apply_effect(PublishAuthorityEffect)
-// path, exactly like authority_fanout_test.cpp's publish_once — no test-only
-// publication hook added.
+// Drives publication through publish_authority_for_test, which calls the SAME
+// publish_authority_snapshot the production post-drain lambda calls. The
+// former vehicle — a hand-built PublishAuthorityEffect through
+// drive_effects_for_test — stopped reaching entities when round 2 moved
+// production delivery to the post-drain core snapshot (whose source is the
+// real core, un-injectable from here).
 void publish(QuietCoolComponent& component, const AuthoritySnapshot& authority) {
-  ::quietcool::CoreEffects batch;
-  QC_CHECK(batch.add(::quietcool::PublishAuthorityEffect{authority}));
-  component.drive_effects_for_test(batch);
+  component.publish_authority_for_test(authority);
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +371,11 @@ QC_TEST("adapter", "rx valid count sensor publishes the counter value on an acce
       ::quietcool::ByteView(query_frame.data(), query_frame.size()));
 
   QC_CHECK_EQ(component.rx_valid_count(), std::uint32_t(1));
+  // Counter entities publish from loop()'s paced flush, not per packet
+  // (round 2): the increment is immediate, the entity update arrives on the
+  // next loop tick past the pacing window.
+  host_test::advance_millis(1001);
+  component.call_loop();
   QC_CHECK(!rx_valid_sensor.published().empty());
   QC_CHECK_EQ(rx_valid_sensor.published().back(), 1.0F);
 }
@@ -388,8 +394,38 @@ QC_TEST("adapter", "rx rejected count sensor publishes the counter value on a re
       ::quietcool::ByteView(short_frame.data(), short_frame.size()));
 
   QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(1));
+  host_test::advance_millis(1001);
+  component.call_loop();
   QC_CHECK(!rx_rejected_sensor.published().empty());
   QC_CHECK_EQ(rx_rejected_sensor.published().back(), 1.0F);
+}
+
+QC_TEST("adapter", "a storm's final rejected total is flushed after the storm ends") {
+  // The round-2 defect all three engines converged on: per-packet throttling
+  // dropped intermediate publishes AND the final one, so a 200-frame noise
+  // burst could leave Home Assistant reading 1 until the next rejection —
+  // days later. The loop flush publishes the settled total.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  sensor::Sensor rx_rejected_sensor;
+  component.set_rx_rejected_count_sensor(&rx_rejected_sensor);
+  host_test::set_millis(0);
+  component.setup();
+
+  const std::array<std::uint8_t, 5> short_frame{0xCB, 0x00, 0x47, 0x39, 0x66};
+  for (int i = 0; i < 200; ++i) {
+    component.on_radio_packet(
+        ::quietcool::ByteView(short_frame.data(), short_frame.size()));
+    host_test::advance_millis(20);  // 200 frames in ~4 s, inside one window
+    component.call_loop();
+  }
+  // Storm over; quiet RF. The flush must still deliver the final total.
+  host_test::advance_millis(1001);
+  component.call_loop();
+  QC_CHECK_EQ(component.rx_rejected_count(), std::uint32_t(200));
+  QC_CHECK(!rx_rejected_sensor.published().empty());
+  QC_CHECK_EQ(rx_rejected_sensor.published().back(), 200.0F);
 }
 
 }  // namespace

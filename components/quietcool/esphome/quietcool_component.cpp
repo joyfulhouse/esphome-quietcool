@@ -62,6 +62,9 @@ void QuietCoolComponent::setup() {
 void QuietCoolComponent::loop() {
   if (degraded_) return;
   const auto now_ms = clock_.now_ms();
+  // Before the early returns, so a busy loop (callback/burst work every tick)
+  // cannot starve the counter flush indefinitely.
+  flush_rx_counter_publications(now_ms);
   if (const auto callback = core_callbacks_.pop(now_ms)) {
     if (callback->kind == ::quietcool::CoreCallbackKind::TxRejected &&
         callback->token) {
@@ -125,33 +128,51 @@ void QuietCoolComponent::on_radio_packet(::quietcool::ByteView packet) {
         ::quietcool::FrameCodec::decode_strict(packet, *provisioned_sender_);
     if (decoded) {
       ++rx_valid_count_;
-      if (rx_valid_count_sensor_ != nullptr)
-        rx_valid_count_sensor_->publish_state(static_cast<float>(rx_valid_count_));
       // Only state-carrying decodes reach the "Last Valid RX Frame" text
       // sensor: an ExactQuery's marker byte is 0x66, not a fan state, and
       // publishing it made the diagnostic show a query marker every time the
-      // OEM remote polled (round 1, opus). packet.size() == 6 is proven by
-      // the successful decode (length is decode_strict's first check).
+      // OEM remote polled (round 1, opus). Change-gated: a retry storm
+      // repeats one byte, so identical frames publish once (round 2).
+      // packet.size() == 6 is proven by the successful decode (length is
+      // decode_strict's first check).
       const bool carries_state =
           !std::holds_alternative<::quietcool::ExactQuery>(decoded.value());
-      if (carries_state && last_rx_frame_sensor_ != nullptr)
+      if (carries_state && last_rx_frame_sensor_ != nullptr &&
+          published_rx_frame_byte_ != packet[4]) {
+        published_rx_frame_byte_ = packet[4];
         last_rx_frame_sensor_->publish_state(format_hex_byte(packet[4]));
+      }
     } else {
       ++rx_rejected_count_;
-      // Throttled: rejections arrive at RF-noise rate, and each publish is
-      // native-API traffic plus a synchronous on_value opportunity per packet
-      // (round 1, opus). The counter itself stays exact; only the entity
-      // update is limited. The next post-window rejection publishes the
-      // current total, so the value shown is stale by at most the window.
-      if (rx_rejected_count_sensor_ != nullptr &&
-          (last_rejected_publish_ms_ == 0 ||
-           now_ms - last_rejected_publish_ms_ >= kRejectedPublishIntervalMs)) {
-        last_rejected_publish_ms_ = now_ms;
-        rx_rejected_count_sensor_->publish_state(static_cast<float>(rx_rejected_count_));
-      }
     }
+    // Counter ENTITY updates are deliberately absent here: both RX counters
+    // publish from loop()'s paced flush (round 2, all three engines), so a
+    // packet storm costs increments only — no per-packet native-API traffic,
+    // and no stale final value once the storm ends.
   }
   apply_effects(core_.on_frame(packet, now_ms), now_ms);
+}
+
+void QuietCoolComponent::flush_rx_counter_publications(
+    ::quietcool::MonotonicMs now_ms) {
+  if (rx_valid_count_ == published_rx_valid_count_ &&
+      rx_rejected_count_ == published_rx_rejected_count_)
+    return;
+  if (last_rx_counter_publish_ms_ != 0 &&
+      now_ms - last_rx_counter_publish_ms_ < kRxCounterPublishIntervalMs)
+    return;
+  last_rx_counter_publish_ms_ = now_ms;
+  if (rx_valid_count_ != published_rx_valid_count_) {
+    published_rx_valid_count_ = rx_valid_count_;
+    if (rx_valid_count_sensor_ != nullptr)
+      rx_valid_count_sensor_->publish_state(static_cast<float>(rx_valid_count_));
+  }
+  if (rx_rejected_count_ != published_rx_rejected_count_) {
+    published_rx_rejected_count_ = rx_rejected_count_;
+    if (rx_rejected_count_sensor_ != nullptr)
+      rx_rejected_count_sensor_->publish_state(
+          static_cast<float>(rx_rejected_count_));
+  }
 }
 
 void QuietCoolComponent::request_state(::quietcool::FanState requested) {
@@ -199,7 +220,14 @@ void QuietCoolComponent::apply_effects(
     apply_effect(effect);
   };
   auto publish = [this](::quietcool::MonotonicMs publish_ms) {
-    events_.publish_authority(core_.snapshot(publish_ms).authority, publish_ms);
+    // Entity fan-out rides the SAME post-drain channel as the *_Known
+    // sensors (round 2, codex high): several authority invalidations — the
+    // estimated-timer-deadline path among them — never emit an explicit
+    // PublishAuthorityEffect, so an effect-driven fan-out silently missed
+    // exactly the invalidations the timer select's cache rule exists to see.
+    const auto authority = core_.snapshot(publish_ms).authority;
+    events_.publish_authority(authority, publish_ms);
+    publish_authority_snapshot(authority);
   };
   // Only the top-level drain runs work and can exhaust its budget; a re-entrant
   // apply_effects (an automation firing during apply()) hits the draining_
@@ -265,7 +293,8 @@ void QuietCoolComponent::apply_effect(
     // that never went on air while TX Count stayed flat (round 1, codex).
     if (accept_result == ::quietcool::TxAcceptResult::Accepted &&
         request->request.reason == ::quietcool::TxReason::TransactionCommand) {
-      pending_tx_command_byte_ = request->request.payload.bytes[4];
+      pending_tx_command_ =
+          PendingTxCommand{request->request.token, request->request.payload.bytes[4]};
     }
     if (accept_result == ::quietcool::TxAcceptResult::Busy &&
         !core_callbacks_.enqueue(::quietcool::CoreCallbackKind::TxRejected,
@@ -276,6 +305,11 @@ void QuietCoolComponent::apply_effect(
   }
   if (const auto* revoke = std::get_if<::quietcool::RevokeTxLease>(&effect)) {
     burst_.revoke_if_unstarted(revoke->token);
+    // A revoked lease produces no burst event at all, so this is the only
+    // place a revoked command's latch can be cleared (round 2).
+    if (pending_tx_command_.has_value() &&
+        pending_tx_command_->token == revoke->token)
+      pending_tx_command_.reset();
     return;
   }
   if (const auto* event = std::get_if<::quietcool::PublishCoreEvent>(&effect)) {
@@ -303,11 +337,11 @@ void QuietCoolComponent::apply_effect(
       ESP_LOGW(kTag, "Unable to persist requested core state");
     return;
   }
-  if (const auto* authority =
-          std::get_if<::quietcool::PublishAuthorityEffect>(&effect)) {
-    for (std::size_t index = 0; index < authority_publisher_count_; ++index)
-      authority_publishers_[index]->publish_authority(authority->authority);
-    publish_authority_diagnostics(authority->authority);
+  if (std::holds_alternative<::quietcool::PublishAuthorityEffect>(effect)) {
+    // Consumed deliberately without acting: authority reaches entities via
+    // the post-drain snapshot fan-out in apply_effects (round 2, codex high),
+    // which also covers the invalidations that emit no effect at all. Acting
+    // here too would double-publish every effect-carrying batch.
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {
@@ -338,24 +372,54 @@ void QuietCoolComponent::apply_burst_event(
     // transaction — none of those reach BurstTransmitter::accept() again, so
     // none produce a new BurstStarted/BurstComplete pair).
     ++tx_count_;
+    // The byte latched at acceptance is genuinely on the air only if THIS
+    // completion is the burst that latched it — matched by token, because a
+    // latched burst has two ways to die without completing (OEM-priority
+    // revocation and a send fault), and an unmatched latch surviving into a
+    // later query burst's completion would publish a byte that never
+    // transmitted (round 2, all three finding engines).
+    //
+    // Core is told about the completion FIRST (round 2, codex): publish_state
+    // can fire a synchronous automation, and one that issues a command while
+    // the core still believes the burst is in flight would be refused or
+    // misclassified against stale coordinator state.
+    const auto completed_token = complete->token;
+    apply_effects(core_.on_tx_complete(completed_token, now_ms), now_ms);
     if (tx_count_sensor_ != nullptr)
       tx_count_sensor_->publish_state(static_cast<float>(tx_count_));
-    // The byte latched at acceptance is now genuinely on the air. Query
-    // bursts never latch one, so their completions publish nothing here.
-    if (pending_tx_command_byte_) {
+    if (pending_tx_command_.has_value() &&
+        pending_tx_command_->token == completed_token) {
       if (last_tx_command_sensor_ != nullptr)
         last_tx_command_sensor_->publish_state(
-            format_hex_byte(*pending_tx_command_byte_));
-      pending_tx_command_byte_.reset();
+            format_hex_byte(pending_tx_command_->byte));
+      pending_tx_command_.reset();
     }
-    apply_effects(core_.on_tx_complete(complete->token, now_ms), now_ms);
   } else if (const auto* rejected =
                  std::get_if<::quietcool::BurstRejected>(&event)) {
+    if (pending_tx_command_.has_value() &&
+        pending_tx_command_->token == rejected->token)
+      pending_tx_command_.reset();
     apply_effects(core_.on_tx_rejected(rejected->token, now_ms), now_ms);
   } else if (const auto* fault =
                  std::get_if<::quietcool::BurstFault>(&event)) {
+    if (pending_tx_command_.has_value() &&
+        pending_tx_command_->token == fault->token)
+      pending_tx_command_.reset();
     apply_effects(core_.on_tx_fault(fault->token, now_ms), now_ms);
   }
+}
+
+// The one function through which every authority snapshot reaches the entity
+// publishers and the authority-derived diagnostics — post-drain in production,
+// and via publish_authority_for_test in host tests, so the tested wiring IS
+// the production wiring. Publishers must tolerate repeated identical
+// snapshots: the fan gates on revision, the select dedupes against its shown
+// option.
+void QuietCoolComponent::publish_authority_snapshot(
+    const ::quietcool::AuthoritySnapshot& authority) {
+  for (std::size_t index = 0; index < authority_publisher_count_; ++index)
+    authority_publishers_[index]->publish_authority(authority);
+  publish_authority_diagnostics(authority);
 }
 
 void QuietCoolComponent::publish_authority_diagnostics(

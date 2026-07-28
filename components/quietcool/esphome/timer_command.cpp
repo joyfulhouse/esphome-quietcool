@@ -100,6 +100,50 @@ const char* option_for_selection(TimerSelection selection) {
                                    command_speed_count(capability));
 }
 
+std::optional<::quietcool::FanState> confirmed_state_after(
+    const ::quietcool::AuthoritySnapshot& authority,
+    const std::optional<::quietcool::FanState>& previous) {
+  if (const auto* confirmed =
+          std::get_if<::quietcool::ConfirmedStateAuthority>(&authority.state))
+    return confirmed->state;
+  if (std::get_if<::quietcool::RevalidatingStateAuthority>(&authority.state))
+    return previous;
+  const auto& unknown =
+      std::get<::quietcool::UnknownStateAuthority>(authority.state);
+  switch (unknown.reason) {
+    // WHAT the cached state describes has changed: a different fan, no fan,
+    // or a deadline after which the fan is presumed stopped. Keeping the
+    // cache through these aimed a re-bound or expired-timer fan at the
+    // previous state's speed (round 1, codex + opus).
+    case ::quietcool::AuthorityLossReason::Unprovisioned:
+    case ::quietcool::AuthorityLossReason::SenderChanged:
+    case ::quietcool::AuthorityLossReason::LearningStarted:
+    case ::quietcool::AuthorityLossReason::EstimatedTimerDeadline:
+      return std::nullopt;
+    // Freshness only: we are momentarily unsure, but the fan is still
+    // physically doing what was last confirmed. Clearing on these turned the
+    // primary "set HIGH, then set a timer" journey into LOW+duration
+    // (round 2, opus): begin_local_command raises LocalCommandPending on
+    // EVERY accepted command. Boot and RestoredUnverified are vacuous here —
+    // they can only precede the first confirmation of a power cycle, when the
+    // cache is empty anyway — and grouped with the keep side so a future
+    // reordering cannot make them destructive.
+    case ::quietcool::AuthorityLossReason::Boot:
+    case ::quietcool::AuthorityLossReason::LocalCommandPending:
+    case ::quietcool::AuthorityLossReason::ManualRevalidationPending:
+    case ::quietcool::AuthorityLossReason::ExactOemQuery:
+    case ::quietcool::AuthorityLossReason::ExternalStateTraffic:
+    case ::quietcool::AuthorityLossReason::AmbiguousOemYield:
+    case ::quietcool::AuthorityLossReason::ContradictoryTail:
+    case ::quietcool::AuthorityLossReason::ConsensusTimeout:
+    case ::quietcool::AuthorityLossReason::TransactionExhausted:
+    case ::quietcool::AuthorityLossReason::RadioUnavailable:
+    case ::quietcool::AuthorityLossReason::RestoredUnverified:
+      break;
+  }
+  return previous;
+}
+
 std::optional<const char*> timer_option_for_authority(
     const ::quietcool::AuthoritySnapshot& authority) {
   if (const auto* anchored =
@@ -109,7 +153,10 @@ std::optional<const char*> timer_option_for_authority(
           std::get_if<::quietcool::ProgrammedDurationAuthority>(&authority.timer))
     return option_for_duration(programmed->duration);
   if (std::get_if<::quietcool::NoActiveTimerAuthority>(&authority.timer))
-    return "None";
+    // Derived, not a literal (round 2): a hand-written "None" here would
+    // survive a coordinated option rename and publish a string the Select
+    // rejects — the same defect option_for_duration just had fixed.
+    return option_for_selection(TimerSelection::Continuous);
   // UnknownTimerAuthority: publish nothing. The entity keeps its last confirmed
   // value rather than claiming a fact no evidence supports.
   return std::nullopt;

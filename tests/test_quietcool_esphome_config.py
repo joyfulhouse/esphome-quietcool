@@ -3586,12 +3586,46 @@ class CppConfigBindingTest(unittest.TestCase):
         # The kind key IS the binding; the name is only a label. Each entity's
         # block must carry the quietcool platform, the controller, and exactly
         # its own kind — so two blocks with swapped kinds fail by name.
+        # Line-anchored (round 2, codex): a substring assertIn("kind: tx_count")
+        # is satisfied by "kind: tx_count_typo", which ESPHome then rejects
+        # while every test here stayed green.
         for name, kind in _CPP_RESTORED_DIAGNOSTICS.items():
             with self.subTest(entity=name):
                 block = _entity_block(self.text, name)
-                self.assertIn("platform: quietcool", block)
-                self.assertIn("controller_id: quietcool_controller", block)
-                self.assertIn(f"kind: {kind}", block)
+                self.assertRegex(block, r"(?m)^\s*(?:- )?platform: quietcool\s*$")
+                self.assertRegex(
+                    block, r"(?m)^\s*controller_id: quietcool_controller\s*$"
+                )
+                self.assertRegex(block, rf"(?m)^\s*kind: {kind}\s*$")
+
+    def test_codegen_kind_maps_bind_each_kind_to_its_own_setter(self) -> None:
+        # One layer below the YAML (round 2, opus): swapping two values inside
+        # text_sensor.py's TEXT_SENSOR_SETTERS or sensor.py's SENSOR_KINDS
+        # compiles, validates and flashes — TX Count reporting RX frames again,
+        # the same issue-#28 shape the YAML tests were hardened against.
+        text_sensor_py = (ROOT / "components/quietcool/text_sensor.py").read_text()
+        for kind, setter in {
+            "command_status": "set_command_status_sensor",
+            "evidence_source": "set_evidence_source_sensor",
+            "last_tx_command": "set_last_tx_command_sensor",
+            "last_rx_frame": "set_last_rx_frame_sensor",
+            "last_confirmed_state": "set_last_confirmed_state_sensor",
+            "speed_capability": "set_speed_capability_sensor",
+            "remote_sender_id": "set_remote_sender_id_sensor",
+        }.items():
+            with self.subTest(kind=kind):
+                self.assertRegex(
+                    text_sensor_py, rf'"{kind}":\s*"{setter}"'
+                )
+        sensor_py = (ROOT / "components/quietcool/sensor.py").read_text()
+        for kind, setter in {
+            "timer_remaining": "set_timer_remaining_sensor",
+            "tx_count": "set_tx_count_sensor",
+            "rx_valid_count": "set_rx_valid_count_sensor",
+            "rx_rejected_count": "set_rx_rejected_count_sensor",
+        }.items():
+            with self.subTest(kind=kind):
+                self.assertRegex(sensor_py, rf'"{kind}":\s*\(\s*"{setter}"')
 
     def test_the_timer_select_is_not_disabled_by_default(self) -> None:
         # The diagnostics are opt-in; the control the feature exists for is not.

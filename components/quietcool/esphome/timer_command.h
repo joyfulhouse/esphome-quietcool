@@ -74,6 +74,24 @@ const char* option_for_selection(TimerSelection selection);
     std::optional<::quietcool::SpeedCapability> capability,
     TimerSelection requested);
 
+// The select's cache-update rule: what the cached confirmed state should be
+// AFTER seeing this snapshot, given what it was before. Extracted here — in
+// the linked, tested unit — because both wrong versions of this rule were
+// found adversarially in an entity file no test can reach:
+//   - LATCHING through invalidations (round 1) aimed energizing commands with
+//     a state the fan no longer had (expired timer, re-bound fan);
+//   - CLEARING on every invalidation (round 2) turned "set the fan HIGH, then
+//     set a timer" into LOW+duration, because begin_local_command invalidates
+//     authority on EVERY accepted command.
+// The discrimination: a confirmed snapshot replaces the cache; an unknown
+// snapshot clears it only when its reason changes WHAT the state describes
+// (Unprovisioned, SenderChanged, LearningStarted, EstimatedTimerDeadline);
+// every freshness reason — and revalidation — keeps it, because the fan is
+// still physically doing what was last confirmed.
+std::optional<::quietcool::FanState> confirmed_state_after(
+    const ::quietcool::AuthoritySnapshot& authority,
+    const std::optional<::quietcool::FanState>& previous);
+
 // The option to publish for a confirmed authority snapshot, or nullopt to
 // publish nothing at all.
 //

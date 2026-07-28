@@ -235,6 +235,102 @@ QC_TEST("timer_command", "a confirmed stopped fan starts at low not its remember
   QC_CHECK_EQ(command.outbound_command_byte(), 0x98);
 }
 
+// ---------------------------------------------------------------------------
+// confirmed_state_after: the select's cache-update rule, extracted and tested
+// because BOTH round-1 shapes of getting it wrong were found adversarially:
+// latching through invalidations aimed energizing commands with a state the
+// fan no longer had (round 1), and clearing on EVERY invalidation turned the
+// primary journey — set the fan HIGH, then set a timer — into LOW+duration,
+// because begin_local_command invalidates on every accepted command (round 2,
+// opus high). Only reasons that change WHAT the state describes clear the
+// cache; freshness reasons keep it.
+// ---------------------------------------------------------------------------
+
+namespace {
+::quietcool::AuthoritySnapshot snapshot_with_unknown(
+    ::quietcool::AuthorityLossReason reason) {
+  ::quietcool::AuthoritySnapshot snapshot{};
+  ::quietcool::UnknownStateAuthority unknown{};
+  unknown.reason = reason;
+  snapshot.state = unknown;
+  return snapshot;
+}
+}  // namespace
+
+QC_TEST("timer_command", "a confirmed snapshot replaces the cache") {
+  ::quietcool::AuthoritySnapshot snapshot{};
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  // Aggregate-initialised in full: FanState has no default constructor.
+  snapshot.state = ::quietcool::ConfirmedStateAuthority{
+      high,
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0,
+      2,
+      std::nullopt,
+      std::nullopt,
+      1};
+  const auto next = confirmed_state_after(snapshot, std::nullopt);
+  QC_CHECK(next.has_value());
+  QC_CHECK_EQ(next->canonical_byte(), high.canonical_byte());
+}
+
+QC_TEST("timer_command", "a pending local command keeps the cache") {
+  // The primary journey: user sets the fan HIGH, then sets a timer while the
+  // command is still confirming. begin_local_command invalidates authority
+  // with LocalCommandPending on EVERY accepted command, so clearing here made
+  // the follow-up timer transmit LOW and silently discard the chosen speed.
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const auto next = confirmed_state_after(
+      snapshot_with_unknown(::quietcool::AuthorityLossReason::LocalCommandPending),
+      high);
+  QC_CHECK(next.has_value());
+  QC_CHECK_EQ(next->canonical_byte(), high.canonical_byte());
+}
+
+QC_TEST("timer_command", "freshness invalidations keep the cache") {
+  // OEM remote polls, external traffic, consensus timeouts: we are momentarily
+  // unsure, but the fan is still physically doing what was last confirmed.
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const ::quietcool::AuthorityLossReason freshness[] = {
+      ::quietcool::AuthorityLossReason::ExactOemQuery,
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic,
+      ::quietcool::AuthorityLossReason::ConsensusTimeout,
+      ::quietcool::AuthorityLossReason::TransactionExhausted,
+      ::quietcool::AuthorityLossReason::ManualRevalidationPending,
+  };
+  for (const auto reason : freshness) {
+    const auto next = confirmed_state_after(snapshot_with_unknown(reason), high);
+    QC_CHECK(next.has_value());
+  }
+}
+
+QC_TEST("timer_command", "identity invalidations clear the cache") {
+  // These change WHAT the cached state describes: a different fan (Forget /
+  // Learn), no fan at all, or a timer deadline after which the fan is presumed
+  // stopped. Keeping the cache through these was round 1's high finding — a
+  // re-bound or expired-timer fan started at the previous state's speed.
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const ::quietcool::AuthorityLossReason identity[] = {
+      ::quietcool::AuthorityLossReason::Unprovisioned,
+      ::quietcool::AuthorityLossReason::SenderChanged,
+      ::quietcool::AuthorityLossReason::LearningStarted,
+      ::quietcool::AuthorityLossReason::EstimatedTimerDeadline,
+  };
+  for (const auto reason : identity) {
+    const auto next = confirmed_state_after(snapshot_with_unknown(reason), high);
+    QC_CHECK(!next.has_value());
+  }
+}
+
+QC_TEST("timer_command", "revalidation keeps the cache") {
+  ::quietcool::AuthoritySnapshot snapshot{};
+  snapshot.state = ::quietcool::RevalidatingStateAuthority{};
+  const auto high = FanState::command(Speed::High, Duration::Continuous);
+  const auto next = confirmed_state_after(snapshot, high);
+  QC_CHECK(next.has_value());
+}
+
 QC_TEST("timer_command", "a confirmed off duration never publishes a stop") {
   // Duration::Off should not reach a timer authority, but if it ever does the
   // select must fall back to "None" — the option list has no way to express a
