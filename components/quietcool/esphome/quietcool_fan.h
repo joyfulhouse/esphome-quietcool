@@ -15,7 +15,7 @@ class QuietCoolFan final : public Component,
  public:
   void set_controller(QuietCoolComponent* controller) {
     controller_ = controller;
-    controller_->set_authority_publisher(this);
+    controller_->add_authority_publisher(this);
   }
 
   void setup() override;

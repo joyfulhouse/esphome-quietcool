@@ -12,6 +12,7 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/core/component.h"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace esphome::quietcool {
@@ -33,8 +34,17 @@ class QuietCoolComponent final : public Component {
   void dump_config() override;
   float get_setup_priority() const override;
 
-  void set_authority_publisher(AuthorityPublisher* publisher) {
-    authority_publisher_ = publisher;
+  // Four covers the fan, the timer select and headroom — same fixed-capacity,
+  // no-heap discipline as CoreEffects::kCapacity. An overflow registration is
+  // DROPPED rather than displacing a live publisher: silently unsubscribing
+  // the fan entity would strand Home Assistant on stale state, which is worse
+  // than refusing the newcomer.
+  static constexpr std::size_t kMaxAuthorityPublishers = 4;
+
+  void add_authority_publisher(AuthorityPublisher* publisher) {
+    if (publisher == nullptr) return;
+    if (authority_publisher_count_ >= kMaxAuthorityPublishers) return;
+    authority_publishers_[authority_publisher_count_++] = publisher;
   }
   void set_state_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_state_known_sensor(sensor);
@@ -101,7 +111,9 @@ class QuietCoolComponent final : public Component {
   }
   // Drives a hand-built effect batch through the real apply_effects()/drain()
   // path (issue #22), so a degrade triggered by one effect is observed against
-  // the effects that follow it in the same batch.
+  // the effects that follow it in the same batch. Authority fan-out is
+  // exercised through this same seam with a PublishAuthorityEffect batch,
+  // rather than a dedicated publish hook.
   void drive_effects_for_test(const ::quietcool::CoreEffects& effects) {
     apply_effects(effects, 0);
   }
@@ -128,7 +140,8 @@ class QuietCoolComponent final : public Component {
   ::quietcool::BurstTransmitter burst_;
   ::quietcool::CoreEffectDrain effect_drain_;
   ::quietcool::CoreCallbackQueue core_callbacks_;
-  AuthorityPublisher* authority_publisher_{nullptr};
+  AuthorityPublisher* authority_publishers_[kMaxAuthorityPublishers]{};
+  std::size_t authority_publisher_count_{0};
   // Terminal-degradation latch (M2, issue #9). Set before any degradation
   // publication so an on_value automation fired synchronously during degrade()
   // cannot re-enter the non-reentrant core through a public entry point.

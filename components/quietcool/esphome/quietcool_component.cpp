@@ -202,8 +202,8 @@ void QuietCoolComponent::apply_effect(
   }
   if (const auto* authority =
           std::get_if<::quietcool::PublishAuthorityEffect>(&effect)) {
-    if (authority_publisher_ != nullptr)
-      authority_publisher_->publish_authority(authority->authority);
+    for (std::size_t index = 0; index < authority_publisher_count_; ++index)
+      authority_publishers_[index]->publish_authority(authority->authority);
     return;
   }
   if (std::holds_alternative<::quietcool::RequestRadioReset>(effect)) {
