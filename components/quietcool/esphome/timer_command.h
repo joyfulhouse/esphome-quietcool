@@ -1,8 +1,11 @@
 #pragma once
 
+#include "quietcool/core/authority_store.h"
 #include "quietcool/core/fan_state.h"
 
 #include <cstdint>
+#include <optional>
+#include <string>
 
 namespace esphome::quietcool {
 
@@ -26,5 +29,41 @@ enum class TimerSelection : std::uint8_t {
 ::quietcool::FanState timer_command_from_intent(TimerSelection requested, bool fan_on,
                                                 int level,
                                                 std::uint8_t command_speed_count);
+
+// ---------------------------------------------------------------------------
+// The select entity's vocabulary.
+//
+// These live here rather than in quietcool_timer_select.cpp because that file
+// derives from select::Select and is excluded from the adapter test binary, so
+// anything welded into it cannot be tested. That is issue #15: an untestable
+// on/off mapping could have been inverted with the whole suite green.
+// ---------------------------------------------------------------------------
+
+// The option list, in the order Home Assistant renders it. "None" means no
+// TIMER — the fan runs until stopped — and maps to Duration::Continuous. It
+// does NOT mean Duration::Off, which stops the fan; the select cannot express
+// that at all. Every option here transmits an ENERGIZING command.
+inline constexpr const char* kTimerOptions[] = {
+    "None", "1 hour", "2 hours", "4 hours", "8 hours", "12 hours"};
+
+// Parses a Home Assistant option string. Returns nullopt for anything not in
+// kTimerOptions, including case variants: an unrecognised option must transmit
+// NOTHING rather than fall back to a guess, because every value this function
+// can return puts an energizing command on the air.
+std::optional<TimerSelection> selection_for_option(const std::string& option);
+
+// The inverse. Total over the enum.
+const char* option_for_selection(TimerSelection selection);
+
+// The option to publish for a confirmed authority snapshot, or nullopt to
+// publish nothing at all.
+//
+// Nothing is published for an unknown timer authority: the select shows only
+// what confirmed evidence supports, and asserting "None" from no evidence would
+// claim the fan has no timer when we simply do not know. A Duration::Off inside
+// a timer authority — which should not occur — degrades to "None" rather than
+// inventing a stop option, keeping Off out of the timer vocabulary entirely.
+std::optional<const char*> timer_option_for_authority(
+    const ::quietcool::AuthoritySnapshot& authority);
 
 }  // namespace esphome::quietcool
