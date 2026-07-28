@@ -792,9 +792,12 @@ class CppConfigBindingTest(unittest.TestCase):
 
     def test_the_config_documents_off_versus_continuous(self) -> None:
         # The distinction is counter-intuitive enough that a maintainer editing
-        # this file must meet it here, not only in the design doc.
-        self.assertIn("Continuous", self.text)
-        self.assertIn("Off", self.text)
+        # this file must meet it here, not only in the design doc. Asserted as
+        # meaning, not mere presence: bare assertIn("Off", ...) would pass on
+        # any file mentioning the word anywhere.
+        header = self.text.split("substitutions:", 1)[0]
+        self.assertRegex(header, r"Off\b[^\n]*\bstop")
+        self.assertRegex(header, r"Continuous\b[^\n]*\brun")
 ```
 
 Add a module-level helper `_entity_block(text, name)` that returns the YAML
