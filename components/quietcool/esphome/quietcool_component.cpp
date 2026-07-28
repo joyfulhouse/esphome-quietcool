@@ -353,15 +353,18 @@ void QuietCoolComponent::apply_effect(
   }
   if (const auto* authority =
           std::get_if<::quietcool::PublishAuthorityEffect>(&effect)) {
-    // Fanned out IN PLACE, not only post-drain (round 8, codex): the core
+    // Fanned out IN PLACE, not only post-drain (rounds 8-9, codex): the core
     // emits this effect in ORDER with its other effects, and a
     // TransactionFinished later in the same batch synchronously publishes
     // "confirmed" — an automation riding that status must see the fan entity
-    // already at its confirmed state, not one batch behind. The post-drain
-    // fan-out remains for the invalidations that emit no effect at all
-    // (round 2); double delivery is safe because every consumer dedupes —
+    // AND the *_Known sensors already at their confirmed state, not one batch
+    // behind (round 9 caught the sink missing from round 8's fix). The
+    // post-drain fan-out remains for the invalidations that emit no effect at
+    // all (round 2); double delivery is safe because every consumer dedupes —
     // the sink and fan by revision, the select by shown option, the text
-    // diagnostics by last-published string.
+    // diagnostics by last-published string. The sink's clock was set by the
+    // apply lambda immediately before this branch runs.
+    events_.publish_authority(authority->authority, events_.now_ms());
     publish_authority_snapshot(authority->authority);
     return;
   }
@@ -424,8 +427,19 @@ void QuietCoolComponent::apply_burst_event(
   } else if (const auto* fault =
                  std::get_if<::quietcool::BurstFault>(&event)) {
     if (pending_tx_command_.has_value() &&
-        pending_tx_command_->token == fault->token)
+        pending_tx_command_->token == fault->token) {
+      // A fault after frames already went out is a PARTIAL transmission, and
+      // the fan may well have acted on it — the 3-frame burst is redundancy,
+      // not a threshold. Publishing then clearing keeps Last TX Command
+      // honest about what reached the air (round 9, codex); frames_sent
+      // still reflects the faulted burst here because the transmitter's
+      // fault path does not reset it.
+      if (burst_.snapshot().frames_sent > 0 &&
+          last_tx_command_sensor_ != nullptr)
+        last_tx_command_sensor_->publish_state(
+            format_hex_byte(pending_tx_command_->byte));
       pending_tx_command_.reset();
+    }
     apply_effects(core_.on_tx_fault(fault->token, now_ms), now_ms);
   }
 }

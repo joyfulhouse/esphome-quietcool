@@ -227,6 +227,35 @@ QC_TEST("adapter", "last tx command sensor publishes the outbound state byte as 
   QC_CHECK_EQ(sensor.published().back(), std::string("0xB1"));
 }
 
+QC_TEST("adapter", "a fault after a transmitted frame still publishes last tx command") {
+  // A fault mid-burst is a PARTIAL transmission — the 3-frame burst is
+  // redundancy, not a threshold — and the fan may have acted on the frames
+  // that went out. Erasing the latch there left the diagnostic claiming the
+  // command never aired (round 9, codex). Frame 1 sends, frame 2 faults.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  radio.push_result(::quietcool::RadioSendResult::Sent);
+  radio.push_result(::quietcool::RadioSendResult::Fault);
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  text_sensor::TextSensor sensor;
+  component.set_last_tx_command_sensor(&sensor);
+  host_test::set_millis(0);
+  component.setup();
+
+  component.request_state(FanState::command(Speed::High, Duration::Hours1));
+
+  for (std::size_t pass = 0; pass < 30 && sensor.published().empty(); ++pass) {
+    host_test::advance_millis(50);
+    component.call_loop();
+  }
+
+  // Two attempts reached the radio (the second faulted); the byte that went
+  // on air is recorded.
+  QC_CHECK(radio.packets().size() >= 2);
+  QC_CHECK(!sensor.published().empty());
+  QC_CHECK_EQ(sensor.published().back(), std::string("0xB1"));
+}
+
 // Guards the TxReason::TransactionCommand filter: a query burst (0x66) must
 // never be mistaken for a command byte.
 QC_TEST("adapter", "last tx command sensor is untouched by the boot query") {

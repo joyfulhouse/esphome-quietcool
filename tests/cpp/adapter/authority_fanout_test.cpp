@@ -47,14 +47,17 @@ QC_TEST("adapter", "every registered publisher receives a snapshot") {
 
   publish_once(component);
 
-  // AT LEAST once, not exactly once (round 8, codex): an effect-carrying
-  // batch delivers in place — so a TransactionFinished later in the same
-  // batch sees entities already updated — AND post-drain, which covers the
-  // invalidations that emit no effect. Deduplication is every consumer's
-  // job, and each one has a gate (revision, shown option, last-published
-  // text); a bare counting publisher like this one sees both deliveries.
-  QC_CHECK(first.calls >= 1);
-  QC_CHECK_EQ(first.calls, second.calls);
+  // EXACTLY twice (rounds 8-9): an effect-carrying batch delivers in place —
+  // so a TransactionFinished later in the same batch sees entities already
+  // updated — AND post-drain, which covers the invalidations that emit no
+  // effect. Deduplication is every consumer's job (revision, shown option,
+  // last-published text); a bare counting publisher sees both deliveries,
+  // and pinning the count to 2 is what BINDS the in-place delivery — a
+  // weaker >= 1 was satisfied by the post-drain channel alone, so deleting
+  // the in-place line reverted the ordering fix with a green suite
+  // (round 9, fable + codex).
+  QC_CHECK_EQ(first.calls, 2);
+  QC_CHECK_EQ(second.calls, 2);
 }
 
 QC_TEST("adapter", "registering past capacity degrades instead of displacing") {

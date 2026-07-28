@@ -16,6 +16,7 @@ namespace esphome::quietcool {
 class EspHomeEventSink final : public ::quietcool::EventSink {
  public:
   void set_now_ms(::quietcool::MonotonicMs now_ms) { now_ms_ = now_ms; }
+  ::quietcool::MonotonicMs now_ms() const { return now_ms_; }
   void set_state_known_sensor(binary_sensor::BinarySensor* sensor) {
     state_known_ = sensor;
   }
