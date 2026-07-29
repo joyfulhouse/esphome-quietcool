@@ -3689,13 +3689,18 @@ class CppConfigBindingTest(unittest.TestCase):
         self.assertIn(f'name: "{_CPP_TIMER_ENTITY}"', section.group(1))
 
     def test_the_timer_select_is_a_quietcool_platform_entity(self) -> None:
-        # Line-anchored like the diagnostics (round 3, codex): substring
-        # matching accepted `platform: quietcool_typo`.
+        # Line-anchored like the diagnostics (round 3, codex), and
+        # exact-indentation anchored like them too (round 13, fable): `^\s*`
+        # accepted an over-indented property that PyYAML rejects — the whole
+        # class stayed green on a config ESPHome cannot build. The timer
+        # entity gets the same anchors the diagnostics got in wave 12.
         block = _entity_block(self.text, _CPP_TIMER_ENTITY)
-        self.assertRegex(block, r"(?m)^\s*(?:- )?platform: quietcool\s*$")
+        self.assertRegex(block, r"(?m)^  - platform: quietcool\s*$")
+        self.assertRegex(block, r"(?m)^    id: fan_timer_select\s*$")
         self.assertRegex(
-            block, r"(?m)^\s*controller_id: quietcool_controller\s*$"
+            block, r"(?m)^    controller_id: quietcool_controller\s*$"
         )
+        self.assertRegex(block, rf'(?m)^    name: "{_CPP_TIMER_ENTITY}"\s*$')
 
     def test_the_timer_options_are_documented_where_they_are_declared(self) -> None:
         # The option list itself lives in select.py (it must match the C++
