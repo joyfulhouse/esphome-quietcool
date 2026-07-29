@@ -853,6 +853,80 @@ QC_TEST("timer_command", "a reconfirmation of the same program keeps the tighter
   QC_CHECK_EQ(press.speed().value(), Speed::Low);
 }
 
+QC_TEST("timer_command", "an oem frame after an expired estimate rebuilds over the dead bound") {
+  // Round 14 (opus, MO6): the empty-prior-cache branch of the keep rule's
+  // predicate decides this journey and was unpinned — a mutant keeping the
+  // stale bound whenever the cache held no confirmed state stayed green
+  // while reopening round 12's defect verbatim. The ordinary route to an
+  // empty cache with a live stale bound: the local timer's own estimated
+  // deadline fires (clears the cache, keeps the bound), THEN the OEM remote
+  // sets a new program. The frame is positive evidence the fan runs; the
+  // dead bound must not presume it stopped.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  // t=60min: the estimate fires — cache cleared, bound (now dead) kept.
+  (void)timer_select_apply_snapshot(
+      cache,
+      snapshot_with_unknown(
+          ::quietcool::AuthorityLossReason::EstimatedTimerDeadline), "");
+  QC_CHECK(!cache.confirmed.has_value());
+
+  // t=70min: the OEM remote sets HIGH+12h.
+  auto oem = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic);
+  auto& unknown = std::get<::quietcool::UnknownStateAuthority>(oem.state);
+  unknown.since_ms = 4200000;
+  unknown.last_diagnostic = FanState::command(Speed::High, Duration::Hours12);
+  (void)timer_select_apply_snapshot(cache, oem, "");
+
+  // t=80min: inside the new program. Composes the remote's HIGH.
+  const auto press =
+      timer_command_for_press(cache, oem, 4800000, TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xB4);
+}
+
+QC_TEST("timer_command", "a reconfirmation after an expired estimate rebuilds over the dead bound") {
+  // The programmed-arm analog of the test above (round 14, opus drift
+  // notice): its keep-rule predicate has the same empty-previous branch.
+  // After the estimate clears the cache, a query consensus confirming the
+  // remote's new 12h program must replace the dead bound.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+  (void)timer_select_apply_snapshot(
+      cache,
+      snapshot_with_unknown(
+          ::quietcool::AuthorityLossReason::EstimatedTimerDeadline), "");
+
+  ::quietcool::AuthoritySnapshot reconfirmed{};
+  reconfirmed.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours12),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      4200000, 2, std::nullopt, std::nullopt, 2};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours12;
+  programmed.observed_ms = 4200000;
+  reconfirmed.timer = programmed;
+  (void)timer_select_apply_snapshot(cache, reconfirmed, "");
+
+  const auto press = timer_command_for_press(cache, reconfirmed, 4800000,
+                                             TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xB4);
+}
+
 QC_TEST("timer_command", "a same-program reconfirmation with no bound still sets one") {
   // The keep rule applies only when there is a bound to keep: with none,
   // the observation's own upper bound must land, or a later freshness
