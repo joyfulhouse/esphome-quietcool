@@ -11,8 +11,12 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/core/component.h"
+#include "esphome/core/log.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
 
 namespace esphome::quietcool {
 
@@ -33,32 +37,104 @@ class QuietCoolComponent final : public Component {
   void dump_config() override;
   float get_setup_priority() const override;
 
-  void set_authority_publisher(AuthorityPublisher* publisher) {
-    authority_publisher_ = publisher;
+  // Four covers the fan, the timer select and headroom — same fixed-capacity,
+  // no-heap discipline as CoreEffects::kCapacity. An overflow registration is
+  // DROPPED rather than displacing a live publisher: silently unsubscribing
+  // the fan entity would strand Home Assistant on stale state, which is worse
+  // than refusing the newcomer.
+  static constexpr std::size_t kMaxAuthorityPublishers = 4;
+
+  void add_authority_publisher(AuthorityPublisher* publisher) {
+    if (publisher == nullptr) return;
+    if (authority_publisher_count_ >= kMaxAuthorityPublishers) {
+      // Loudly, not silently (round 1, opus): the dropped entity keeps its
+      // controller_ pointer and can still TRANSMIT — it just never receives a
+      // snapshot, so e.g. a dropped timer select would aim every command with
+      // no confirmed state and nothing anywhere would say why.
+      ESP_LOGE("quietcool", "authority publisher dropped: capacity %u exceeded",
+               static_cast<unsigned>(kMaxAuthorityPublishers));
+      // Terminal degradation, not mark_failed (rounds 3-4). Round 3 (codex):
+      // a dropped entity still holds its controller pointer and can TRANSMIT,
+      // so the failure must be loud and latched, not a fan that mysteriously
+      // always starts LOW. Round 4 (opus): mark_failed alone left degraded_
+      // false — surviving entities kept accepting commands that could never
+      // transmit — while ALSO stopping loop(), the worst of both. degrade()
+      // is the project's one terminal path (issue #9): Controller Fault
+      // raises, every *_Known flag drops, all entry points latch shut, and
+      // the condition reads as what it is — a configuration error — in Home
+      // Assistant. The branch is unreachable in the shipped configs (two
+      // publishers of four).
+      degrade("authority publisher capacity exceeded (config error)");
+      return;
+    }
+    authority_publishers_[authority_publisher_count_++] = publisher;
   }
+  // Every event-sink setter replays a latched degradation (rounds 5-6, all
+  // three finding engines): degrade() can fire during entity WIRING — the
+  // publisher-overflow path runs from set_controller, and generated setup
+  // orders fan: before binary_sensor: — so a sensor registered after the
+  // latch would otherwise never learn the controller is dead, and the
+  // overflow's "Controller Fault raises" promise silently depended on
+  // registration order.
   void set_state_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_state_known_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_timer_program_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_timer_program_known_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_timer_remaining_known_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_timer_remaining_known_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_confirmed_off_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_confirmed_off_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_controller_fault_sensor(binary_sensor::BinarySensor* sensor) {
     events_.set_controller_fault_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_timer_remaining_sensor(sensor::Sensor* sensor) {
     events_.set_timer_remaining_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_command_status_sensor(text_sensor::TextSensor* sensor) {
     events_.set_command_status_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
   }
   void set_evidence_source_sensor(text_sensor::TextSensor* sensor) {
     events_.set_evidence_source_sensor(sensor);
+    if (degraded_) events_.publish_controller_failed();
+  }
+  // Restored diagnostics (Task 4, issue #28's dropped entities). These five
+  // live directly on the component rather than on EspHomeEventSink: their
+  // sources (the echo-guard TX byte, the last accepted RX frame,
+  // provisioned_sender_) are adapter-local observations events_ never sees.
+  void set_last_tx_command_sensor(text_sensor::TextSensor* sensor) {
+    last_tx_command_sensor_ = sensor;
+  }
+  void set_last_rx_frame_sensor(text_sensor::TextSensor* sensor) {
+    last_rx_frame_sensor_ = sensor;
+  }
+  void set_last_confirmed_state_sensor(text_sensor::TextSensor* sensor) {
+    last_confirmed_state_sensor_ = sensor;
+  }
+  void set_speed_capability_sensor(text_sensor::TextSensor* sensor) {
+    speed_capability_sensor_ = sensor;
+  }
+  void set_remote_sender_id_sensor(text_sensor::TextSensor* sensor) {
+    remote_sender_id_sensor_ = sensor;
+  }
+  // The three counters restored in Task 3 (tx_count() etc.); this task only
+  // adds their entities and publication.
+  void set_tx_count_sensor(sensor::Sensor* sensor) { tx_count_sensor_ = sensor; }
+  void set_rx_valid_count_sensor(sensor::Sensor* sensor) {
+    rx_valid_count_sensor_ = sensor;
+  }
+  void set_rx_rejected_count_sensor(sensor::Sensor* sensor) {
+    rx_rejected_count_sensor_ = sensor;
   }
   void on_radio_packet(::quietcool::ByteView packet);
   void request_state(::quietcool::FanState requested);
@@ -66,6 +142,20 @@ class QuietCoolComponent final : public Component {
   void request_learn(::quietcool::LearnMode mode);
   void request_forget();
   ::quietcool::CoreSnapshot snapshot() const;
+  // For entities that must refuse work after terminal degradation (round 6):
+  // the select is a separate Component, so nothing else tells it the
+  // controller died.
+  bool degraded() const { return degraded_; }
+  ::quietcool::MonotonicMs now_ms() const { return clock_.now_ms(); }
+
+  // Monotonic radio diagnostics, restored after the YAML->C++ migration
+  // dropped them: never reset outside a reboot. `tx_count_` is the instrument
+  // that once proved this bridge was not jamming the OEM remote — it stayed
+  // flat through the remote's retry storm, which showed the storm was not
+  // this bridge's own traffic. Losing it removed the evidence.
+  std::uint32_t tx_count() const { return tx_count_; }
+  std::uint32_t rx_valid_count() const { return rx_valid_count_; }
+  std::uint32_t rx_rejected_count() const { return rx_rejected_count_; }
 
 #ifdef QUIETCOOL_HOST_TEST
   // Test seams (issue #9). Overflow of the exact-max effect and callback queues
@@ -101,7 +191,18 @@ class QuietCoolComponent final : public Component {
   }
   // Drives a hand-built effect batch through the real apply_effects()/drain()
   // path (issue #22), so a degrade triggered by one effect is observed against
-  // the effects that follow it in the same batch.
+  // the effects that follow it in the same batch. Authority fan-out is
+  // exercised through this same seam with a PublishAuthorityEffect batch,
+  // rather than a dedicated publish hook.
+  // Task 2 deliberately declined this hook while the effect branch was the
+  // production path a hand-built PublishAuthorityEffect could exercise. The
+  // round-2 delivery fix moved production to the post-drain snapshot, whose
+  // source is the real core — un-injectable from a host test — so this hook
+  // is now the honest seam onto the SAME publish_authority_snapshot the
+  // post-drain lambda calls.
+  void publish_authority_for_test(const ::quietcool::AuthoritySnapshot& a) {
+    deliver_authority(a, clock_.now_ms());
+  }
   void drive_effects_for_test(const ::quietcool::CoreEffects& effects) {
     apply_effects(effects, 0);
   }
@@ -115,10 +216,23 @@ class QuietCoolComponent final : public Component {
   bool enqueue_effects(const ::quietcool::CoreEffects& effects,
                        ::quietcool::MonotonicMs now_ms);
   void apply_effect(const ::quietcool::CoreEffect& effect);
+  void deliver_authority(const ::quietcool::AuthoritySnapshot& authority,
+                         ::quietcool::MonotonicMs now_ms);
+  void publish_last_tx_command(std::uint8_t byte);
+  void flush_rx_counter_publications(::quietcool::MonotonicMs now_ms);
   void apply_burst_event(const ::quietcool::BurstEvent& event,
                          ::quietcool::MonotonicMs now_ms);
   void degrade(const char* reason);
   void note_budget_exhaustion();
+  // Publishes Last Confirmed Fan State and Fan Speed Capability from the
+  // authority snapshot the PublishAuthorityEffect branch of apply_effect()
+  // already carries — the same site every other AuthorityPublisher is fanned
+  // out from, and the only site both fields' sources are confirmed-only.
+  void publish_authority_diagnostics(
+      const ::quietcool::AuthoritySnapshot& authority);
+  // Publishes Remote Sender ID from provisioned_sender_. Called at exactly
+  // the three sites provisioned_sender_ itself changes (see its declaration).
+  void publish_remote_sender_id();
 
   EspMonotonicClock clock_;
   ::quietcool::Radio& radio_;
@@ -128,7 +242,8 @@ class QuietCoolComponent final : public Component {
   ::quietcool::BurstTransmitter burst_;
   ::quietcool::CoreEffectDrain effect_drain_;
   ::quietcool::CoreCallbackQueue core_callbacks_;
-  AuthorityPublisher* authority_publisher_{nullptr};
+  AuthorityPublisher* authority_publishers_[kMaxAuthorityPublishers]{};
+  std::size_t authority_publisher_count_{0};
   // Terminal-degradation latch (M2, issue #9). Set before any degradation
   // publication so an on_value automation fired synchronously during degrade()
   // cannot re-enter the non-reentrant core through a public entry point.
@@ -137,6 +252,72 @@ class QuietCoolComponent final : public Component {
   // one-shot latch keeps a sustained storm from logging every loop.
   std::uint32_t last_budget_exhaustions_{0};
   bool budget_warning_active_{false};
+  // Radio diagnostics (see radio_counters_test.cpp and the task-3 report).
+  // rx_valid_count_ / rx_rejected_count_ are FRAME-VALIDATION counters — did
+  // the frame decode against the provisioned sender — not classifier-
+  // relevance counters: ConfirmationCore::on_frame's accept/reject verdict
+  // is not recoverable from its returned CoreEffects without misclassifying
+  // the common case (a still-accumulating consensus candidate legitimately
+  // returns empty effects), and that verdict is core-private regardless.
+  std::uint32_t tx_count_{0};
+  std::uint32_t rx_valid_count_{0};
+  std::uint32_t rx_rejected_count_{0};
+  // Last TX Command's latch: set when a TransactionCommand burst is ACCEPTED,
+  // published when the burst carrying the SAME token COMPLETES, and cleared on
+  // that burst's rejection, fault, or revocation — so the diagnostic can never
+  // name a byte that never went on the air (rounds 1 and 2).
+  struct PendingTxCommand final {
+    ::quietcool::TxToken token;
+    std::uint8_t byte;
+  };
+  std::optional<PendingTxCommand> pending_tx_command_;
+  // Change gate for Last TX Command (round 10): a fault storm repeats one
+  // byte; identical values publish once.
+  std::optional<std::uint8_t> published_tx_byte_;
+  // RX counter entity updates are flushed from loop(), not per packet: a storm
+  // (RF noise, or the provisioned remote retrying) otherwise produces one
+  // native-API publish plus one synchronous on_value opportunity per packet
+  // (round 2). The counters themselves stay exact; only entity updates are
+  // paced, and the loop flush publishes the final total after a storm ends —
+  // per-packet throttling alone left the shown value stale until the NEXT
+  // packet, which may be days (round 2, all three engines).
+  static constexpr ::quietcool::MonotonicMs kRxCounterPublishIntervalMs = 1000;
+  ::quietcool::MonotonicMs last_rx_counter_publish_ms_{0};
+  std::uint32_t published_rx_valid_count_{0};
+  std::uint32_t published_rx_rejected_count_{0};
+  // Last Valid RX Frame publishes only when the byte CHANGES: a retry storm
+  // repeats one byte, so change-gating is the natural rate limit. The publish
+  // itself is deferred until core_.on_frame has run (round 3, codex).
+  std::optional<std::uint8_t> published_rx_frame_byte_;
+  std::optional<std::uint8_t> pending_rx_frame_publish_;
+  // Change gates for the two per-snapshot text diagnostics (round 3, opus,
+  // measured): the post-drain channel fires every tick and TextSensor does
+  // not dedupe.
+  std::string published_last_confirmed_state_;
+  std::string published_speed_capability_;
+  // Mirrors ConfirmationCore's own sender_, so on_radio_packet can validate
+  // an incoming frame the same way core eventually will, without reaching
+  // into core. Updated at exactly the three sites where core's sender_
+  // itself changes: restore() (setup()), Forget's EraseProvisioning, and
+  // Learn's SaveProvisioning (see quietcool_component.cpp) — confirmed
+  // against confirmation_core.cpp, where those are the only three sender_
+  // assignments. Used by the RX counters above and by Remote Sender ID below.
+  std::optional<::quietcool::SenderId> provisioned_sender_;
+  // Restored diagnostics (Task 4). Last TX Command is published only for
+  // TxReason::TransactionCommand (never a query burst) at the same
+  // RequestTxBurst acceptance site that feeds the capability echo guard
+  // (issue #31) — see confirmation_reducer.cpp's own_outbound_byte. Last
+  // Valid RX Frame is published alongside rx_valid_count_. Neither byte is
+  // latched as state here: each is read directly off the effect/packet that
+  // is already in hand at its one publication site.
+  text_sensor::TextSensor* last_tx_command_sensor_{nullptr};
+  text_sensor::TextSensor* last_rx_frame_sensor_{nullptr};
+  text_sensor::TextSensor* last_confirmed_state_sensor_{nullptr};
+  text_sensor::TextSensor* speed_capability_sensor_{nullptr};
+  text_sensor::TextSensor* remote_sender_id_sensor_{nullptr};
+  sensor::Sensor* tx_count_sensor_{nullptr};
+  sensor::Sensor* rx_valid_count_sensor_{nullptr};
+  sensor::Sensor* rx_rejected_count_sensor_{nullptr};
 };
 
 }  // namespace esphome::quietcool

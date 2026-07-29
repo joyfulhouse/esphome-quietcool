@@ -391,7 +391,7 @@ QC_TEST("preferences", "restored capability reaches the publisher before any RF"
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
   CapturingPublisher publisher;
-  component.set_authority_publisher(&publisher);
+  component.add_authority_publisher(&publisher);
   component.setup();
 
   QC_CHECK(publisher.last.has_value());
@@ -430,7 +430,7 @@ QC_TEST("preferences", "a two-speed confirmation narrows the entity and reaches 
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
   CapturingPublisher publisher;
-  component.set_authority_publisher(&publisher);
+  component.add_authority_publisher(&publisher);
   component.setup();
   // The entity is listed at the WIDEST band while nothing is known, so learning
   // can only narrow it; the command band is the MED-free one.
@@ -499,7 +499,7 @@ QC_TEST("preferences", "repeated confirmations of a known capability cost no fla
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
   CapturingPublisher publisher;
-  component.set_authority_publisher(&publisher);
+  component.add_authority_publisher(&publisher);
   component.setup();
   QC_CHECK(loop_to(component, ::quietcool::CoordinatorState::Idle, 2000));
 
@@ -559,7 +559,7 @@ QC_TEST("preferences", "an echo-confirmed HIGH publishes the top level, not MED"
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
   CapturingPublisher publisher;
-  component.set_authority_publisher(&publisher);
+  component.add_authority_publisher(&publisher);
   component.setup();
   FanSpeedBands bands;
   bands.observe(publisher.last->speed_capability);
@@ -625,7 +625,7 @@ QC_TEST("preferences", "learning three speeds cannot widen the band under Home A
   ::quietcool::test::FakeRadio radio;
   QuietCoolComponent component(&radio, 0, kPreferenceKey, 59);
   CapturingPublisher publisher;
-  component.set_authority_publisher(&publisher);
+  component.add_authority_publisher(&publisher);
   component.setup();
 
   // What Home Assistant caches at ListEntities, before any RF evidence exists.

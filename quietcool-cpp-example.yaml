@@ -98,6 +98,19 @@ fan:
     controller_id: quietcool_controller
     name: "Whole House Fan"
 
+# Every option transmits and every option RUNS the fan: a duration started on
+# a stopped fan starts it (at Low), and "None" means no timer — run until
+# stopped — which restarts a fan whose timer already expired. This block also
+# has a CI role: this example is one of the two configs CI compiles, and
+# declaring the select here is what makes CI execute select.py's code
+# generation at all (adversarial round 5 — `esphome config` validates schemas
+# but never runs to_code, and the shipped lora32 config is config-only in CI).
+select:
+  - platform: quietcool
+    id: fan_timer
+    controller_id: quietcool_controller
+    name: "Fan Timer"
+
 binary_sensor:
   - platform: quietcool
     controller_id: quietcool_controller

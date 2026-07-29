@@ -138,10 +138,10 @@ Three things are worth spelling out, and the table claims nothing beyond them:
   time: Medium can only be commanded once three speeds have been confirmed
   (commanding it stops a two-speed fan), a confirmed two-speed fan narrows the
   listed speeds to two, and the capability is persisted to flash so later boots
-  list the right band from the first Home Assistant connection. On the C++
-  build timer modes are set from the OEM remote (the legacy YAML build
-  additionally exposes a speed-aware timer *select* in Home Assistant covering
-  the fan's full 1 / 2 / 4 / 8 / 12-hour range). Either way, `Timer State Known`
+  list the right band from the first Home Assistant connection. A speed-aware
+  **Fan Timer** select covers the fan's full 1 / 2 / 4 / 8 / 12-hour range, plus
+  `None` for continuous running — every option is energizing, including `None`,
+  which restarts a fan whose timer expired. `Timer State Known`
   and the read-only `Timer Remaining` sensor present a countdown only when it is
   backed by correlated evidence — never a guessed `None` — so an unresolved
   command cannot present stale timer metadata as confirmed.

@@ -38,13 +38,19 @@ SANITIZE_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -g
 # minimal ESPHome stubs (tests/cpp/esphome_stubs) so the wiring that defers core
 # re-entry — the adapter half of the loop-stack crash fix — is covered on the
 # host instead of only by `esphome compile` and live uptime.
-# quietcool_fan.cpp and quietcool_button.cpp are excluded: they derive from
-# esphome::fan::Fan and esphome::button::Button, whose surface (traits, FanCall,
-# state restore) is large enough that stubbing it would be a reimplementation
-# rather than a stub — and a stub big enough to be wrong is worse than no test.
+# quietcool_fan.cpp, quietcool_button.cpp and quietcool_timer_select.cpp are
+# excluded: they derive from esphome::fan::Fan, esphome::button::Button and
+# esphome::select::Select, whose surface (traits, FanCall, state restore, option
+# lists) is large enough that stubbing it would be a reimplementation rather
+# than a stub — and a stub big enough to be wrong is worse than no test.
 # They stay covered by `esphome compile` in CI. The publication gate they rely
 # on is separately unit-tested in ports/authority_publication_gate_test.cpp.
-ADAPTER_SOURCES := $(filter-out %/quietcool_fan.cpp %/quietcool_button.cpp, \
+#
+# The exclusion is why each of them must stay a thin marshalling shell: every
+# decision they make belongs in a linked file (fan_command.cpp,
+# timer_command.cpp), or it is logic no test in this repo can reach — issue #15.
+ADAPTER_SOURCES := $(filter-out %/quietcool_fan.cpp %/quietcool_button.cpp \
+	%/quietcool_timer_select.cpp, \
 	$(wildcard $(ROOT)/components/quietcool/esphome/*.cpp))
 ADAPTER_TEST_SOURCES := $(shell find ./adapter -name '*_test.cpp' -print) \
 	esphome_stubs/esphome_stubs.cpp support/test_main.cpp
@@ -60,20 +66,30 @@ PLATFORM_FREE_SOURCES := $(wildcard $(ROOT)/components/quietcool/core/*.h) \
 	$(ROOT)/components/quietcool/radio/burst_transmitter.cpp
 
 .PHONY: all test test-adapter test-sanitized platform-include-check \
-	production-flags-check clean
+	production-flags-check clean FORCE
+
+# Every binary depends on FORCE: mtime-based staleness checks have been
+# OBSERVED scoring a mutation against a stale binary when the edit and the
+# previous link landed in the same one-second mtime granule (adversarial
+# round 7, opus). This repo's whole review discipline rests on "mutate it and
+# watch the test fail"; a stale-binary pass makes that instrument lie in
+# exactly the direction that blesses a broken change. An unconditional
+# rebuild costs seconds and makes the instrument honest.
+FORCE:
+
 all: $(TARGET)
 
-$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
+$(TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS) FORCE
 	@mkdir -p $(BUILD)
 	$(CXX) $(TEST_CXXFLAGS) $(INCLUDES) $(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
-$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS)
+$(SANITIZED_TARGET): $(CORE_SOURCES) $(TEST_SOURCES) $(HEADERS) FORCE
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(SANITIZE_FLAGS) $(INCLUDES) \
 		$(CORE_SOURCES) $(TEST_SOURCES) -o $@
 
 $(ADAPTER_TARGET): $(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) \
-		$(HEADERS) $(ADAPTER_HEADERS)
+		$(HEADERS) $(ADAPTER_HEADERS) FORCE
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -DQUIETCOOL_HOST_TEST $(ADAPTER_INCLUDES) \
 		$(CORE_SOURCES) $(ADAPTER_SOURCES) $(ADAPTER_TEST_SOURCES) -o $@

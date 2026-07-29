@@ -3497,5 +3497,252 @@ class PreviewRendererTest(unittest.TestCase):
             self.assertIn("legacy", str(candidates[1]))
 
 
+CPP_CONFIG = ROOT / "quietcool-cpp-lora32.yaml"
+
+_CPP_TIMER_ENTITY = "Fan Timer"
+
+# name -> the `kind:` key that performs the actual binding. Asserting the name
+# alone is not enough (adversarial round 1, opus + codex): swap two kind lines
+# between blocks and ESPHome validates, the firmware flashes, and TX Count
+# reports RX frames — a silently mislabelled counter, worse than a missing one.
+_CPP_RESTORED_DIAGNOSTICS = {
+    "Last TX Command": "last_tx_command",
+    "Last Valid RX Frame": "last_rx_frame",
+    "Last Confirmed Fan State": "last_confirmed_state",
+    "Fan Speed Capability": "speed_capability",
+    "Remote Sender ID": "remote_sender_id",
+    "TX Count": "tx_count",
+    "RX Valid Count": "rx_valid_count",
+    "RX Rejected Count": "rx_rejected_count",
+}
+
+
+def _strip_yaml_comments(text: str) -> str:
+    """Drop full-line comments so a deleted entity left behind as
+    `# name: "TX Count"` cannot satisfy a presence assertion."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+_CPP_TIMER_OPTIONS = ("None", "1 hour", "2 hours", "4 hours", "8 hours", "12 hours")
+
+
+def _entity_block(text: str, name: str) -> str:
+    """The single YAML list item declaring `name`.
+
+    Per-entity scoping is the whole point: a file-wide
+    assertIn("disabled_by_default: true", text) passes as long as SOME entity
+    is disabled, which is exactly the false green that let issue #28 through.
+    """
+    marker = f'name: "{name}"'
+    index = text.find(marker)
+    if index == -1:
+        # Fail as a missing declaration rather than raising ValueError out of a
+        # helper, which reads as a broken test instead of a caught regression.
+        raise AssertionError(f"{name} is not declared in {CPP_CONFIG.name}")
+    start = text.rindex("\n  - ", 0, index) + 1
+    nxt = text.find("\n  - ", index)
+    end = len(text) if nxt == -1 else nxt
+    return text[start:end]
+
+
+class CppConfigBindingTest(unittest.TestCase):
+    """Every entity the component can drive must be DECLARED in the shipped
+    C++ config.
+
+    This class exists because nothing else in this suite asserts anything about
+    quietcool-cpp-lora32.yaml — the other 147 tests all target the frozen
+    legacy config. That blind spot is precisely how issue #28 happened: the
+    Controller Fault sensor was implemented, unit-tested, adversarially reviewed
+    and attested, and still never reached the hardware, because no YAML line
+    declared it. An implementation without a binding is indistinguishable from
+    no implementation, so the binding gets tests of its own.
+
+    Scope note: these assert DECLARATION, not behavior. They cannot tell you the
+    entity works — only that it exists in the config the device is built from.
+    """
+
+    def setUp(self) -> None:
+        # Declarations are asserted against comment-STRIPPED text: a
+        # commented-out declaration is an absent declaration and must fail.
+        # The documentation tests use self.raw — documentation lives in
+        # comments by design.
+        self.raw = CPP_CONFIG.read_text()
+        self.text = _strip_yaml_comments(self.raw)
+
+    def test_every_restored_entity_is_declared(self) -> None:
+        for name in (_CPP_TIMER_ENTITY, *_CPP_RESTORED_DIAGNOSTICS):
+            with self.subTest(entity=name):
+                self.assertIn(f'name: "{name}"', self.text)
+
+    def test_every_restored_diagnostic_is_disabled_by_default(self) -> None:
+        # Indentation-anchored, not assertIn (round 12, codex): _entity_block
+        # slices between item markers, so a de-indented top-level
+        # `disabled_by_default: true` — which ESPHome rejects — still lands
+        # inside the slice and satisfied a substring check. The field is only
+        # a property of the entity at exactly the item's property indentation.
+        for name in _CPP_RESTORED_DIAGNOSTICS:
+            with self.subTest(entity=name):
+                self.assertRegex(
+                    _entity_block(self.text, name),
+                    r"(?m)^    disabled_by_default: true\s*$",
+                )
+
+    def test_every_restored_diagnostic_binds_its_own_kind(self) -> None:
+        # The kind key IS the binding; the name is only a label. Each entity's
+        # block must carry the quietcool platform, the controller, and exactly
+        # its own kind — so two blocks with swapped kinds fail by name.
+        # Line-anchored (round 2, codex): a substring assertIn("kind: tx_count")
+        # is satisfied by "kind: tx_count_typo", which ESPHome then rejects
+        # while every test here stayed green.
+        for name, kind in _CPP_RESTORED_DIAGNOSTICS.items():
+            with self.subTest(entity=name):
+                block = _entity_block(self.text, name)
+                # Exact-indentation anchors, same rationale as the
+                # disabled_by_default test above: `^\s*` accepted these lines
+                # at indentations where ESPHome does not read them.
+                self.assertRegex(block, r"(?m)^  - platform: quietcool\s*$")
+                self.assertRegex(
+                    block, r"(?m)^    controller_id: quietcool_controller\s*$"
+                )
+                self.assertRegex(block, rf"(?m)^    kind: {kind}\s*$")
+
+    def test_codegen_kind_maps_bind_each_kind_to_its_own_setter(self) -> None:
+        # One layer below the YAML (round 2, opus): swapping two values inside
+        # text_sensor.py's TEXT_SENSOR_SETTERS or sensor.py's SENSOR_KINDS
+        # compiles, validates and flashes — TX Count reporting RX frames again,
+        # the same issue-#28 shape the YAML tests were hardened against.
+        text_sensor_py = (ROOT / "components/quietcool/text_sensor.py").read_text()
+        for kind, setter in {
+            "command_status": "set_command_status_sensor",
+            "evidence_source": "set_evidence_source_sensor",
+            "last_tx_command": "set_last_tx_command_sensor",
+            "last_rx_frame": "set_last_rx_frame_sensor",
+            "last_confirmed_state": "set_last_confirmed_state_sensor",
+            "speed_capability": "set_speed_capability_sensor",
+            "remote_sender_id": "set_remote_sender_id_sensor",
+        }.items():
+            with self.subTest(kind=kind):
+                self.assertRegex(
+                    text_sensor_py, rf'"{kind}":\s*"{setter}"'
+                )
+        sensor_py = (ROOT / "components/quietcool/sensor.py").read_text()
+        for kind, setter in {
+            "timer_remaining": "set_timer_remaining_sensor",
+            "tx_count": "set_tx_count_sensor",
+            "rx_valid_count": "set_rx_valid_count_sensor",
+            "rx_rejected_count": "set_rx_rejected_count_sensor",
+        }.items():
+            with self.subTest(kind=kind):
+                self.assertRegex(sensor_py, rf'"{kind}":\s*\(\s*"{setter}"')
+
+    def test_the_timer_select_is_not_disabled_by_default(self) -> None:
+        # The diagnostics are opt-in; the control the feature exists for is not.
+        self.assertNotIn(
+            "disabled_by_default: true", _entity_block(self.text, _CPP_TIMER_ENTITY)
+        )
+
+    def test_every_restored_diagnostic_lives_under_its_own_section(self) -> None:
+        # Section map for ALL restored entities (round 5, codex): deleting a
+        # top-level text_sensor:/sensor: header folds its entities into the
+        # preceding section — ESPHome rejects that, but block-scoped
+        # assertions still passed for everything except Fan Timer.
+        sections = {
+            "text_sensor": (
+                "Last TX Command",
+                "Last Valid RX Frame",
+                "Last Confirmed Fan State",
+                "Fan Speed Capability",
+                "Remote Sender ID",
+            ),
+            "sensor": ("TX Count", "RX Valid Count", "RX Rejected Count"),
+        }
+        # Parity with the canonical list (round 6, opus): a ninth diagnostic
+        # added to _CPP_RESTORED_DIAGNOSTICS is picked up by every other test
+        # in this class automatically — this hand-written section map must
+        # fail loudly until the new entity is placed in a section, or it
+        # silently covers whatever its local literal happens to say.
+        self.assertEqual(
+            {name for names in sections.values() for name in names},
+            set(_CPP_RESTORED_DIAGNOSTICS),
+        )
+        for section_key, names in sections.items():
+            body = re.search(
+                rf"(?ms)^{section_key}:\n(.*?)(?=^\S|\Z)", self.text
+            )
+            self.assertIsNotNone(body, f"no top-level {section_key}: section")
+            for name in names:
+                with self.subTest(entity=name):
+                    self.assertIn(f'name: "{name}"', body.group(1))
+
+    def test_the_timer_select_lives_under_a_select_section(self) -> None:
+        # Section-aware, not just block-aware (round 4, codex): deleting the
+        # top-level `select:` header would fold Fan Timer into the preceding
+        # section — ESPHome rejects that, but every block-scoped assertion
+        # here would still pass. Find the top-level select: header and require
+        # the Fan Timer declaration to sit between it and the next top-level
+        # key.
+        section = re.search(
+            r"(?ms)^select:\n(.*?)(?=^\S|\Z)", self.text
+        )
+        self.assertIsNotNone(section, "no top-level select: section")
+        self.assertIn(f'name: "{_CPP_TIMER_ENTITY}"', section.group(1))
+
+    def test_the_timer_select_is_a_quietcool_platform_entity(self) -> None:
+        # Line-anchored like the diagnostics (round 3, codex), and
+        # exact-indentation anchored like them too (round 13, fable): `^\s*`
+        # accepted an over-indented property that PyYAML rejects — the whole
+        # class stayed green on a config ESPHome cannot build. The timer
+        # entity gets the same anchors the diagnostics got in wave 12.
+        block = _entity_block(self.text, _CPP_TIMER_ENTITY)
+        self.assertRegex(block, r"(?m)^  - platform: quietcool\s*$")
+        self.assertRegex(block, r"(?m)^    id: fan_timer_select\s*$")
+        self.assertRegex(
+            block, r"(?m)^    controller_id: quietcool_controller\s*$"
+        )
+        self.assertRegex(block, rf'(?m)^    name: "{_CPP_TIMER_ENTITY}"\s*$')
+
+    def test_the_timer_options_are_documented_where_they_are_declared(self) -> None:
+        # The option list itself lives in select.py (it must match the C++
+        # kTimerOptions ordinal), so the YAML cannot restate it without
+        # duplicating a source of truth. What the YAML must carry is the
+        # energizing warning next to the entity a user actually clicks.
+        header = self.raw.split("select:", 1)[0]
+        self.assertRegex(header, r"ENERGIZING")
+
+    def test_the_config_documents_off_versus_continuous(self) -> None:
+        # The distinction is counter-intuitive enough that a maintainer editing
+        # this file must meet it here, not only in the design doc. Asserted as
+        # meaning, not mere presence: a bare assertIn("Off", ...) would pass on
+        # any file mentioning the word anywhere.
+        self.assertRegex(self.raw, r"Off\b[^\n]*\bSTOPPED")
+        self.assertRegex(self.raw, r"Continuous\b[^\n]*\bRUNS")
+
+    def test_the_stale_no_timer_entity_note_is_gone(self) -> None:
+        # The header claimed "No Fan Timer select entity yet" for the whole life
+        # of the C++ track. Leaving it would make the file contradict itself.
+        self.assertNotIn("No Fan Timer select entity yet", self.raw)
+
+    def test_select_codegen_options_match_the_cpp_option_table(self) -> None:
+        # select.py's TIMER_OPTIONS index IS the TimerSelection ordinal, and
+        # kTimerOptions is indexed by that same ordinal. If the two lists drift,
+        # a user picking "4 hours" transmits some other duration.
+        python_options = (ROOT / "components/quietcool/select.py").read_text()
+        cpp_options = (
+            ROOT / "components/quietcool/esphome/timer_command.h"
+        ).read_text()
+        python_list = re.search(
+            r"TIMER_OPTIONS\s*=\s*\[([^\]]*)\]", python_options
+        ).group(1)
+        cpp_list = re.search(
+            r"kTimerOptions\[\]\s*=\s*\{([^}]*)\}", cpp_options
+        ).group(1)
+        self.assertEqual(
+            re.findall(r'"([^"]+)"', python_list),
+            re.findall(r'"([^"]+)"', cpp_list),
+        )
+        self.assertEqual(re.findall(r'"([^"]+)"', python_list), list(_CPP_TIMER_OPTIONS))
+
+
 if __name__ == "__main__":
     unittest.main()
