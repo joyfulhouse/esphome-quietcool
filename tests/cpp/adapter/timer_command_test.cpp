@@ -853,6 +853,46 @@ QC_TEST("timer_command", "a reconfirmation of the same program keeps the tighter
   QC_CHECK_EQ(press.speed().value(), Speed::Low);
 }
 
+QC_TEST("timer_command", "a local anchor replaces a looser observation bound") {
+  // Round 15 (opus): the LocallyAnchored arm's unconditional replacement is
+  // load-bearing and was unpinned — a keep-any-existing-bound mutant stayed
+  // suite-green. The journey: a 12h program observed at t=0 leaves the loose
+  // upper bound 12h; the user then commands HIGH+1h, anchoring the REAL
+  // deadline; a freshness invalidation leaves only the persisted bound. The
+  // anchor must have replaced the loose bound, or a press after the true
+  // expiry restarts the stopped fan at HIGH off the dead 12h figure.
+  TimerSelectCache cache;
+  ::quietcool::AuthoritySnapshot observed{};
+  observed.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours12),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours12;
+  programmed.observed_ms = 0;
+  observed.timer = programmed;
+  (void)timer_select_apply_snapshot(cache, observed, "");
+
+  auto anchored = snapshot_with_anchored(4000000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      400000, 2, std::nullopt, std::nullopt, 2};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  // Freshness invalidation: cache and bound persist, timer authority gone.
+  auto pending = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::LocalCommandPending);
+  (void)timer_select_apply_snapshot(cache, pending, "");
+
+  // Past the anchored deadline, far inside the dead 12h figure.
+  const auto press = timer_command_for_press(cache, pending, 4100000,
+                                             TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0x94);
+}
+
 QC_TEST("timer_command", "an oem frame after an expired estimate rebuilds over the dead bound") {
   // Round 14 (opus, MO6): the empty-prior-cache branch of the keep rule's
   // predicate decides this journey and was unpinned — a mutant keeping the
