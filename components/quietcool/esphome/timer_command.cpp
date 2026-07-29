@@ -198,6 +198,9 @@ std::optional<const char*> timer_select_apply_snapshot(
   // bound fan, issue #31), while the confirmed state obeys the reason-
   // discriminating rule above.
   cache.capability = authority.speed_capability;
+  // Captured before the update below: the ExternalStateTraffic arm must
+  // compare the frame against what the cache believed BEFORE taking it.
+  const auto previous_confirmed = cache.confirmed;
   cache.confirmed = confirmed_state_after(authority, cache.confirmed);
   // The expiry bound follows the timer authority when one is visible and
   // SURVIVES the unknown-timer variants (freshness); see its declaration.
@@ -235,7 +238,31 @@ std::optional<const char*> timer_select_apply_snapshot(
       // diagnostic carry no deadline. Only this reason: the other freshness
       // reasons claim no fan movement, and clearing on them is exactly the
       // near-expiry hole round 11 (codex) closed.
-      case ::quietcool::AuthorityLossReason::ExternalStateTraffic:
+      //
+      // ONLY when the frame's program DIFFERS from what the cache believed
+      // (round 13, opus, probe-proven): the classifier also raises
+      // ExternalPriorityState for frames that merely OBSERVE the program
+      // already running — an unsolicited self-report while no local window
+      // is open, or a query reply inside the 300 ms acceptance start. For
+      // those, since_ms is an observation time, not a start time, and the
+      // unconditional wave-12 rebuild pushed the bound LATE by however long
+      // the program had already run, discarding a correct locally anchored
+      // deadline — a post-expiry press then restarted the stopped fan at
+      // HIGH, the round-1/round-7 defect class. An identical-program frame
+      // with a live bound therefore KEEPS the tighter bound. Residual,
+      // chosen deliberately: an OEM re-press of the SAME program restarts
+      // the fan's real timer, and the kept bound is then too early — a
+      // press inside that window drops a running fan to LOW, the error this
+      // branch has consistently preferred over energizing a stopped fan at
+      // its old speed. Without any existing bound the rebuild proceeds even
+      // for an identical program: an upper bound is strictly better than
+      // none.
+      case ::quietcool::AuthorityLossReason::ExternalStateTraffic: {
+        const bool same_program =
+            previous_confirmed && unknown->last_diagnostic &&
+            previous_confirmed->canonical_byte() ==
+                unknown->last_diagnostic->canonical_byte();
+        if (same_program && cache.expiry_bound) break;
         cache.expiry_bound.reset();
         if (unknown->last_diagnostic) {
           if (const auto run_ms =
@@ -243,6 +270,7 @@ std::optional<const char*> timer_select_apply_snapshot(
             cache.expiry_bound = unknown->since_ms + *run_ms;
         }
         break;
+      }
       default:
         break;
     }

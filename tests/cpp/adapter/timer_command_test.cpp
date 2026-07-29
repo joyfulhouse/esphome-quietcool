@@ -759,6 +759,63 @@ QC_TEST("timer_command", "an oem continuous frame clears the expiry bound") {
   QC_CHECK_EQ(press.outbound_command_byte(), 0xBF);
 }
 
+QC_TEST("timer_command", "an observation of the running program keeps the tighter bound") {
+  // Round 13 (opus, probe-proven): ExternalPriorityState is also raised for
+  // frames that merely OBSERVE the program already running (an unsolicited
+  // self-report while idle; a query reply inside the 300 ms acceptance
+  // start). For those, since_ms is an observation time — rebuilding pushed
+  // the bound LATE by the elapsed run and discarded the correct locally
+  // anchored deadline, so a post-expiry press restarted the stopped fan at
+  // HIGH. An identical-program frame must keep the tighter existing bound.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  // t=30min: the fan self-reports the SAME still-running HIGH+1h program.
+  auto oem = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic);
+  auto& unknown = std::get<::quietcool::UnknownStateAuthority>(oem.state);
+  unknown.since_ms = 1800000;
+  unknown.last_diagnostic = FanState::command(Speed::High, Duration::Hours1);
+  (void)timer_select_apply_snapshot(cache, oem, "");
+
+  // t=66min: past the REAL deadline. Presumed stopped, LOW rule — not a
+  // HIGH restart off a bound inflated to 1800000 + 1h.
+  const auto press =
+      timer_command_for_press(cache, oem, 4000000, TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0x94);
+  QC_CHECK_EQ(press.speed().value(), Speed::Low);
+}
+
+QC_TEST("timer_command", "an identical program with no bound still rebuilds it") {
+  // The keep rule applies only when there is a tighter bound to keep: with
+  // none, the frame's own upper bound (since_ms + run) is strictly better
+  // than never presuming expiry at all.
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  auto oem = snapshot_with_unknown(
+      ::quietcool::AuthorityLossReason::ExternalStateTraffic);
+  auto& unknown = std::get<::quietcool::UnknownStateAuthority>(oem.state);
+  unknown.since_ms = 1800000;
+  unknown.last_diagnostic = FanState::command(Speed::High, Duration::Hours1);
+  (void)timer_select_apply_snapshot(cache, oem, "");
+
+  // Inside the rebuilt bound: composes from the observed HIGH.
+  const auto press =
+      timer_command_for_press(cache, oem, 4000000, TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xB4);
+  // Past it (1800000 + 1h): presumed stopped, LOW rule.
+  const auto late = timer_command_for_press(cache, oem, 5400001,
+                                            TimerSelection::Hours4);
+  QC_CHECK_EQ(late.outbound_command_byte(), 0x94);
+}
+
 QC_TEST("timer_command", "a continuous programmed duration clears the expiry bound") {
   // Round 12 (opus): this arm was defensive and unbound — the core's promote
   // routes Off/Continuous to NoActiveTimer today, but nothing pinned the arm
