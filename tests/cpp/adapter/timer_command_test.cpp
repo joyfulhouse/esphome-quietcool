@@ -816,6 +816,109 @@ QC_TEST("timer_command", "an identical program with no bound still rebuilds it")
   QC_CHECK_EQ(late.outbound_command_byte(), 0x94);
 }
 
+QC_TEST("timer_command", "a reconfirmation of the same program keeps the tighter bound") {
+  // Round 14 (codex): after a holdoff, the recovery-query consensus
+  // re-confirms the UNCHANGED program as ProgrammedDuration with
+  // observed_ms = re-confirmation time. Rebuilding from that observation
+  // pushed the bound late by the elapsed run and discarded the anchored
+  // deadline the wave-13 arm had just preserved — the same defect one
+  // variant over.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  // t=30min: query consensus re-confirms the same still-running HIGH+1h.
+  ::quietcool::AuthoritySnapshot reconfirmed{};
+  reconfirmed.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      1800000, 2, std::nullopt, std::nullopt, 2};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours1;
+  programmed.observed_ms = 1800000;
+  reconfirmed.timer = programmed;
+  (void)timer_select_apply_snapshot(cache, reconfirmed, "");
+
+  // t=66min: past the REAL deadline (60min), inside the inflated one
+  // (90min). Presumed stopped, LOW rule.
+  const auto press = timer_command_for_press(cache, reconfirmed, 4000000,
+                                             TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0x94);
+  QC_CHECK_EQ(press.speed().value(), Speed::Low);
+}
+
+QC_TEST("timer_command", "a same-program reconfirmation with no bound still sets one") {
+  // The keep rule applies only when there is a bound to keep: with none,
+  // the observation's own upper bound must land, or a later freshness
+  // invalidation leaves no deadline at all and a post-expiry press
+  // composes HIGH. (Pressed through an unknown-timer snapshot so the
+  // persisted bound — not the snapshot's own programmed variant — is what
+  // fires.)
+  TimerSelectCache cache;
+  cache.confirmed = FanState::command(Speed::High, Duration::Hours1);
+  cache.capability = ::quietcool::SpeedCapability::Three;
+  ::quietcool::AuthoritySnapshot reconfirmed{};
+  reconfirmed.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      1800000, 2, std::nullopt, std::nullopt, 2};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours1;
+  programmed.observed_ms = 1800000;
+  reconfirmed.timer = programmed;
+  (void)timer_select_apply_snapshot(cache, reconfirmed, "");
+
+  ::quietcool::AuthoritySnapshot invalidated{};
+  invalidated.state = reconfirmed.state;
+  invalidated.timer =
+      ::quietcool::UnknownTimerAuthority{::quietcool::TimerLossReason::Unknown, 0};
+  (void)timer_select_apply_snapshot(cache, invalidated, "");
+
+  // Past observed + 1h: presumed stopped via the persisted bound.
+  const auto press = timer_command_for_press(cache, invalidated, 5400001,
+                                             TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0x94);
+}
+
+QC_TEST("timer_command", "a reconfirmation of a different program rebuilds the bound") {
+  // The keep rule must not outlive the program it bounds: a NEW program
+  // (here 2 hours) replaces the dead deadline with its own upper bound.
+  TimerSelectCache cache;
+  auto anchored = snapshot_with_anchored(3600000);
+  anchored.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours1),
+      ::quietcool::EvidenceSource::PostCommandConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      0, 2, std::nullopt, std::nullopt, 1};
+  (void)timer_select_apply_snapshot(cache, anchored, "");
+
+  ::quietcool::AuthoritySnapshot reconfirmed{};
+  reconfirmed.state = ::quietcool::ConfirmedStateAuthority{
+      FanState::command(Speed::High, Duration::Hours2),
+      ::quietcool::EvidenceSource::ManualQueryConsensus,
+      ::quietcool::EvidenceConfidence::ExactBackedConsensus,
+      1800000, 2, std::nullopt, std::nullopt, 2};
+  ::quietcool::ProgrammedDurationAuthority programmed{};
+  programmed.duration = ::quietcool::Duration::Hours2;
+  programmed.observed_ms = 1800000;
+  reconfirmed.timer = programmed;
+  (void)timer_select_apply_snapshot(cache, reconfirmed, "");
+
+  // t=66min: past the DEAD 1h deadline, inside the live 2h program's bound
+  // (observed 30min + 2h = 2h30min). Composes from confirmed HIGH.
+  const auto press = timer_command_for_press(cache, reconfirmed, 4000000,
+                                             TimerSelection::Hours4);
+  QC_CHECK_EQ(press.outbound_command_byte(), 0xB4);
+  QC_CHECK_EQ(press.speed().value(), Speed::High);
+}
+
 QC_TEST("timer_command", "a continuous programmed duration clears the expiry bound") {
   // Round 12 (opus): this arm was defensive and unbound — the core's promote
   // routes Off/Continuous to NoActiveTimer today, but nothing pinned the arm

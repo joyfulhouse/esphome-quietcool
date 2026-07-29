@@ -211,10 +211,26 @@ std::optional<const char*> timer_select_apply_snapshot(
   } else if (const auto* programmed =
                  std::get_if<::quietcool::ProgrammedDurationAuthority>(
                      &authority.timer)) {
-    if (const auto run_ms = duration_run_ms(programmed->duration))
-      cache.expiry_bound = programmed->observed_ms + *run_ms;
-    else
+    if (const auto run_ms = duration_run_ms(programmed->duration)) {
+      // Same-program keep rule as the ExternalStateTraffic arm below, for
+      // the same reason (round 14, codex): a recovery-query consensus after
+      // a holdoff re-confirms the UNCHANGED program as ProgrammedDuration
+      // with observed_ms = re-confirmation time — an observation, not a
+      // start. Unconditionally rebuilding pushed the bound late by the
+      // elapsed run and discarded the tighter locally anchored deadline the
+      // wave-13 arm had just preserved, reopening the HIGH-restart-of-a-
+      // stopped-fan window one variant over. Same residual, same choice: a
+      // genuine same-program re-press keeps a too-early bound and a press
+      // drops a running fan to LOW, the preferred error.
+      const bool same_program =
+          previous_confirmed && cache.confirmed &&
+          previous_confirmed->canonical_byte() ==
+              cache.confirmed->canonical_byte();
+      if (!(same_program && cache.expiry_bound))
+        cache.expiry_bound = programmed->observed_ms + *run_ms;
+    } else {
       cache.expiry_bound.reset();
+    }
   } else if (std::get_if<::quietcool::NoActiveTimerAuthority>(&authority.timer)) {
     cache.expiry_bound.reset();
   }
