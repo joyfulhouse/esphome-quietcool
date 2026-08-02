@@ -41,7 +41,14 @@ void QuietCoolComponent::setup() {
   // core will treat as valid too. See provisioned_sender_'s declaration.
   provisioned_sender_ = restored.sender;
   apply_effects(core_.restore(restored, now_ms), now_ms);
+  // Re-checked between the core entries and again after (issue-35 round 1,
+  // codex): a degradation raised while draining restore's effects otherwise
+  // has setup() itself re-enter the broken core with on_radio_ready — the
+  // exact re-entry the issue-#23 entry guard exists to prevent, reachable
+  // only through a queue-invariant breach but two lines to close.
+  if (degraded_) return;
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
+  if (degraded_) return;
   // Diagnostics publish only AFTER the core is fully restored (round 1,
   // codex): publish_state can fire a synchronous on_value automation, and one
   // that calls Forget between our cache write and core_.restore() would clear
