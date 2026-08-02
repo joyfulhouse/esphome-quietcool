@@ -152,7 +152,14 @@ Three things are worth spelling out, and the table claims nothing beyond them:
 - **Home Assistant native API** — a proper `fan` entity plus diagnostics: the
   `*_Known` evidence flags, atomic `Fan Confirmed Off`, `Command Confirmation
   Status`, `Fan Evidence Source`, a `Controller Fault` `problem` sensor that
-  flags a degraded (reboot-required) controller, and battery voltage/level.
+  reads `off` from boot and latches `on` for a degraded (reboot-required)
+  controller, and battery voltage/level. Eight RF diagnostics ship disabled by
+  default (enable per-entity in HA): `Last TX Command`, `Last Valid RX Frame`,
+  `Last Confirmed Fan State`, `Fan Speed Capability`, `Remote Sender ID`, and
+  `TX` / `RX Valid` / `RX Rejected` counters — the rejected counter doubles as
+  a live RF-interference meter. An OEM-set timer that expires unobserved now
+  invalidates its stale display at the observation-time upper bound and
+  re-queries, instead of showing the old program forever.
 - **Bi-directional diagnostics, query-confirmed state** — the controller also
   *listens* and records strictly validated OEM traffic without echoing it over
   RF. A passively heard OEM command cancels conflicting local work and is
