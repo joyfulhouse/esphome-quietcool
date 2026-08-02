@@ -515,11 +515,11 @@ QC_TEST("timer_command", "a press at the exact anchored deadline is already due"
 
 QC_TEST("timer_command", "an expired programmed duration takes the stopped fan rule") {
   // Round 7 (opus, probe-proven MEDIUM): an OEM-remote-set or boot-query-
-  // observed timer lands in ProgrammedDurationAuthority, which carries no
-  // deadline anywhere in the system — the core cannot estimate its expiry
-  // (start time unknown), so EstimatedTimerDeadline never fires for it and
-  // the fan stops on its own with nothing noticing. The observation time
-  // bounds the expiry from above: a Hours4 timer observed at t0 cannot still
+  // observed timer lands in ProgrammedDurationAuthority. When this test was
+  // written the core carried no deadline for it; issue #35 added one at the
+  // same observation-time upper bound, and this press-path rule remains for
+  // presses that race the poll. The observation time bounds the expiry from
+  // above: a Hours4 timer observed at t0 cannot still
   // be running at t0+4h, so a press after that composes from the stopped-fan
   // LOW rule rather than restarting the stopped fan at its old speed.
   TimerSelectCache cache;

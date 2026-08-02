@@ -129,9 +129,9 @@ std::optional<const char*> timer_select_apply_snapshot(
 //   - a locally anchored deadline that has passed — poll() processes it, but
 //     a press can land in the tick where it is due yet unprocessed;
 //   - a ProgrammedDurationAuthority whose observation time plus duration has
-//     passed — this variant (an OEM-set or boot-query-observed timer) carries
-//     no deadline anywhere in the system, so the core NEVER notices its
-//     expiry; the observation time bounds it from above.
+//     passed — the core now fires EstimatedTimerDeadline for this variant at
+//     the same observation-time upper bound (issue #35), but a press can
+//     still race the poll that would process it, so the rule stays here too.
 // The cache is taken by reference and cache.confirmed is CLEARED when the
 // rule fires: the press's own request_state invalidates the timer authority,
 // destroying the evidence this presumption is derived from, so without
