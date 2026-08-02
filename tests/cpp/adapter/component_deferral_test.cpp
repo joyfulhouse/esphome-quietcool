@@ -509,6 +509,45 @@ QC_TEST("adapter", "normal startup still completes with the setup guard") {
 }
 
 }  // namespace
+// Degrades the controller from INSIDE setup(): publish_remote_sender_id runs
+// before the healthy-fault publish, and a synchronous automation there can
+// reach any public entry point — here, publisher registrations past the
+// fan-out capacity, the documented degrade() path.
+class DegradingSenderIdSensor final : public text_sensor::TextSensor {
+ public:
+  QuietCoolComponent* component{nullptr};
+  AuthorityPublisher* spares{nullptr};
+  void publish_state(const std::string& value) override {
+    text_sensor::TextSensor::publish_state(value);
+    if (component != nullptr)
+      for (int i = 0; i < 5; ++i)
+        component->add_authority_publisher(&spares[i]);
+  }
+};
+
+QC_TEST("adapter", "a mid-setup degradation is not overwritten by the healthy publish") {
+  // Issue-35 round 1 (fable): unguarded, the healthy publish ran AFTER a
+  // degradation raised inside setup() and became the fault sensor's final
+  // word — a terminally dead controller reading "no fault" forever, strictly
+  // worse than the pre-change Unknown.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  class NullPublisher final : public AuthorityPublisher {
+    void publish_authority(const ::quietcool::AuthoritySnapshot&) override {}
+  };
+  NullPublisher spares[5];
+  DegradingSenderIdSensor sender_id;
+  sender_id.component = &component;
+  sender_id.spares = spares;
+  binary_sensor::BinarySensor fault;
+  component.set_controller_fault_sensor(&fault);
+  component.set_remote_sender_id_sensor(&sender_id);
+  component.setup();
+  QC_CHECK(!fault.published().empty());
+  QC_CHECK_EQ(fault.published().back(), true);
+}
+
 QC_TEST("adapter", "setup publishes the healthy fault state") {
   // Issue #35 batch: the fault latch's only other writer is the degradation
   // path, so an unfaulted boot read Unknown forever in HA — a problem-class

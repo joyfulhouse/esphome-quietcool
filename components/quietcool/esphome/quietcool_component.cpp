@@ -56,10 +56,13 @@ void QuietCoolComponent::setup() {
   // counters publish their zeros: its only other writer is the degradation
   // path, so an unfaulted boot otherwise reads Unknown forever and a
   // problem-class sensor cannot say "no problem" (issue #35 batch, observed
-  // on both production units). Safe at this point: degraded_ was checked at
-  // entry, and a synchronous on_state automation here goes through the same
-  // guarded public entry points as any other post-restore callback.
-  events_.publish_controller_healthy();
+  // on both production units). Re-checked here, NOT relying on the entry
+  // guard (issue-35 round 1, fable): the apply_effects pair and the sender-id
+  // publish above can degrade() mid-setup — a queue-invariant breach or a
+  // pathological synchronous automation — and an unguarded healthy publish
+  // would then OVERWRITE the genuine fault as the sensor's final word, a
+  // terminally dead controller reading "no fault" forever.
+  if (!degraded_) events_.publish_controller_healthy();
   if (tx_count_sensor_ != nullptr) tx_count_sensor_->publish_state(tx_count_);
   if (rx_valid_count_sensor_ != nullptr)
     rx_valid_count_sensor_->publish_state(rx_valid_count_);

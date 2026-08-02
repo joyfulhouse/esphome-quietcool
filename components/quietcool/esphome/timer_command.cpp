@@ -311,10 +311,10 @@ std::optional<const char*> timer_select_apply_snapshot(
   } else if (const auto* programmed =
                  std::get_if<::quietcool::ProgrammedDurationAuthority>(
                      &authority.timer)) {
-    // The core cannot estimate this variant's expiry (start time unknown), so
-    // it never fires EstimatedTimerDeadline for it — but the OBSERVATION time
-    // bounds the expiry from above: a Hours4 timer observed at t0 cannot
-    // still be running at t0+4h (round 7, opus, probe-proven).
+    // The core now fires EstimatedTimerDeadline for this variant too, at the
+    // same observation-time upper bound (issue #35) — this press-path check
+    // remains for presses that race the poll: a Hours4 timer observed at t0
+    // cannot still be running at t0+4h (round 7, opus, probe-proven).
     if (const auto run_ms = duration_run_ms(programmed->duration))
       timer_ran_out = now_ms >= programmed->observed_ms + *run_ms;
   }
