@@ -137,6 +137,10 @@ class AuthorityStore final {
   void record_diagnostic(FanState state);
   TimerExpiryDecision timer_estimate_expired(MonotonicMs now_ms);
   std::optional<MonotonicMs> timer_deadline() const;
+  // Cheap staleness probe for the adapter's delivery re-checks: reading the
+  // monotonic revision must not require constructing a full CoreSnapshot
+  // (issue #35; ~480 B per construction, twice per delivery, per-tick channel).
+  std::uint64_t revision() const { return revision_; }
   void restore_hint(const RestorableState& restored, MonotonicMs now_ms);
  private:
   void set_unknown(AuthorityLossReason reason, TimerLossReason timer_reason,

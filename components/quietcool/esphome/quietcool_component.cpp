@@ -52,6 +52,14 @@ void QuietCoolComponent::setup() {
   // because a counter that never publishes reads as Unknown forever on a
   // quiet-RF boot rather than as the true zero.
   publish_remote_sender_id();
+  // The fault latch publishes its healthy state for the same reason the
+  // counters publish their zeros: its only other writer is the degradation
+  // path, so an unfaulted boot otherwise reads Unknown forever and a
+  // problem-class sensor cannot say "no problem" (issue #35 batch, observed
+  // on both production units). Safe at this point: degraded_ was checked at
+  // entry, and a synchronous on_state automation here goes through the same
+  // guarded public entry points as any other post-restore callback.
+  events_.publish_controller_healthy();
   if (tx_count_sensor_ != nullptr) tx_count_sensor_->publish_state(tx_count_);
   if (rx_valid_count_sensor_ != nullptr)
     rx_valid_count_sensor_->publish_state(rx_valid_count_);
@@ -476,7 +484,7 @@ void QuietCoolComponent::deliver_authority(
   // store's monotonic revision past the snapshot in hand — a delivered
   // revision ahead of the core is unconstructible in production, and != would
   // make the test seam's crafted snapshots indistinguishable from staleness.
-  if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
+  if (core_.authority_revision() > authority.revision) return;
   events_.publish_authority(authority, now_ms);
   // Re-checked between 2 and 3 as well: a SINK automation can command just
   // like a publisher's, and the stale tail it would leave is worse — a
@@ -486,7 +494,7 @@ void QuietCoolComponent::deliver_authority(
   // itself is accepted: the remaining sink publications are the Known flags
   // and status text, no press composes from them, and the reentrant batch's
   // post-drain delivery corrects them in the same loop pass.
-  if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
+  if (core_.authority_revision() > authority.revision) return;
   publish_authority_diagnostics(authority);
 }
 

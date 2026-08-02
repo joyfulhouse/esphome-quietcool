@@ -205,6 +205,10 @@ void EspHomeEventSink::publish_authority(
   if (!command_status_published_) publish_command_status("idle");
 }
 
+void EspHomeEventSink::publish_controller_healthy() {
+  if (controller_fault_ != nullptr) controller_fault_->publish_state(false);
+}
+
 void EspHomeEventSink::publish_controller_failed() {
   if (controller_fault_ != nullptr) controller_fault_->publish_state(true);
   if (state_known_ != nullptr) state_known_->publish_state(false);

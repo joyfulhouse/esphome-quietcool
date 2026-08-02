@@ -159,8 +159,37 @@ TimerExpiryDecision AuthorityStore::timer_estimate_expired(MonotonicMs now_ms) {
 }
 
 std::optional<MonotonicMs> AuthorityStore::timer_deadline() const {
-  const auto* local = std::get_if<LocallyAnchoredTimerAuthority>(&timer_);
-  return local ? std::optional<MonotonicMs>(local->expiry_ms) : std::nullopt;
+  if (const auto* local = std::get_if<LocallyAnchoredTimerAuthority>(&timer_))
+    return local->expiry_ms;
+  // A programmed duration's start time is unknown, but the OBSERVATION time
+  // bounds its expiry from above: a Hours4 program observed at t0 cannot
+  // still be running at t0+4h. Firing the estimated deadline at that upper
+  // bound invalidates the stale display and arms the recovery query that
+  // re-confirms the true state — the display half of the programmed-duration
+  // gap whose energizing half the entity layer closed with the same upper
+  // bound (issue #35; the entity-side rule is timer_command.cpp's
+  // duration_run_ms). The bound errs only LATE, never early: an early firing
+  // would presume a running fan stopped, the disfavored direction.
+  if (const auto* programmed =
+          std::get_if<ProgrammedDurationAuthority>(&timer_)) {
+    switch (programmed->duration) {
+      case Duration::Hours1:
+      case Duration::Hours2:
+      case Duration::Hours4:
+      case Duration::Hours8:
+      case Duration::Hours12:
+        // The timed enumerators' values ARE their hour counts (fan_state.h).
+        return saturating_add(
+            programmed->observed_ms,
+            static_cast<MonotonicMs>(
+                static_cast<std::uint8_t>(programmed->duration)) *
+                3600000ULL);
+      case Duration::Off:
+      case Duration::Continuous:
+        break;
+    }
+  }
+  return std::nullopt;
 }
 
 void AuthorityStore::restore_hint(const RestorableState& restored,

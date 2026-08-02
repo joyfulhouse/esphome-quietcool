@@ -509,4 +509,19 @@ QC_TEST("adapter", "normal startup still completes with the setup guard") {
 }
 
 }  // namespace
+QC_TEST("adapter", "setup publishes the healthy fault state") {
+  // Issue #35 batch: the fault latch's only other writer is the degradation
+  // path, so an unfaulted boot read Unknown forever in HA — a problem-class
+  // sensor that could not say "no problem" (observed on both production
+  // units). Setup now publishes false, mirroring the counters' initial zeros.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  binary_sensor::BinarySensor fault;
+  component.set_controller_fault_sensor(&fault);
+  component.setup();
+  QC_CHECK(!fault.published().empty());
+  QC_CHECK_EQ(fault.published().front(), false);
+}
+
 }  // namespace esphome::quietcool

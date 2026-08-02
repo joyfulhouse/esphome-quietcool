@@ -254,6 +254,8 @@ class ConfirmationCore final {
   CoreEffects on_radio_recovered(MonotonicMs now_ms);
   CoreEffects poll(MonotonicMs now_ms);
   CoreSnapshot snapshot(MonotonicMs now_ms) const;
+  // The authority store's monotonic revision, without a snapshot (issue #35).
+  std::uint64_t authority_revision() const { return authority_.revision(); }
   static StateContext context_for_test(CoordinatorState state);
   static bool context_matches_state(CoordinatorState state,
                                     const StateContext& context);
