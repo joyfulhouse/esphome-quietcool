@@ -48,8 +48,10 @@ void QuietCoolComponent::setup() {
   // drain, so on_radio_ready's effects would never apply (round 2, opus:
   // deleting the first return alone is an equivalent mutant) — this is
   // defense in depth for a future where that stops being harmless. The
-  // second return IS observable and pinned: the restore-drain degradation
-  // test fails without it.
+  // PAIR is pinned: the restore-drain degradation test fails if both
+  // returns are removed (M6), while either alone is an equivalent mutant —
+  // whichever survives catches the drain-window degradation (round 3,
+  // fable, probe-proven both ways).
   if (degraded_) return;
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
   if (degraded_) return;
