@@ -25,49 +25,57 @@ minutes, most of it waiting for the first compile.
   ESPHome ≥ 2025.11)
 - Home Assistant with the ESPHome integration
 
-## 1. Get the code and install ESPHome
+## 1. Install from the ESPHome Device Builder (recommended)
+
+You do **not** clone this repo to use it. The component is consumed like any
+other ESPHome external component, from your existing ESPHome Device Builder
+(the Home Assistant add-on or a standalone dashboard):
+
+1. In the Builder, create a **new device** for your board (TTGO LoRa32 V2.1).
+2. Replace the generated config with the shape of
+   [`quietcool-cpp-example.yaml`](quietcool-cpp-example.yaml) — board, radio
+   and entity blocks verbatim — but source the component from GitHub instead
+   of a local path:
+
+   ```yaml
+   external_components:
+     - source: github://joyfulhouse/esphome-quietcool@v0.2.0
+       components: [quietcool]
+   ```
+
+   (Pin a release tag. `@main` tracks development.) Keep the example's
+   `esp32:` block exactly: **esp-idf with `loop_task_stack_size: 16384` is
+   REQUIRED** — codegen rejects anything less, because the Arduino default
+   stack crash-looped a production controller. No `esphome: includes:` bridge
+   is needed for the GitHub source; that bridge exists only for this repo's
+   own local-path builds.
+3. Add your Wi-Fi / API / OTA credentials the normal Builder way (its managed
+   `secrets.yaml`), then **Install → Wirelessly / Plug into this computer**.
+   Antenna on first. Later updates arrive like any other ESPHome device:
+   the Builder shows *Update* and rebuilds from your config.
+
+The Heltec/HiLetgo **V3 (SX1262)** board works the same way — use the SX1262
+radio block shown at the bottom of the example config.
+
+## 2. Developer install (from a checkout)
+
+Only for working **on** the component itself — the repo's own configs build
+from the local tree and carry the maintainers' deploy assumptions:
 
 ```bash
 git clone https://github.com/joyfulhouse/esphome-quietcool.git
 cd esphome-quietcool
 uv venv .venv && uv pip install --python .venv/bin/python esphome
+cp secrets.yaml.example secrets.yaml   # edit Wi-Fi + keys; gitignored
+openssl rand -base64 32                # -> quietcool_lora32_api_key
+.venv/bin/esphome run quietcool-cpp-lora32.yaml   # USB first; OTA later
 ```
 
-## 2. Create your secrets
-
-```bash
-cp secrets.yaml.example secrets.yaml
-```
-
-Edit `secrets.yaml` with your Wi-Fi credentials, and replace the placeholder
-API key with a real one:
-
-```bash
-openssl rand -base64 32   # paste the output as quietcool_lora32_api_key
-```
-
-`secrets.yaml` is gitignored; nothing sensitive lives in the config itself.
-
-## 3. Flash over USB
-
-Antenna on first. Then flash the **C++ core build** — the maintained, primary
-firmware for the TTGO LoRa32 V2.1 (SX1278):
-
-```bash
-.venv/bin/esphome run quietcool-cpp-lora32.yaml   # TTGO LoRa32 V2.1 (SX1278)
-```
-
-The Heltec/HiLetgo **V3 (SX1262)** board has no C++ build yet, so it runs the
-**legacy YAML build** (`.venv/bin/esphome run legacy/quietcool-lora-v3.yaml`,
-after also copying your secrets there: `cp secrets.yaml legacy/secrets.yaml`) —
-whose pairing differs (two presses, on-OLED prompt); see the "legacy YAML
-build" sections in the
-[README](README.md#learn-mode--porting-to-your-own-fan) and
-[legacy/README.md](legacy/README.md). The rest of this guide describes the C++
-build.
-
-Pick your serial port when prompted. The first compile takes a few minutes;
-every later update can go over the air (same command, choose OTA).
+The legacy YAML build for the V3 board lives under `legacy/`
+(`.venv/bin/esphome run legacy/quietcool-lora-v3.yaml`, plus
+`cp secrets.yaml legacy/secrets.yaml`); its pairing differs — see
+[legacy/README.md](legacy/README.md). The rest of this guide describes the
+C++ build, whichever way you installed it.
 
 The firmware **never sends a fan command unless you ask it to** — a command
 (anything that could change the fan) originates only from an explicit control
@@ -79,7 +87,7 @@ re-establish confirmed state. A status query cannot start the fan. So the radio
 can be briefly live right after power-on: keep the antenna connected and observe
 the normal whole-house-fan safety precautions while flashing.
 
-## 4. Adopt in Home Assistant
+## 3. Adopt in Home Assistant
 
 Home Assistant should auto-discover the device (Settings → Devices & Services
 → ESPHome → *Configure*). Enter the API encryption key from your
@@ -89,7 +97,7 @@ Home Assistant should auto-discover the device (Settings → Devices & Services
 > manually with the device's IP address. On segmented networks, give the board
 > a DHCP reservation so HA can always reach it.
 
-## 5. Pair with your fan (learn mode)
+## 4. Pair with your fan (learn mode)
 
 The firmware ships unprovisioned (`quietcool_sender_id: "0"`) — no sender ID is
 hard-coded. Unlike the legacy build, the C++ build does **not** auto-open a learn
@@ -136,7 +144,7 @@ a provisioned unit could previously open a window in which its binding could be
 replaced by whichever lone fan happened to transmit. Full details are in the
 [README's learn-mode section](README.md#learn-mode--porting-to-your-own-fan).
 
-## 6. Try it
+## 5. Try it
 
 - In HA, turn **QuietCool Fan** on and pick a speed. Until the fan has proved
   how many speeds it has, the entity lists three but **Medium is unreachable** —
@@ -185,7 +193,7 @@ replaced by whichever lone fan happened to transmit. Full details are in the
   `Timer State Known`); a passively heard report showing an active timer has
   unknown age and cannot authorize a countdown.
 
-## 7. Optional: temperatures on the OLED
+## 6. Optional: temperatures on the OLED
 
 The display's indoor / outdoor / attic readouts come from three Home Assistant
 entities, configurable **without reflashing**. Create three template sensor
@@ -204,7 +212,7 @@ unavailable sources render as `--`; they can never affect the fan. (You can
 also point the `display_*_entity` substitutions directly at existing sensors
 at compile time — see [docs/deployment.md](docs/deployment.md).)
 
-## 8. Optional: a second fan
+## 7. Optional: a second fan
 
 Create a small wrapper YAML that overrides the identity substitutions and
 includes the base config as a package, add its secrets, flash, and let it
