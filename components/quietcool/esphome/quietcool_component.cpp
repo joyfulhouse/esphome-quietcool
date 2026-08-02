@@ -43,9 +43,13 @@ void QuietCoolComponent::setup() {
   apply_effects(core_.restore(restored, now_ms), now_ms);
   // Re-checked between the core entries and again after (issue-35 round 1,
   // codex): a degradation raised while draining restore's effects otherwise
-  // has setup() itself re-enter the broken core with on_radio_ready — the
-  // exact re-entry the issue-#23 entry guard exists to prevent, reachable
-  // only through a queue-invariant breach but two lines to close.
+  // has setup() make a sequential SECOND call into a core already declared
+  // terminally broken. No observable consequence today — degrade() halts the
+  // drain, so on_radio_ready's effects would never apply (round 2, opus:
+  // deleting the first return alone is an equivalent mutant) — this is
+  // defense in depth for a future where that stops being harmless. The
+  // second return IS observable and pinned: the restore-drain degradation
+  // test fails without it.
   if (degraded_) return;
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
   if (degraded_) return;
@@ -64,11 +68,12 @@ void QuietCoolComponent::setup() {
   // path, so an unfaulted boot otherwise reads Unknown forever and a
   // problem-class sensor cannot say "no problem" (issue #35 batch, observed
   // on both production units). Re-checked here, NOT relying on the entry
-  // guard (issue-35 round 1, fable): the apply_effects pair and the sender-id
-  // publish above can degrade() mid-setup — a queue-invariant breach or a
-  // pathological synchronous automation — and an unguarded healthy publish
-  // would then OVERWRITE the genuine fault as the sensor's final word, a
-  // terminally dead controller reading "no fault" forever.
+  // guard (issue-35 round 1, fable): the sender-id publish above is the one
+  // remaining degrade() route past the bail-outs (round 2, opus corrected
+  // this comment — the apply_effects pair can no longer reach this line),
+  // and an unguarded healthy publish would then OVERWRITE the genuine fault
+  // as the sensor's final word, a terminally dead controller reading
+  // "no fault" forever.
   if (!degraded_) events_.publish_controller_healthy();
   if (tx_count_sensor_ != nullptr) tx_count_sensor_->publish_state(tx_count_);
   if (rx_valid_count_sensor_ != nullptr)

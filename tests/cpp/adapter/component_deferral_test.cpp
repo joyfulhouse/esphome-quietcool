@@ -508,7 +508,6 @@ QC_TEST("adapter", "normal startup still completes with the setup guard") {
   QC_CHECK(!harness.radio().packets().empty());
 }
 
-}  // namespace
 // Degrades the controller from INSIDE setup(): publish_remote_sender_id runs
 // before the healthy-fault publish, and a synchronous automation there can
 // reach any public entry point — here, publisher registrations past the
@@ -524,6 +523,47 @@ class DegradingSenderIdSensor final : public text_sensor::TextSensor {
         component->add_authority_publisher(&spares[i]);
   }
 };
+
+// Degrades from INSIDE the restore drain: registered before setup(), this
+// publisher floods registrations past capacity on its FIRST delivery, which
+// runs while apply_effects(core_.restore(...)) is still on the stack — a
+// strictly earlier window than the sender-id route below.
+class OverflowingPublisher final : public AuthorityPublisher {
+ public:
+  QuietCoolComponent* component{nullptr};
+  AuthorityPublisher* spares{nullptr};
+  void publish_authority(const ::quietcool::AuthoritySnapshot&) override {
+    if (component != nullptr)
+      for (int i = 0; i < 5; ++i)
+        component->add_authority_publisher(&spares[i]);
+  }
+};
+
+QC_TEST("adapter", "a restore-drain degradation stops setup before any publish") {
+  // Issue-35 round 2 (opus): pins the SECOND bail-out return — without it,
+  // setup() ran on past a degradation raised inside the restore drain and
+  // published the sender ID from a terminally failed component.
+  ScopedPreferences preferences;
+  ::quietcool::test::FakeRadio radio;
+  QuietCoolComponent component(&radio, kSenderSeed, kPreferenceKey, kJitterSeed);
+  class NullPublisher final : public AuthorityPublisher {
+    void publish_authority(const ::quietcool::AuthoritySnapshot&) override {}
+  };
+  NullPublisher spares[5];
+  OverflowingPublisher overflow;
+  overflow.component = &component;
+  overflow.spares = spares;
+  component.add_authority_publisher(&overflow);
+  text_sensor::TextSensor sender_id;
+  binary_sensor::BinarySensor fault;
+  component.set_remote_sender_id_sensor(&sender_id);
+  component.set_controller_fault_sensor(&fault);
+  component.setup();
+  QC_CHECK(component.degraded());
+  QC_CHECK_EQ(sender_id.published().size(), 0U);
+  QC_CHECK(!fault.published().empty());
+  QC_CHECK_EQ(fault.published().back(), true);
+}
 
 QC_TEST("adapter", "a mid-setup degradation is not overwritten by the healthy publish") {
   // Issue-35 round 1 (fable): unguarded, the healthy publish ran AFTER a
@@ -563,4 +603,5 @@ QC_TEST("adapter", "setup publishes the healthy fault state") {
   QC_CHECK_EQ(fault.published().front(), false);
 }
 
+}  // namespace
 }  // namespace esphome::quietcool

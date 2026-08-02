@@ -4,13 +4,20 @@ namespace quietcool {
 namespace {
 
 std::optional<MonotonicMs> duration_ms(Duration duration) {
+  // Explicit Off/Continuous cases, NOT default: this switch is core/'s
+  // -Wswitch exhaustiveness gate on Duration (issue-35 round 2, opus — the
+  // round-1 collapse silently traded the gate away). A new enumerator must
+  // fail the build here, or it silently gets no deadline and no local
+  // anchor: the exact stale-display bug issue #35 closes.
   switch (duration) {
     case Duration::Hours1: case Duration::Hours2: case Duration::Hours4:
     case Duration::Hours8: case Duration::Hours12:
       return static_cast<MonotonicMs>(static_cast<std::uint8_t>(duration)) *
              60U * 60U * 1000U;
-    default: return std::nullopt;
+    case Duration::Off: case Duration::Continuous:
+      break;
   }
+  return std::nullopt;
 }
 
 }  // namespace
