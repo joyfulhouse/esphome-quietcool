@@ -170,24 +170,14 @@ std::optional<MonotonicMs> AuthorityStore::timer_deadline() const {
   // bound (issue #35; the entity-side rule is timer_command.cpp's
   // duration_run_ms). The bound errs only LATE, never early: an early firing
   // would presume a running fan stopped, the disfavored direction.
+  // duration_ms() (top of this file) is the single mapping — restating the
+  // switch here was the third copy of it in the tree, exactly the
+  // copies-drift failure the M2 mutant guards against (issue-35 round 1,
+  // opus). It returns nullopt for Off/Continuous, which carry no deadline.
   if (const auto* programmed =
           std::get_if<ProgrammedDurationAuthority>(&timer_)) {
-    switch (programmed->duration) {
-      case Duration::Hours1:
-      case Duration::Hours2:
-      case Duration::Hours4:
-      case Duration::Hours8:
-      case Duration::Hours12:
-        // The timed enumerators' values ARE their hour counts (fan_state.h).
-        return saturating_add(
-            programmed->observed_ms,
-            static_cast<MonotonicMs>(
-                static_cast<std::uint8_t>(programmed->duration)) *
-                3600000ULL);
-      case Duration::Off:
-      case Duration::Continuous:
-        break;
-    }
+    if (const auto run = duration_ms(programmed->duration))
+      return saturating_add(programmed->observed_ms, *run);
   }
   return std::nullopt;
 }
