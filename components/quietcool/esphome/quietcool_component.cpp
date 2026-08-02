@@ -41,7 +41,20 @@ void QuietCoolComponent::setup() {
   // core will treat as valid too. See provisioned_sender_'s declaration.
   provisioned_sender_ = restored.sender;
   apply_effects(core_.restore(restored, now_ms), now_ms);
+  // Re-checked between the core entries and again after (issue-35 round 1,
+  // codex): a degradation raised while draining restore's effects otherwise
+  // has setup() make a sequential SECOND call into a core already declared
+  // terminally broken. No observable consequence today — degrade() halts the
+  // drain, so on_radio_ready's effects would never apply (round 2, opus:
+  // deleting the first return alone is an equivalent mutant) — this is
+  // defense in depth for a future where that stops being harmless. The
+  // PAIR is pinned: the restore-drain degradation test fails if both
+  // returns are removed (M6), while either alone is an equivalent mutant —
+  // whichever survives catches the drain-window degradation (round 3,
+  // fable, probe-proven both ways).
+  if (degraded_) return;
   apply_effects(core_.on_radio_ready(now_ms), now_ms);
+  if (degraded_) return;
   // Diagnostics publish only AFTER the core is fully restored (round 1,
   // codex): publish_state can fire a synchronous on_value automation, and one
   // that calls Forget between our cache write and core_.restore() would clear
@@ -52,6 +65,18 @@ void QuietCoolComponent::setup() {
   // because a counter that never publishes reads as Unknown forever on a
   // quiet-RF boot rather than as the true zero.
   publish_remote_sender_id();
+  // The fault latch publishes its healthy state for the same reason the
+  // counters publish their zeros: its only other writer is the degradation
+  // path, so an unfaulted boot otherwise reads Unknown forever and a
+  // problem-class sensor cannot say "no problem" (issue #35 batch, observed
+  // on both production units). Re-checked here, NOT relying on the entry
+  // guard (issue-35 round 1, fable): the sender-id publish above is the one
+  // remaining degrade() route past the bail-outs (round 2, opus corrected
+  // this comment — the apply_effects pair can no longer reach this line),
+  // and an unguarded healthy publish would then OVERWRITE the genuine fault
+  // as the sensor's final word, a terminally dead controller reading
+  // "no fault" forever.
+  if (!degraded_) events_.publish_controller_healthy();
   if (tx_count_sensor_ != nullptr) tx_count_sensor_->publish_state(tx_count_);
   if (rx_valid_count_sensor_ != nullptr)
     rx_valid_count_sensor_->publish_state(rx_valid_count_);
@@ -476,7 +501,7 @@ void QuietCoolComponent::deliver_authority(
   // store's monotonic revision past the snapshot in hand — a delivered
   // revision ahead of the core is unconstructible in production, and != would
   // make the test seam's crafted snapshots indistinguishable from staleness.
-  if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
+  if (core_.authority_revision() > authority.revision) return;
   events_.publish_authority(authority, now_ms);
   // Re-checked between 2 and 3 as well: a SINK automation can command just
   // like a publisher's, and the stale tail it would leave is worse — a
@@ -486,7 +511,7 @@ void QuietCoolComponent::deliver_authority(
   // itself is accepted: the remaining sink publications are the Known flags
   // and status text, no press composes from them, and the reentrant batch's
   // post-drain delivery corrects them in the same loop pass.
-  if (core_.snapshot(now_ms).authority.revision > authority.revision) return;
+  if (core_.authority_revision() > authority.revision) return;
   publish_authority_diagnostics(authority);
 }
 

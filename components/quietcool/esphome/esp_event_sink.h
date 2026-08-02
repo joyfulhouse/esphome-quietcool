@@ -52,6 +52,11 @@ class EspHomeEventSink final : public ::quietcool::EventSink {
   // trustworthy. Touches only entity pointers — never the core, which is
   // non-reentrant and may itself be the thing that broke.
   void publish_controller_failed();
+  // Initial healthy publish (issue #35 batch): the fault sensor's only other
+  // writer is the degradation path, so without this it reads Unknown from
+  // boot until a fault — a problem-class sensor that cannot say "no problem".
+  // Same rationale as the counters' initial zeros.
+  void publish_controller_healthy();
 
  private:
   bool should_log(const ::quietcool::CoreEvent& event);

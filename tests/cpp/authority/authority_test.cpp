@@ -62,6 +62,57 @@ QC_TEST("authority", "estimated expiry invalidates and never confirms OFF") {
               AuthorityLossReason::EstimatedTimerDeadline);
 }
 
+QC_TEST("authority", "a programmed duration carries its upper-bound deadline") {
+  // Issue #35: the display half of the programmed-duration gap. The start
+  // time is unknown, but a Hours1 program observed at t=100 cannot still be
+  // running at t=100+1h — the estimated deadline fires there, taking the
+  // SAME invalidate-then-recover path the anchored variant takes, which is
+  // what clears the stale "1 hour, fan ON" display.
+  AuthorityStore authority;
+  authority.promote(accepted(FanState::observed(0xD1).value(),
+                             EvidenceSource::ManualQueryConsensus, 100), 100);
+  QC_CHECK(authority.timer_deadline().has_value());
+  QC_CHECK_EQ(*authority.timer_deadline(), 3600100U);
+  QC_CHECK_EQ(authority.timer_estimate_expired(3600099).status,
+              TimerExpiryStatus::NotDue);
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      authority.snapshot(3600099).state));
+  const auto due = authority.timer_estimate_expired(3600100);
+  QC_CHECK_EQ(due.status, TimerExpiryStatus::Due);
+  const auto snapshot = authority.snapshot(3600100);
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(snapshot.state));
+  QC_CHECK_EQ(std::get<UnknownStateAuthority>(snapshot.state).reason,
+              AuthorityLossReason::EstimatedTimerDeadline);
+}
+
+QC_TEST("authority", "the programmed deadline bound is exact for every timed duration") {
+  // The timed enumerators' values ARE their hour counts; a mapping typo here
+  // fires the deadline hours early (presuming a running fan stopped) or
+  // hours late (the stale display this exists to clear).
+  const struct { std::uint8_t byte; MonotonicMs run; } cases[] = {
+      {0xD1, 3600000ULL},  {0xD2, 7200000ULL},  {0xD4, 14400000ULL},
+      {0xD8, 28800000ULL}, {0xDC, 43200000ULL}};
+  for (const auto& c : cases) {
+    AuthorityStore authority;
+    authority.promote(accepted(FanState::observed(c.byte).value(),
+                               EvidenceSource::ManualQueryConsensus, 500), 500);
+    QC_CHECK(authority.timer_deadline().has_value());
+    QC_CHECK_EQ(*authority.timer_deadline(), 500U + c.run);
+  }
+}
+
+QC_TEST("authority", "a continuous observation carries no deadline") {
+  // Continuous routes to NoActiveTimer in promote(); no deadline may fire —
+  // an estimated deadline on a run-until-stopped fan would invalidate a
+  // perfectly current display forever.
+  AuthorityStore authority;
+  authority.promote(accepted(FanState::observed(0xDF).value(),
+                             EvidenceSource::ManualQueryConsensus, 100), 100);
+  QC_CHECK(!authority.timer_deadline().has_value());
+  QC_CHECK_EQ(authority.timer_estimate_expired(90000000).status,
+              TimerExpiryStatus::NotDue);
+}
+
 QC_TEST("authority", "manual revalidation keeps previous only diagnostically") {
   AuthorityStore authority;
   authority.promote(accepted(FanState::observed(0xDF).value(),

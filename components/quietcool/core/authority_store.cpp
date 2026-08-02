@@ -4,13 +4,20 @@ namespace quietcool {
 namespace {
 
 std::optional<MonotonicMs> duration_ms(Duration duration) {
+  // Explicit Off/Continuous cases, NOT default: this switch is core/'s
+  // -Wswitch exhaustiveness gate on Duration (issue-35 round 2, opus — the
+  // round-1 collapse silently traded the gate away). A new enumerator must
+  // fail the build here, or it silently gets no deadline and no local
+  // anchor: the exact stale-display bug issue #35 closes.
   switch (duration) {
     case Duration::Hours1: case Duration::Hours2: case Duration::Hours4:
     case Duration::Hours8: case Duration::Hours12:
       return static_cast<MonotonicMs>(static_cast<std::uint8_t>(duration)) *
              60U * 60U * 1000U;
-    default: return std::nullopt;
+    case Duration::Off: case Duration::Continuous:
+      break;
   }
+  return std::nullopt;
 }
 
 }  // namespace
@@ -159,8 +166,27 @@ TimerExpiryDecision AuthorityStore::timer_estimate_expired(MonotonicMs now_ms) {
 }
 
 std::optional<MonotonicMs> AuthorityStore::timer_deadline() const {
-  const auto* local = std::get_if<LocallyAnchoredTimerAuthority>(&timer_);
-  return local ? std::optional<MonotonicMs>(local->expiry_ms) : std::nullopt;
+  if (const auto* local = std::get_if<LocallyAnchoredTimerAuthority>(&timer_))
+    return local->expiry_ms;
+  // A programmed duration's start time is unknown, but the OBSERVATION time
+  // bounds its expiry from above: a Hours4 program observed at t0 cannot
+  // still be running at t0+4h. Firing the estimated deadline at that upper
+  // bound invalidates the stale display and arms the recovery query that
+  // re-confirms the true state — the display half of the programmed-duration
+  // gap whose energizing half the entity layer closed with the same upper
+  // bound (issue #35; the entity-side rule is timer_command.cpp's
+  // duration_run_ms). The bound errs only LATE, never early: an early firing
+  // would presume a running fan stopped, the disfavored direction.
+  // duration_ms() (top of this file) is the single mapping — restating the
+  // switch here was the third copy of it in the tree, exactly the
+  // copies-drift failure the M2 mutant guards against (issue-35 round 1,
+  // opus). It returns nullopt for Off/Continuous, which carry no deadline.
+  if (const auto* programmed =
+          std::get_if<ProgrammedDurationAuthority>(&timer_)) {
+    if (const auto run = duration_ms(programmed->duration))
+      return saturating_add(programmed->observed_ms, *run);
+  }
+  return std::nullopt;
 }
 
 void AuthorityStore::restore_hint(const RestorableState& restored,
