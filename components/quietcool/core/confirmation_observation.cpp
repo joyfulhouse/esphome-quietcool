@@ -27,8 +27,12 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
   effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   const auto recovery = recovery_.snapshot();
+  const bool terminal = recovery.phase == RecoveryPhase::Complete ||
+                        recovery.phase == RecoveryPhase::Expired ||
+                        recovery_.poll(now_ms).status ==
+                            RecoveryDueStatus::Expired;
   if (recovery.cause != RecoveryCause::OemActivity ||
-      recovery.phase == RecoveryPhase::Inactive)
+      recovery.phase == RecoveryPhase::Inactive || terminal)
     recovery_.arm_from_oem_activity(now_ms);
   state_ = CoordinatorState::RecoveryQuietWait;
   context_ = RecoveryContext{RecoveryCause::OemActivity};

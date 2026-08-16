@@ -3,7 +3,10 @@
 namespace quietcool {
 
 void RecoveryScheduler::arm_from_oem_activity(MonotonicMs now_ms) {
-  const bool same_cycle = cause_ && *cause_ == RecoveryCause::OemActivity;
+  const bool same_cycle =
+      cause_ && *cause_ == RecoveryCause::OemActivity &&
+      phase_ != RecoveryPhase::Complete && phase_ != RecoveryPhase::Expired &&
+      now_ms <= expires_ms_;
   cause_ = RecoveryCause::OemActivity;
   anchor_ms_ = now_ms;
   due_ms_ = saturating_add(now_ms, kOemRecoveryQuietMs);
