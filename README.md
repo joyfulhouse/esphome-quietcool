@@ -131,9 +131,10 @@ Three things are worth spelling out, and the table claims nothing beyond them:
   physical OEM remote is used, strictly validated fan-reply consensus updates
   HA as soon as the reply burst completes. Command-shaped values require a
   second independently collected burst in the 400–1600 ms passive reply
-  window; response-only encodings can promote directly. A jittered five-minute
-  heartbeat reconciles traffic the bridge missed; while authority is lost the
-  OLED suffixes the state word with `?`.
+  window after at least 300 ms of RF silence; response-only encodings can
+  promote directly. A jittered five-minute heartbeat reconciles traffic the
+  bridge missed; while authority is lost the OLED suffixes the state word with
+  `?`.
 - **Direct RF fan control** — Off / Low / Medium / High on the fan entity,
   transmitted as the exact OEM frames. On the C++ build the entity's speed band
   tracks the fan's *confirmed* capability rather than being fixed at compile

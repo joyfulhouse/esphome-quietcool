@@ -27,6 +27,8 @@ void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms) {
 CoreEffects ConfirmationCore::handle_passive_candidate(
     const RecoveredResponse& candidate, bool response_only,
     MonotonicMs now_ms) {
+  if (passive_observation_ && response_only)
+    cancel_passive_observation();
   if (passive_observation_) {
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs) {
@@ -35,10 +37,14 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
                    passive_observation_->first_burst.state)) {
       cancel_passive_observation();
       return {};
-    } else if (*age < kPassiveReplyAcceptStartMs) {
-      // Still the first RF burst (or too close to prove otherwise). Do not
-      // feed these repeats into the independently collected second consensus.
-      return {};
+    } else {
+      const auto silence = elapsed_since(
+          now_ms, passive_observation_->last_first_burst_frame_ms);
+      if (*age < kPassiveReplyAcceptStartMs || !silence ||
+          *silence < kPassiveInterBurstSilenceMs) {
+        passive_observation_->last_first_burst_frame_ms = now_ms;
+        return {};
+      }
     }
   }
 
@@ -47,7 +53,8 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
   consensus_.reset();
 
   if (!passive_observation_ && !response_only) {
-    passive_observation_ = PassiveObservationEpoch{*consensus, now_ms};
+    passive_observation_ =
+        PassiveObservationEpoch{*consensus, now_ms, now_ms};
     ++passive_observation_epochs_opened_;
     return {};
   }

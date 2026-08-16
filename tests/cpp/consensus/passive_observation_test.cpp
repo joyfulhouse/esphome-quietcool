@@ -138,6 +138,41 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
+        "held ambiguous repeat train cannot become a second burst") {
+  auto core = passive_core();
+  passive_consensus(core, 0xBF, 1000);
+  const auto repeat = passive_frame(0xBF);
+  for (const MonotonicMs repeat_ms : {1160, 1260, 1360, 1460, 1520, 1580})
+    QC_CHECK(
+        !published(core.on_frame(ByteView(repeat.bytes), repeat_ms)).has_value());
+
+  const auto snapshot = core.snapshot(1580);
+  QC_CHECK(snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.passive_confirmations_promoted, 0U);
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(
+      snapshot.authority.state));
+}
+
+QC_TEST("passive_observation",
+        "response-only consensus outranks a pending ambiguous epoch") {
+  auto core = passive_core();
+  passive_consensus(core, 0xBF, 1000);
+  const auto decisive = passive_frame(0x1F);
+  core.on_frame(ByteView(decisive.bytes), 1200);
+  const auto effects = core.on_frame(
+      ByteView(decisive.bytes), 1200 + kMinIndependentCandidateGapMs);
+
+  const auto authority = published(effects);
+  QC_CHECK(authority.has_value());
+  const auto* confirmed =
+      std::get_if<ConfirmedStateAuthority>(&authority->state);
+  QC_CHECK(confirmed != nullptr);
+  QC_CHECK_EQ(confirmed->state.raw_byte(), std::uint8_t(0x1F));
+  QC_CHECK_EQ(confirmed->source, EvidenceSource::PassiveObservationConsensus);
+  QC_CHECK(!core.snapshot(1260).passive_observation_pending);
+}
+
+QC_TEST("passive_observation",
         "contradiction and local ownership cancel passive evidence") {
   auto contradiction = passive_core();
   passive_consensus(contradiction, 0xBF, 1000);

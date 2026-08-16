@@ -69,7 +69,7 @@ QC_TEST("heartbeat_core",
 }
 
 QC_TEST("heartbeat_core",
-        "every non-idle coordinator state skips without authority mutation") {
+        "every non-idle provisioned state skips as busy") {
   std::uint32_t visited = 0;
   for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
@@ -88,6 +88,19 @@ QC_TEST("heartbeat_core",
     ++visited;
   }
   QC_CHECK_EQ(visited, static_cast<std::uint32_t>(kCoordinatorStateCount - 1U));
+}
+
+QC_TEST("heartbeat_core", "unprovisioned heartbeat requests stay silent") {
+  ConfirmationCore core(CoreConfig{31});
+  const auto before = core.snapshot(1000);
+  const auto effects = core.request_heartbeat(1001, 300000);
+  const auto after = core.snapshot(1001);
+  QC_CHECK_EQ(effects.size(), 0U);
+  QC_CHECK_EQ(after.state, CoordinatorState::Unprovisioned);
+  QC_CHECK_EQ(after.heartbeat_queries_skipped_busy,
+              before.heartbeat_queries_skipped_busy);
+  QC_CHECK_EQ(after.heartbeat_queries_admitted,
+              before.heartbeat_queries_admitted);
 }
 
 QC_TEST("heartbeat_core",

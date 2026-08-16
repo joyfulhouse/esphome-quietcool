@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+
+import esphome.config_validation as cv
+
+from components import quietcool
 
 
 # ---------------------------------------------------------------------------
@@ -3742,6 +3748,67 @@ class CppConfigBindingTest(unittest.TestCase):
             re.findall(r'"([^"]+)"', cpp_list),
         )
         self.assertEqual(re.findall(r'"([^"]+)"', python_list), list(_CPP_TIMER_OPTIONS))
+
+
+class QuietCoolHeartbeatSchemaTest(unittest.TestCase):
+    @staticmethod
+    def _config(interval: str | None = None):
+        value = {
+            "id": "quietcool_controller",
+            "radio": {"type": "sx127x", "id": "fan_radio"},
+        }
+        if interval is not None:
+            value[quietcool.CONF_HEARTBEAT_INTERVAL] = interval
+        return quietcool.CONFIG_SCHEMA(value)
+
+    def test_disabled_and_enabled_bounds_are_exact(self) -> None:
+        for value, seconds in (("0s", 0), ("60s", 60), ("3600s", 3600)):
+            with self.subTest(value=value):
+                validated = self._config(value)
+                self.assertEqual(
+                    validated[quietcool.CONF_HEARTBEAT_INTERVAL].total_seconds,
+                    seconds,
+                )
+
+        for value in ("-1s", "1s", "59s", "3601s", "60.5s"):
+            with self.subTest(value=value):
+                with self.assertRaises(cv.Invalid):
+                    self._config(value)
+
+    def test_omitted_interval_codegen_binds_five_minutes(self) -> None:
+        config = self._config()
+        self.assertEqual(
+            config[quietcool.CONF_HEARTBEAT_INTERVAL].total_seconds, 300
+        )
+
+        emitted: list[tuple[object, ...]] = []
+
+        def new_pvariable(*args):
+            emitted.append(args)
+            return object()
+
+        with (
+            mock.patch.object(quietcool.cg, "add_global"),
+            mock.patch.object(
+                quietcool.cg, "RawStatement", side_effect=lambda value: value
+            ),
+            mock.patch.object(quietcool.cg, "add_define"),
+            mock.patch.object(
+                quietcool.cg,
+                "get_variable",
+                new=mock.AsyncMock(return_value=object()),
+            ),
+            mock.patch.object(
+                quietcool.cg, "new_Pvariable", side_effect=new_pvariable
+            ),
+            mock.patch.object(
+                quietcool.cg, "register_component", new=mock.AsyncMock()
+            ),
+        ):
+            asyncio.run(quietcool.to_code(config))
+
+        self.assertEqual(len(emitted), 2)
+        self.assertEqual(emitted[1][-1], 300000)
 
 
 if __name__ == "__main__":

@@ -81,8 +81,6 @@ quietcool:
   # Zero is safely unprovisioned. A nonzero compiled seed must begin 0xCB;
   # learned state and explicit Forget are schema-versioned in preferences.
   sender_seed: 0x00000000
-  # Default 5-minute non-energizing reconciliation; 0s disables it.
-  heartbeat_interval: 300s
   radio:
     type: sx126x
     id: fan_radio

@@ -30,8 +30,9 @@ class ScopedPreferences final {
 
 class HeartbeatHarness final {
  public:
-  explicit HeartbeatHarness(std::uint32_t interval_ms = 300000)
-      : component_(&radio_, kSenderSeed, kPreferenceKey, kJitterSeed,
+  explicit HeartbeatHarness(std::uint32_t interval_ms = 300000,
+                            std::uint32_t sender_seed = kSenderSeed)
+      : component_(&radio_, sender_seed, kPreferenceKey, kJitterSeed,
                    interval_ms) {}
 
   void setup(std::uint32_t raw_millis = 0) {
@@ -161,6 +162,48 @@ QC_TEST("heartbeat_scheduler",
   QC_CHECK_EQ(harness.component().snapshot().heartbeat_queries_admitted, 0U);
   harness.loop_after(1);
   QC_CHECK_EQ(harness.component().snapshot().heartbeat_queries_admitted, 1U);
+}
+
+QC_TEST("heartbeat_scheduler",
+        "learning arms a fresh schedule and forget disarms it") {
+  ScopedPreferences preferences;
+  HeartbeatHarness harness(60000, 0);
+  harness.setup();
+  QC_CHECK_EQ(harness.component().snapshot().state,
+              ::quietcool::CoordinatorState::Unprovisioned);
+  QC_CHECK(!harness.component().next_heartbeat_due_for_test().has_value());
+
+  harness.loop_after(120000);
+  auto snapshot = harness.component().snapshot();
+  QC_CHECK_EQ(snapshot.heartbeat_queries_admitted, 0U);
+  QC_CHECK_EQ(snapshot.heartbeat_queries_skipped_busy, 0U);
+
+  harness.component().request_learn(::quietcool::LearnMode::Manual);
+  constexpr std::uint8_t learned_frame[]{
+      0xCB, 0x00, 0x47, 0x39, 0x9F, 0x9F};
+  harness.component().on_radio_packet(
+      ::quietcool::ByteView(learned_frame, sizeof(learned_frame)));
+  for (std::uint8_t sighting = 1;
+       sighting < ::quietcool::kLearnMinSightings; ++sighting) {
+    harness.loop_after(
+        static_cast<std::uint32_t>(::quietcool::kLearnSightingGapMs));
+    harness.component().on_radio_packet(
+        ::quietcool::ByteView(learned_frame, sizeof(learned_frame)));
+  }
+
+  QC_CHECK_EQ(harness.component().snapshot().state,
+              ::quietcool::CoordinatorState::Idle);
+  const auto learned_ms = harness.component().now_ms();
+  const auto due = harness.component().next_heartbeat_due_for_test();
+  QC_CHECK(due.has_value());
+  QC_CHECK_EQ(*due, learned_ms + 60000U);
+  harness.loop_after(59999);
+  QC_CHECK_EQ(harness.component().snapshot().heartbeat_queries_admitted, 0U);
+  harness.loop_after(1);
+  QC_CHECK_EQ(harness.component().snapshot().heartbeat_queries_admitted, 1U);
+
+  harness.component().request_forget();
+  QC_CHECK(!harness.component().next_heartbeat_due_for_test().has_value());
 }
 
 }  // namespace

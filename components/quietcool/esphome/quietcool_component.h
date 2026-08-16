@@ -245,6 +245,7 @@ class QuietCoolComponent final : public Component {
   static std::uint32_t heartbeat_delay(
       std::uint32_t interval_ms, std::uint32_t seed, std::uint32_t sequence,
       ::quietcool::MonotonicMs anchor_ms);
+  void reset_heartbeat_schedule(::quietcool::MonotonicMs now_ms);
   void schedule_next_heartbeat(::quietcool::MonotonicMs now_ms);
 
   EspMonotonicClock clock_;

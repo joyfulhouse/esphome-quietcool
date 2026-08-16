@@ -191,6 +191,11 @@ constexpr MonotonicMs kMinIndependentCandidateGapMs = 60;
 // correlation for command-shaped values, not a protocol direction bit.
 constexpr MonotonicMs kPassiveReplyAcceptStartMs = 400;
 constexpr MonotonicMs kPassiveReplyAcceptEndMs = 1600;
+// Live OEM callbacks within one three-frame press are about 102 ms apart, and
+// the documented duplicate epoch spans 300 ms from its first frame. Requiring
+// this much silence after the last first-burst frame prevents a held repeat
+// train from becoming its own passive reply.
+constexpr MonotonicMs kPassiveInterBurstSilenceMs = 300;
 constexpr MonotonicMs kLearnSightingGapMs = 600;   // min separation between independent learn sightings
 constexpr MonotonicMs kLearnWindowSpanMs = 60000;  // stale boundary: a same-sender frame this old restarts the candidate
 constexpr std::uint8_t kLearnMinSightings = 3;     // independent sightings required before binding a fan

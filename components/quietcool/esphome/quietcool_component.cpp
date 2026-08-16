@@ -49,6 +49,21 @@ void QuietCoolComponent::schedule_next_heartbeat(
     next_heartbeat_due_ms_ = due;
 }
 
+void QuietCoolComponent::reset_heartbeat_schedule(
+    ::quietcool::MonotonicMs now_ms) {
+  heartbeat_schedule_sequence_ = 0;
+  if (!provisioned_sender_ || heartbeat_interval_ms_ == 0) {
+    next_heartbeat_due_ms_.reset();
+    return;
+  }
+  const auto due =
+      ::quietcool::saturating_add(now_ms, heartbeat_interval_ms_);
+  if (due == now_ms)
+    next_heartbeat_due_ms_.reset();
+  else
+    next_heartbeat_due_ms_ = due;
+}
+
 float QuietCoolComponent::get_setup_priority() const {
   return setup_priority::LATE;
 }
@@ -109,9 +124,8 @@ void QuietCoolComponent::setup() {
     rx_valid_count_sensor_->publish_state(rx_valid_count_);
   if (rx_rejected_count_sensor_ != nullptr)
     rx_rejected_count_sensor_->publish_state(rx_rejected_count_);
-  if (!degraded_ && heartbeat_interval_ms_ != 0)
-    next_heartbeat_due_ms_ =
-        ::quietcool::saturating_add(clock_.now_ms(), heartbeat_interval_ms_);
+  if (!degraded_)
+    reset_heartbeat_schedule(clock_.now_ms());
 }
 
 void QuietCoolComponent::loop() {
@@ -402,10 +416,12 @@ void QuietCoolComponent::apply_effect(
     if (persistence->request.kind ==
         ::quietcool::PersistenceKind::SaveProvisioning) {
       provisioned_sender_ = persistence->request.sender;
+      reset_heartbeat_schedule(events_.now_ms());
       publish_remote_sender_id();
     } else if (persistence->request.kind ==
                ::quietcool::PersistenceKind::EraseProvisioning) {
       provisioned_sender_.reset();
+      reset_heartbeat_schedule(events_.now_ms());
       publish_remote_sender_id();
     }
     if (!preferences_.apply(persistence->request))

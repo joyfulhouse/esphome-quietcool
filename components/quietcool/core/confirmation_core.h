@@ -375,6 +375,7 @@ class ConfirmationCore final {
   struct PassiveObservationEpoch final {
     Consensus first_burst;
     MonotonicMs opened_ms;
+    MonotonicMs last_first_burst_frame_ms;
   };
   std::optional<PassiveObservationEpoch> passive_observation_;
   std::uint32_t passive_observation_epochs_opened_{0};

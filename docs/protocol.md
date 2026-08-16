@@ -256,8 +256,9 @@ burst, including a spaced re-fire, invalidates both known flags. A response
 correlated to a local query or closed-loop consensus can restore them. Idle
 passive consensus can also restore them when content is response-only, or when
 an ambiguous first consensus burst is followed by a matching independently
-collected consensus burst 400–1600 ms later. The first ambiguous burst remains
-non-authoritative because hearing a command does not prove receiver actuation.
+collected consensus burst 400–1600 ms later, after at least 300 ms of RF
+silence. The first ambiguous burst remains non-authoritative because hearing a
+command does not prove receiver actuation.
 
 Outgoing commands never optimistically arm or clear confirmed timer metadata.
 If all responses are lost, timer state remains unknown and an expiry cannot
@@ -281,9 +282,11 @@ command. Values with bit 7 set remain ambiguous because preserved fan replies
 include `90`, `B0`, `B1`, `9F`, and `BF`. An ambiguous consensus opens a
 receive-only evidence epoch; repeats from that burst are ignored, and only a
 second independent matching consensus in the inclusive 400–1600 ms window may
-publish. Contradiction, collision, local work, learning, recovery, radio reset,
-or quarantine cancels the epoch. Timing is defensive correlation for
-inconclusive values, not a universal sender direction bit.
+publish after at least 300 ms of RF silence. That silence bound matches the
+documented duplicate epoch; live callbacks within one three-frame press are
+about 102 ms apart. Contradiction, collision, local work, learning, recovery,
+radio reset, or quarantine cancels the epoch. Timing is defensive correlation
+for inconclusive values, not a universal sender direction bit.
 
 Passive publication uses the normal authority store with the distinct
 `passive_observation` evidence source and never creates or completes a local

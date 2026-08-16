@@ -49,5 +49,20 @@ QC_TEST("passive_classifier",
       classify_idle_value<0xBF>()));
 }
 
+QC_TEST("passive_classifier",
+        "all marker classes retain the conservative evidence boundary") {
+  // Synthetic marker-class boundaries, not claimed captures. The settled
+  // evidence contract makes bit 7 clear decisive and keeps every bit-7-set
+  // value ambiguous, including capability marker class 11.
+  QC_CHECK(std::holds_alternative<PassiveResponseOnlyCandidate>(
+      classify_idle_value<0x1F>()));  // 00
+  QC_CHECK(std::holds_alternative<PassiveResponseOnlyCandidate>(
+      classify_idle_value<0x5F>()));  // 01
+  QC_CHECK(std::holds_alternative<PassiveAmbiguousCandidate>(
+      classify_idle_value<0x9F>()));  // 10
+  QC_CHECK(std::holds_alternative<PassiveAmbiguousCandidate>(
+      classify_idle_value<0xDF>()));  // 11
+}
+
 }  // namespace
 }  // namespace quietcool

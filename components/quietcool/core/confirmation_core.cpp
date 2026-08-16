@@ -239,8 +239,10 @@ CoreEffects ConfirmationCore::handle_manual_refresh(ActionId action,
 CoreEffects ConfirmationCore::handle_heartbeat_request(
     MonotonicMs recent_interval_ms, MonotonicMs now_ms) {
   expire_passive_evidence(now_ms);
-  if (!sender_ || state_ != CoordinatorState::Idle ||
-      passive_observation_ || consensus_.snapshot().has_group) {
+  if (!sender_)
+    return {};
+  if (state_ != CoordinatorState::Idle || passive_observation_ ||
+      consensus_.snapshot().has_group) {
     ++heartbeat_queries_skipped_busy_;
     return {};
   }
