@@ -30,7 +30,8 @@ class AuthorityPublisher {
 class QuietCoolComponent final : public Component {
  public:
   QuietCoolComponent(::quietcool::Radio* radio, std::uint32_t sender_seed,
-                     std::uint32_t preference_key, std::uint32_t jitter_seed);
+                     std::uint32_t preference_key, std::uint32_t jitter_seed,
+                     std::uint32_t heartbeat_interval_ms = 300000);
 
   void setup() override;
   void loop() override;
@@ -158,6 +159,14 @@ class QuietCoolComponent final : public Component {
   std::uint32_t rx_rejected_count() const { return rx_rejected_count_; }
 
 #ifdef QUIETCOOL_HOST_TEST
+  std::optional<::quietcool::MonotonicMs> next_heartbeat_due_for_test() const {
+    return next_heartbeat_due_ms_;
+  }
+  static std::uint32_t heartbeat_delay_for_test(
+      std::uint32_t interval_ms, std::uint32_t seed, std::uint32_t sequence,
+      ::quietcool::MonotonicMs anchor_ms) {
+    return heartbeat_delay(interval_ms, seed, sequence, anchor_ms);
+  }
   // Test seams (issue #9). Overflow of the exact-max effect and callback queues
   // is an invariant breach the real core cannot reach through the public
   // surface — a drain empties the effect queue before the next batch, and
@@ -233,6 +242,10 @@ class QuietCoolComponent final : public Component {
   // Publishes Remote Sender ID from provisioned_sender_. Called at exactly
   // the three sites provisioned_sender_ itself changes (see its declaration).
   void publish_remote_sender_id();
+  static std::uint32_t heartbeat_delay(
+      std::uint32_t interval_ms, std::uint32_t seed, std::uint32_t sequence,
+      ::quietcool::MonotonicMs anchor_ms);
+  void schedule_next_heartbeat(::quietcool::MonotonicMs now_ms);
 
   EspMonotonicClock clock_;
   ::quietcool::Radio& radio_;
@@ -242,6 +255,10 @@ class QuietCoolComponent final : public Component {
   ::quietcool::BurstTransmitter burst_;
   ::quietcool::CoreEffectDrain effect_drain_;
   ::quietcool::CoreCallbackQueue core_callbacks_;
+  std::uint32_t heartbeat_interval_ms_{300000};
+  std::uint32_t heartbeat_jitter_seed_{0};
+  std::uint32_t heartbeat_schedule_sequence_{0};
+  std::optional<::quietcool::MonotonicMs> next_heartbeat_due_ms_;
   AuthorityPublisher* authority_publishers_[kMaxAuthorityPublishers]{};
   std::size_t authority_publisher_count_{0};
   // Terminal-degradation latch (M2, issue #9). Set before any degradation

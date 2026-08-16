@@ -161,10 +161,13 @@ replaced by whichever lone fan happened to transmit. Full details are in the
   treating it as physical success.
 - Press a button on the **OEM remote**: the controller records it in RF
   diagnostics, cancels conflicting local work, and never echoes it over RF.
-  It deliberately does not update the safety-facing fan entity from the
-  command alone, because hearing the command does not prove that the fan
-  accepted it. Press **Refresh Fan State** to request query-consensus evidence.
-  A downstream HA automation is a separate explicit command source.
+  The command alone is never authority. The fan entity updates when the fan's
+  validated reply reaches consensus: immediately for response-only encodings,
+  or after a second independent burst in the bounded passive reply window for
+  ambiguous command-shaped values. **Refresh Fan State** remains available for
+  an explicit non-energizing query; the default five-minute idle heartbeat
+  reconciles missed traffic automatically and can be disabled with
+  `heartbeat_interval: 0s`.
 - **Timers.** The **Fan Timer** select runs the fan for 1 / 2 / 4 / 8 / 12
   hours, or `None` for no timer at all.
 
@@ -360,11 +363,12 @@ to finish, clears obsolete queued work, and executes the latest desired action.
   Remote ID`. The controller already has a bound ID (learned earlier, or
   compiled in via `quietcool_sender_id`). Re-pairing is deliberately two steps:
   press `Forget Remote ID`, then `Learn Remote ID` (see §5).
-- **HA entity doesn't follow the OEM remote** — this is intentional: a heard
-  command is diagnostics-only, not proof of fan actuation. Use **Refresh Fan
-  State** to seek authoritative consensus. If nothing changes even after a
-  Refresh, the remote may be unlearned or out of RX range (the device log shows
-  received frames).
+- **HA entity doesn't follow the OEM remote** — verify that the sender is
+  learned and the fan's reply is in RX range. One ambiguous command burst is
+  intentionally insufficient; the entity changes only after independently
+  collected fan-reply consensus. Use **Refresh Fan State** to request an
+  immediate non-energizing reconciliation rather than waiting for the
+  heartbeat.
 - **Blank OLED on the V3 board** — the V3's display is powered through Vext;
   the config drives it, but early clones vary. See the `PIN CONFIDENCE` notes
   in `legacy/quietcool-lora-v3.yaml` and [docs/hardware.md](docs/hardware.md).

@@ -113,7 +113,8 @@ constexpr std::size_t kCoordinatorStateCount =
 
 enum class TxReason : std::uint8_t {
   BootQuery, ManualQuery, RecoveryQueryInitial, RecoveryQueryRetry,
-  TimerExpiryRecoveryQuery, TransactionCommand, TransactionFallbackQuery
+  TimerExpiryRecoveryQuery, HeartbeatQuery, TransactionCommand,
+  TransactionFallbackQuery
 };
 enum class TransactionOutcome : std::uint8_t {
   Confirmed, Exhausted, Superseded, CancelledByExactOemQuery,
@@ -121,11 +122,14 @@ enum class TransactionOutcome : std::uint8_t {
   RadioUnavailable
 };
 enum class RefusalReason : std::uint8_t { Unprovisioned, Busy, Holdoff, Learning, InvalidState, IdExhausted, AmbiguousLearn, AlreadyProvisioned };
-enum class QueryPurpose : std::uint8_t { Boot, Manual, Fallback, Recovery };
+enum class QueryPurpose : std::uint8_t {
+  Boot, Manual, Fallback, Recovery, Heartbeat
+};
 enum class EvidenceSource : std::uint8_t {
   BootQueryConsensus, ManualQueryConsensus, RecoveryQueryConsensus,
   TimerExpiryRecoveryConsensus, PostCommandConsensus, FallbackQueryConsensus,
-  ExternalDiagnostic, RestoredHint
+  PassiveObservationConsensus, HeartbeatQueryConsensus, ExternalDiagnostic,
+  RestoredHint
 };
 enum class EvidenceConfidence : std::uint8_t { ExactBackedConsensus, RecoveredOnlyConsensus };
 // How much a reported SpeedCapability may be trusted (issue #31 review). A
@@ -181,6 +185,12 @@ constexpr MonotonicMs kDirectQueryAcceptStartMs = 300;
 constexpr MonotonicMs kDirectQueryAcceptEndMs = 1100;
 constexpr MonotonicMs kResponseTailEndMs = 2500;
 constexpr MonotonicMs kMinIndependentCandidateGapMs = 60;
+// Passive correlation reuses the field-validated post-command reply envelope.
+// Repository captures place direct replies at roughly 417-648 ms and retain a
+// 400-1600 ms post-command acceptance window. These bounds are defensive burst
+// correlation for command-shaped values, not a protocol direction bit.
+constexpr MonotonicMs kPassiveReplyAcceptStartMs = 400;
+constexpr MonotonicMs kPassiveReplyAcceptEndMs = 1600;
 constexpr MonotonicMs kLearnSightingGapMs = 600;   // min separation between independent learn sightings
 constexpr MonotonicMs kLearnWindowSpanMs = 60000;  // stale boundary: a same-sender frame this old restarts the candidate
 constexpr std::uint8_t kLearnMinSightings = 3;     // independent sightings required before binding a fan
@@ -202,6 +212,19 @@ inline std::optional<MonotonicMs> elapsed_since(MonotonicMs now, MonotonicMs anc
 constexpr MonotonicMs saturating_add(MonotonicMs value, MonotonicMs delta) {
   const auto maximum = std::numeric_limits<MonotonicMs>::max();
   return delta > maximum - value ? maximum : value + delta;
+}
+
+// Shared deterministic seed mixer for bounded timing jitter. Keeping the mix
+// platform-free lets recovery and adapter heartbeat scheduling use identical
+// seed semantics without a random engine or heap-backed state.
+constexpr std::uint32_t deterministic_jitter_mix(
+    std::uint32_t seed, std::uint32_t salt, MonotonicMs anchor_ms) {
+  std::uint32_t mixed = seed ^ salt ^ static_cast<std::uint32_t>(anchor_ms) ^
+                        static_cast<std::uint32_t>(anchor_ms >> 32U);
+  mixed ^= mixed >> 16U;
+  mixed *= 0x7FEB352DU;
+  mixed ^= mixed >> 15U;
+  return mixed;
 }
 
 }  // namespace quietcool

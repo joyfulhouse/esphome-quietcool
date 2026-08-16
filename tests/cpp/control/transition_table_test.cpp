@@ -23,6 +23,7 @@ bool computed_transition_is_justified(const TransitionRule& rule) {
     case ActionId::HandleLearningFrame:
     case ActionId::HandleLearnExpiry:
     case ActionId::HandleRadioRecovered:
+    case ActionId::HandleHeartbeatRequest:
       return true;
     case ActionId::HandleLearnRequest:
       // Owns its resulting state (issue #16): LearningAwaitingFirst when the
@@ -115,8 +116,10 @@ QC_TEST("transition_table", "rule IDs are unique and priorities monotonic") {
 QC_TEST("transition_table", "every non-Computed next state resolves authoritatively") {
   const auto view = TransitionTable::rules();
   std::size_t computed_rows = 0;
+  std::size_t heartbeat_rows = 0;
   for (std::size_t index = 0; index < view.size; ++index) {
     const auto& rule = view.data[index];
+    if (rule.action == ActionId::HandleHeartbeatRequest) ++heartbeat_rows;
     const auto resolved =
         TransitionTable::fixed_next_state(rule.next, rule.state);
     if (rule.next == NextStateId::Computed) {
@@ -130,6 +133,7 @@ QC_TEST("transition_table", "every non-Computed next state resolves authoritativ
       QC_CHECK_EQ(*resolved, rule.state);
   }
   QC_CHECK(computed_rows > 0U);
+  QC_CHECK_EQ(heartbeat_rows, kCoordinatorStateCount);
 }
 
 QC_TEST("transition_table", "query families share template but keep state IDs") {

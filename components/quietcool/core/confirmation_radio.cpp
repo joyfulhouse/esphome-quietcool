@@ -155,7 +155,12 @@ CoreEffects ConfirmationCore::handle_radio_fault(EventKind kind,
     }
     if (transaction_)
       finish_transaction(TransactionOutcome::RadioUnavailable, effects);
-    authority_.invalidate(AuthorityLossReason::RadioUnavailable, now_ms);
+    const bool heartbeat =
+        recovery.reason && *recovery.reason == TxReason::HeartbeatQuery;
+    if (heartbeat)
+      ++heartbeat_misses_;
+    else
+      authority_.invalidate(AuthorityLossReason::RadioUnavailable, now_ms);
     recovery_.cancel();
     live_tx_.reset();
     state_ = sender_ ? CoordinatorState::Idle : CoordinatorState::Unprovisioned;
@@ -163,7 +168,8 @@ CoreEffects ConfirmationCore::handle_radio_fault(EventKind kind,
                        : StateContext(UnprovisionedContext{});
     effects.add(
         PublishCoreEvent{{CoreEventKind::WatchdogFired, state_, {}, {}, {}}});
-    effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
+    if (!heartbeat)
+      effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
     return effects;
   }
   if (!live_tx_ || !token)

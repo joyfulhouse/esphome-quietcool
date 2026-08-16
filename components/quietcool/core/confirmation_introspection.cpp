@@ -134,7 +134,13 @@ bool ConfirmationCore::context_matches_state(CoordinatorState state,
   const auto canonical = context_for_test(state);
   if (context.index() != canonical.index()) return false;
   // For non-query variants both sides are nullopt (equal): behaviour unchanged.
-  if (query_purpose_of(context) != query_purpose_of(canonical)) return false;
+  const auto actual_purpose = query_purpose_of(context);
+  const auto canonical_purpose = query_purpose_of(canonical);
+  const bool heartbeat_in_manual_family =
+      canonical_purpose == QueryPurpose::Manual &&
+      actual_purpose == QueryPurpose::Heartbeat;
+  if (actual_purpose != canonical_purpose && !heartbeat_in_manual_family)
+    return false;
   // TxReason is semantic state (it steers radio-recovery routing), so a context
   // carrying the wrong query family's reason — the class this fixture used to
   // build with BootQuery — must be rejected even when its purpose field is
@@ -148,9 +154,8 @@ bool ConfirmationCore::context_matches_state(CoordinatorState state,
   // still map to Recovery — family semantics preserved, exact-reason rejection
   // avoided. Non-query variants carry no reason (both nullopt): unchanged.
   const auto reason = query_reason_of(context);
-  const auto canonical_purpose = query_purpose_of(canonical);
-  if (reason && canonical_purpose &&
-      TransitionTable::query_family_of(*reason) != canonical_purpose)
+  if (reason && actual_purpose &&
+      TransitionTable::query_family_of(*reason) != actual_purpose)
     return false;
   return true;
 }

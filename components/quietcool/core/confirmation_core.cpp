@@ -13,6 +13,7 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
   clear_deferred();
   window_.reset();
   consensus_.reset();
+  passive_observation_.reset();
   recovery_.cancel();
   learn_.cancel();
   live_tx_.reset();
@@ -21,6 +22,13 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
   epoch_identity_ = 0;
   command_bursts_ = 0;
   query_bursts_ = 0;
+  passive_observation_epochs_opened_ = 0;
+  passive_confirmations_promoted_ = 0;
+  passive_epochs_cancelled_or_expired_ = 0;
+  heartbeat_queries_admitted_ = 0;
+  heartbeat_queries_skipped_busy_ = 0;
+  heartbeat_queries_suppressed_recent_ = 0;
+  heartbeat_misses_ = 0;
   transaction_ids_.reset();
   tx_tokens_.reset();
   radio_ready_seen_ = false;
@@ -53,6 +61,7 @@ CoreEffects ConfirmationCore::handle_radio_ready(MonotonicMs) {
     return effects;
   radio_ready_seen_ = true;
   if (state_ == CoordinatorState::Idle && sender_) {
+    cancel_passive_observation();
     state_ = CoordinatorState::BootQueryPending;
     context_ = QueryPendingContext{QueryPurpose::Boot, TxReason::BootQuery};
   }
@@ -62,6 +71,7 @@ CoreEffects
 ConfirmationCore::begin_transaction(FanState request, MonotonicMs now_ms,
                                     std::optional<PriorAuthoritySnapshot> prior,
                                     bool publish_accept) {
+  cancel_passive_observation();
   const auto id = transaction_ids_.allocate();
   if (!id)
     return refuse(RefusalReason::IdExhausted);
@@ -219,10 +229,35 @@ CoreEffects ConfirmationCore::handle_manual_refresh(ActionId action,
       return refuse(RefusalReason::Learning);
     return refuse(RefusalReason::Busy);
   }
+  cancel_passive_observation();
   authority_.begin_manual_revalidation(now_ms);
   recovery_.cancel();
   state_ = CoordinatorState::ManualQueryPending;
   context_ = QueryPendingContext{QueryPurpose::Manual, TxReason::ManualQuery};
+  return {};
+}
+CoreEffects ConfirmationCore::handle_heartbeat_request(
+    MonotonicMs recent_interval_ms, MonotonicMs now_ms) {
+  expire_passive_evidence(now_ms);
+  if (!sender_ || state_ != CoordinatorState::Idle ||
+      passive_observation_ || consensus_.snapshot().has_group) {
+    ++heartbeat_queries_skipped_busy_;
+    return {};
+  }
+  const auto authority = authority_.snapshot(now_ms);
+  if (const auto* confirmed =
+          std::get_if<ConfirmedStateAuthority>(&authority.state)) {
+    const auto age = elapsed_since(now_ms, confirmed->observed_ms);
+    if (age && *age <= recent_interval_ms) {
+      ++heartbeat_queries_suppressed_recent_;
+      return {};
+    }
+  }
+  recovery_.cancel();
+  state_ = CoordinatorState::ManualQueryPending;
+  context_ = QueryPendingContext{QueryPurpose::Heartbeat,
+                                 TxReason::HeartbeatQuery};
+  ++heartbeat_queries_admitted_;
   return {};
 }
 CoreEffects ConfirmationCore::handle_learn(LearnMode mode, MonotonicMs now_ms) {
@@ -256,6 +291,7 @@ CoreEffects ConfirmationCore::handle_learn(LearnMode mode, MonotonicMs now_ms) {
 }
 CoreEffects ConfirmationCore::handle_forget(MonotonicMs now_ms) {
   CoreEffects effects;
+  cancel_passive_observation();
   if (live_tx_)
     effects.add(RevokeTxLease{live_tx_->token});
   live_tx_.reset();
@@ -376,7 +412,15 @@ CoreSnapshot ConfirmationCore::snapshot(MonotonicMs now_ms) const {
           deferred_command_,
           epoch_identity_,
           command_bursts_,
-          query_bursts_};
+          query_bursts_,
+          passive_observation_.has_value(),
+          passive_observation_epochs_opened_,
+          passive_confirmations_promoted_,
+          passive_epochs_cancelled_or_expired_,
+          heartbeat_queries_admitted_,
+          heartbeat_queries_skipped_busy_,
+          heartbeat_queries_suppressed_recent_,
+          heartbeat_misses_};
 }
 
 } // namespace quietcool

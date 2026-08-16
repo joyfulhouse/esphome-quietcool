@@ -77,12 +77,7 @@ RecoverySnapshot RecoveryScheduler::snapshot() const {
 }
 
 MonotonicMs RecoveryScheduler::jitter(std::uint32_t salt) const {
-  std::uint32_t mixed = jitter_seed_ ^ salt ^
-      static_cast<std::uint32_t>(anchor_ms_) ^
-      static_cast<std::uint32_t>(anchor_ms_ >> 32U);
-  mixed ^= mixed >> 16U;
-  mixed *= 0x7FEB352DU;
-  mixed ^= mixed >> 15U;
+  const auto mixed = deterministic_jitter_mix(jitter_seed_, salt, anchor_ms_);
   return 500U + mixed % 501U;
 }
 

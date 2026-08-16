@@ -2,9 +2,86 @@
 
 namespace quietcool {
 
+void ConfirmationCore::cancel_passive_observation() {
+  consensus_.reset();
+  if (!passive_observation_) return;
+  passive_observation_.reset();
+  ++passive_epochs_cancelled_or_expired_;
+}
+
+void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms) {
+  if (passive_observation_) {
+    const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
+    if (!age || *age > kPassiveReplyAcceptEndMs)
+      cancel_passive_observation();
+    return;
+  }
+  const auto partial = consensus_.snapshot();
+  if (!partial.has_group) return;
+  const auto age = elapsed_since(now_ms, partial.last_candidate_ms);
+  if (!age || *age > kPassiveReplyAcceptEndMs) consensus_.reset();
+}
+
+CoreEffects ConfirmationCore::handle_passive_candidate(
+    const RecoveredResponse& candidate, bool response_only,
+    MonotonicMs now_ms) {
+  if (passive_observation_) {
+    const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
+    if (!age || *age > kPassiveReplyAcceptEndMs) {
+      cancel_passive_observation();
+    } else if (*age < kPassiveReplyAcceptStartMs) {
+      // Still the first RF burst (or too close to prove otherwise). Do not
+      // feed these repeats into the independently collected second consensus.
+      return {};
+    } else if (!candidate.state.semantically_equals(
+                   passive_observation_->first_burst.state)) {
+      cancel_passive_observation();
+      return {};
+    }
+  }
+
+  const auto consensus = consensus_.observe(candidate, now_ms);
+  if (!consensus) return {};
+  consensus_.reset();
+
+  if (!passive_observation_ && !response_only) {
+    passive_observation_ = PassiveObservationEpoch{*consensus, now_ms};
+    ++passive_observation_epochs_opened_;
+    return {};
+  }
+
+  std::uint8_t independent_candidates = consensus->independent_candidates;
+  if (passive_observation_) {
+    const auto first = passive_observation_->first_burst.independent_candidates;
+    independent_candidates =
+        first > static_cast<std::uint8_t>(0xFFU - independent_candidates)
+            ? 0xFFU
+            : static_cast<std::uint8_t>(first + independent_candidates);
+    passive_observation_.reset();
+  }
+
+  CoreEffects effects;
+  promote_authority(
+      AcceptedObservation{consensus->state,
+                          consensus->capability,
+                          consensus->capability_evidence,
+                          EvidenceSource::PassiveObservationConsensus,
+                          consensus->confidence,
+                          now_ms,
+                          independent_candidates,
+                          {},
+                          {},
+                          {},
+                          false},
+      now_ms, effects);
+  ++passive_confirmations_promoted_;
+  return effects;
+}
+
 CoreEffects ConfirmationCore::assert_oem_priority(MonotonicMs now_ms,
                                                   bool external_state) {
   CoreEffects effects;
+  cancel_passive_observation();
   if (live_tx_)
     effects.add(RevokeTxLease{live_tx_->token});
   live_tx_.reset();
@@ -64,6 +141,9 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
     source = EvidenceSource::FallbackQueryConsensus;
   else if (state_ == CoordinatorState::BootResponseListening)
     source = EvidenceSource::BootQueryConsensus;
+  else if (const auto* response = std::get_if<QueryResponseContext>(&context_);
+           response && response->purpose == QueryPurpose::Heartbeat)
+    source = EvidenceSource::HeartbeatQueryConsensus;
   else if (state_ == CoordinatorState::ManualResponseListening)
     source = EvidenceSource::ManualQueryConsensus;
   else if (const auto* response = std::get_if<QueryResponseContext>(&context_);
@@ -192,6 +272,12 @@ CoreEffects ConfirmationCore::apply_consensus(const Consensus &value,
 CoreEffects ConfirmationCore::close_window_as_miss(MonotonicMs now_ms) {
   CoreEffects effects;
   const auto expected = safe_tail_state();
+  if (const auto* response = std::get_if<QueryResponseContext>(&context_);
+      response && response->purpose == QueryPurpose::Heartbeat) {
+    ++heartbeat_misses_;
+    enter_tail(ReturnIdle{}, expected);
+    return effects;
+  }
   if (state_ == CoordinatorState::PostCommandListening && transaction_) {
     const auto tx = transaction_->snapshot();
     state_ = CoordinatorState::PostCommandTailWait;
@@ -302,6 +388,7 @@ CoreEffects ConfirmationCore::handle_timer_expiry(MonotonicMs deadline,
   CoreEffects effects;
   if (expiry.status != TimerExpiryStatus::Due)
     return effects;
+  cancel_passive_observation();
   if (expiry.persistence)
     effects.add(RequestPersistenceEffect{*expiry.persistence});
   if (recovery_.snapshot().cause != RecoveryCause::OemActivity)
@@ -313,6 +400,8 @@ CoreEffects ConfirmationCore::handle_timer_expiry(MonotonicMs deadline,
   return effects;
 }
 ReceiveContext ConfirmationCore::receive_context() const {
+  if (state_ == CoordinatorState::Idle)
+    return PassiveObservationContext{};
   if (!window_)
     return NoLocalEpoch{};
   if (state_ == CoordinatorState::ResponseTailQuarantine) {

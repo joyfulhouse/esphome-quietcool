@@ -66,6 +66,15 @@ ClassifiedFrame ResponseClassifier::classify(ByteView input, SenderId sender,
     return state ? ClassifiedFrame(ExternalPriorityState{*state})
                  : ClassifiedFrame(InvalidOrIrrelevant{});
   }
+  if (std::holds_alternative<PassiveObservationContext>(context)) {
+    if (!resolved.report) return InvalidOrIrrelevant{};
+    // The documented handheld constructor always sets bit 7. A clear bit is
+    // therefore response-only evidence; a set bit remains ambiguous because
+    // preserved fan replies include both forms.
+    return (resolved.report->state.raw_byte() & 0x80U) == 0
+               ? ClassifiedFrame(PassiveResponseOnlyCandidate{*resolved.report})
+               : ClassifiedFrame(PassiveAmbiguousCandidate{*resolved.report});
+  }
   if (const auto* tail = std::get_if<ClassificationTail>(&context)) {
     if (!state || !tail->window.classifies_at(now_ms)) return InvalidOrIrrelevant{};
     if (state->semantically_equals(tail->expected_state))
