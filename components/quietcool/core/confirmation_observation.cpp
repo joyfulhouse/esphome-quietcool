@@ -3,6 +3,7 @@
 namespace quietcool {
 
 void ConfirmationCore::cancel_passive_observation() {
+  if (state_ != CoordinatorState::Idle) return;
   consensus_.reset();
   if (!passive_observation_) return;
   passive_observation_.reset();
@@ -10,6 +11,7 @@ void ConfirmationCore::cancel_passive_observation() {
 }
 
 void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms) {
+  if (state_ != CoordinatorState::Idle) return;
   if (passive_observation_) {
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs)
@@ -29,13 +31,13 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs) {
       cancel_passive_observation();
-    } else if (*age < kPassiveReplyAcceptStartMs) {
-      // Still the first RF burst (or too close to prove otherwise). Do not
-      // feed these repeats into the independently collected second consensus.
-      return {};
     } else if (!candidate.state.semantically_equals(
                    passive_observation_->first_burst.state)) {
       cancel_passive_observation();
+      return {};
+    } else if (*age < kPassiveReplyAcceptStartMs) {
+      // Still the first RF burst (or too close to prove otherwise). Do not
+      // feed these repeats into the independently collected second consensus.
       return {};
     }
   }

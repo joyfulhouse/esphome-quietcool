@@ -37,6 +37,11 @@ constexpr std::array<TemplateOrigin, 4> kOrigins{
     TemplateOrigin::FallbackQuery, TemplateOrigin::RecoveryQuery};
 constexpr std::size_t kRuleCount = 359 + 2U * kCoordinatorStateCount;
 
+constexpr std::size_t query_family_index(QueryPurpose purpose) {
+  return static_cast<std::size_t>(
+      purpose == QueryPurpose::Heartbeat ? QueryPurpose::Manual : purpose);
+}
+
 constexpr NextStateId tail_or_computed(std::size_t family) {
   // Recovery misses consult the retry schedule; other query misses have a fixed tail.
   return family == 3 ? NextStateId::Computed
@@ -395,31 +400,19 @@ bool TransitionTable::refresh_is_accepted(CoordinatorState state) {
 }
 
 CoordinatorState TransitionTable::query_lease_state(QueryPurpose purpose) {
-  const auto family = purpose == QueryPurpose::Heartbeat
-                          ? static_cast<std::size_t>(QueryPurpose::Manual)
-                          : static_cast<std::size_t>(purpose);
-  return kQueryStates[family].lease;
+  return kQueryStates[query_family_index(purpose)].lease;
 }
 
 CoordinatorState TransitionTable::query_transmitting_state(QueryPurpose purpose) {
-  const auto family = purpose == QueryPurpose::Heartbeat
-                          ? static_cast<std::size_t>(QueryPurpose::Manual)
-                          : static_cast<std::size_t>(purpose);
-  return kQueryStates[family].transmitting;
+  return kQueryStates[query_family_index(purpose)].transmitting;
 }
 
 CoordinatorState TransitionTable::query_response_state(QueryPurpose purpose) {
-  const auto family = purpose == QueryPurpose::Heartbeat
-                          ? static_cast<std::size_t>(QueryPurpose::Manual)
-                          : static_cast<std::size_t>(purpose);
-  return kQueryStates[family].response;
+  return kQueryStates[query_family_index(purpose)].response;
 }
 
 CoordinatorState TransitionTable::query_pending_state(QueryPurpose purpose) {
-  const auto family = purpose == QueryPurpose::Heartbeat
-                          ? static_cast<std::size_t>(QueryPurpose::Manual)
-                          : static_cast<std::size_t>(purpose);
-  return kQueryStates[family].pending;
+  return kQueryStates[query_family_index(purpose)].pending;
 }
 
 QueryPurpose TransitionTable::query_purpose(TxReason reason) {

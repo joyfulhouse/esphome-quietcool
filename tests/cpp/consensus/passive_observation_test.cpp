@@ -32,6 +32,13 @@ std::optional<AuthoritySnapshot> published(const CoreEffects& effects) {
   return std::nullopt;
 }
 
+std::optional<TxRequest> requested_tx(const CoreEffects& effects) {
+  for (std::size_t index = 0; index < effects.size(); ++index)
+    if (const auto* request = std::get_if<RequestTxBurst>(&effects[index]))
+      return request->request;
+  return std::nullopt;
+}
+
 CoreEffects passive_consensus(ConfirmationCore& core, std::uint8_t value,
                               MonotonicMs first_ms) {
   const auto frame = passive_frame(value);
@@ -58,8 +65,7 @@ QC_TEST("passive_observation",
   QC_CHECK_EQ(snapshot.logical_query_bursts, 0U);
   QC_CHECK(!snapshot.transaction.has_value());
 
-  // Preservation checks share the behavioral test so the test still fails if
-  // passive promotion is reverted; these vectors are synthetic, not captures.
+  // Synthetic protocol-model vectors, not claimed captures.
   auto malformed = passive_frame(0x1F);
   malformed.bytes[5] = 0x9F;
   QC_CHECK(!published(core.on_frame(ByteView(malformed.bytes), 1200)).has_value());
@@ -172,6 +178,54 @@ QC_TEST("passive_observation",
   snapshot = recovery.snapshot(1200);
   QC_CHECK(!snapshot.passive_observation_pending);
   QC_CHECK_EQ(snapshot.state, CoordinatorState::OemHoldoff);
+}
+
+QC_TEST("passive_observation",
+        "early contradiction cancels ambiguous evidence") {
+  auto core = passive_core();
+  passive_consensus(core, 0xBF, 1000);
+  const auto contradiction = passive_frame(0x9F);
+  core.on_frame(ByteView(contradiction.bytes), 1200);
+
+  const auto snapshot = core.snapshot(1200);
+  QC_CHECK(!snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 1U);
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(
+      snapshot.authority.state));
+}
+
+QC_TEST("passive_observation",
+        "timer expiry preserves active local response consensus") {
+  auto core = passive_core();
+  core.request_state(
+      FanState::command(Speed::Low, Duration::Hours1), 0);
+  const auto command = requested_tx(core.poll(0));
+  QC_CHECK(command.has_value());
+  core.on_tx_started(command->token, 0);
+  core.on_tx_complete(command->token, 400);
+  passive_consensus(core, 0xD1, 1105);
+  core.poll(2901);
+  QC_CHECK_EQ(core.snapshot(2901).state, CoordinatorState::Idle);
+
+  constexpr MonotonicMs deadline = 3600400;
+  core.request_heartbeat(3599300, 0);
+  const auto query = requested_tx(core.poll(3599300));
+  QC_CHECK(query.has_value());
+  core.on_tx_started(query->token, 3599300);
+  core.on_tx_complete(query->token, 3599300);
+  const auto response = passive_frame(0xD1);
+  core.on_frame(ByteView(response.bytes),
+                deadline - kMinIndependentCandidateGapMs);
+  core.poll(deadline);
+  const auto effects = core.on_frame(ByteView(response.bytes), deadline);
+
+  const auto authority = published(effects);
+  QC_CHECK(authority.has_value());
+  const auto* confirmed =
+      std::get_if<ConfirmedStateAuthority>(&authority->state);
+  QC_CHECK(confirmed != nullptr);
+  QC_CHECK_EQ(confirmed->source, EvidenceSource::HeartbeatQueryConsensus);
+  QC_CHECK_EQ(confirmed->state.raw_byte(), std::uint8_t(0xD1));
 }
 
 }  // namespace

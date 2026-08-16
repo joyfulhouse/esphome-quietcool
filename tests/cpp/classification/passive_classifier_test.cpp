@@ -27,9 +27,7 @@ QC_TEST("passive_classifier",
   QC_CHECK(std::holds_alternative<PassiveResponseOnlyCandidate>(
       classify_idle_value<0x1F>()));
 
-  // Synthetic protocol-model boundary vectors, not claimed captures. They
-  // ride alongside the positive assertion so this test still proves the new
-  // typed path is required while pinning unchanged validation.
+  // Synthetic protocol-model boundary vectors, not claimed captures.
   constexpr std::array<std::uint8_t, 6> malformed{
       0xCB, 0x00, 0x47, 0x39, 0x1F, 0x9F};
   constexpr std::array<std::uint8_t, 6> foreign{
