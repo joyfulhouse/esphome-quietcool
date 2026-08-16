@@ -77,6 +77,60 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
+        "incomplete response-only expiry invalidates known authority") {
+  auto core = passive_core();
+  passive_consensus(core, 0x1F, 100);
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      core.snapshot(160).authority.state));
+
+  const auto response = passive_frame(0x1F);
+  QC_CHECK(!published(core.on_frame(ByteView(response.bytes), 1000)).has_value());
+  const auto effects = core.poll(1000 + kPassiveReplyAcceptEndMs + 1);
+  const auto authority = published(effects);
+  QC_CHECK(authority.has_value());
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&authority->state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+
+  const auto recovery =
+      core.snapshot(1000 + kPassiveReplyAcceptEndMs + 1).recovery;
+  QC_CHECK_EQ(recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+  QC_CHECK_EQ(recovery.phase, RecoveryPhase::QuietWait);
+  core.poll(recovery.due_ms);
+  QC_CHECK_EQ(core.snapshot(recovery.due_ms).state,
+              CoordinatorState::RecoveryQueryPending);
+}
+
+QC_TEST("passive_observation",
+        "conflicting response-only frames invalidate known authority") {
+  auto core = passive_core();
+  passive_consensus(core, 0x1F, 100);
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      core.snapshot(160).authority.state));
+
+  const auto first = passive_frame(0x1F);
+  const auto conflicting = passive_frame(0x3F);
+  QC_CHECK(!published(core.on_frame(ByteView(first.bytes), 1000)).has_value());
+  const auto effects = core.on_frame(ByteView(conflicting.bytes), 1060);
+  const auto authority = published(effects);
+  QC_CHECK(authority.has_value());
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&authority->state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+
+  const auto recovery = core.snapshot(1060).recovery;
+  QC_CHECK_EQ(recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+  QC_CHECK_EQ(recovery.phase, RecoveryPhase::QuietWait);
+  core.poll(recovery.due_ms);
+  QC_CHECK_EQ(core.snapshot(recovery.due_ms).state,
+              CoordinatorState::RecoveryQueryPending);
+}
+
+QC_TEST("passive_observation",
         "one ambiguous burst opens evidence window without publishing") {
   auto core = passive_core();
   const auto effects = passive_consensus(core, 0xBF, 1000);

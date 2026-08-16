@@ -19,9 +19,10 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
                                                     CoreEffects& effects) {
   if (state_ != CoordinatorState::Idle) return;
   const auto partial = consensus_.snapshot();
+  const auto response = passive_response_consensus_.snapshot();
   consensus_.reset();
   passive_response_consensus_.reset();
-  if (!passive_observation_ && !partial.has_group) return;
+  if (!passive_observation_ && !partial.has_group && !response.has_group) return;
   passive_observation_.reset();
   ++passive_epochs_cancelled_or_expired_;
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
@@ -59,7 +60,7 @@ void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms,
   if (response.has_group) {
     const auto age = elapsed_since(now_ms, response.last_candidate_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs)
-      passive_response_consensus_.reset();
+      abandon_passive_observation(now_ms, effects);
   }
 }
 
@@ -84,6 +85,16 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
         passive_observation_->last_first_burst_frame_ms = now_ms;
         return {};
       }
+    }
+  }
+
+  if (response_only) {
+    const auto response = passive_response_consensus_.snapshot();
+    const auto prior = FanState::observed(response.latest_raw_byte);
+    if (response.has_group && prior &&
+        !candidate.state.semantically_equals(prior.value())) {
+      abandon_passive_observation(now_ms, effects);
+      return effects;
     }
   }
 
