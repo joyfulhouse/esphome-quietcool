@@ -14,7 +14,8 @@ enum class EventKind : std::uint8_t {
   TailExpired, RetryDue, OemHoldoffExpired, RecoveryDue,
   LearnCandidateStarted, Learned, LearnWindowExpired, TimerEstimateExpired,
   TxLeaseWatchdogFired, TxBurstWatchdogFired, LocalTailRepeat,
-  LocalTailContradiction, SpecialDiagnosticHeard, Poll
+  LocalTailContradiction, SpecialDiagnosticHeard, HeartbeatRequested,
+  PassiveResponseOnlyCandidateHeard, PassiveAmbiguousCandidateHeard, Poll
 };
 enum class GuardId : std::uint8_t {
   Always, CanLease, MatchingToken, CandidateInEpoch, SemanticMatch,
@@ -33,7 +34,8 @@ enum class ActionId : std::uint8_t {
   StartCommand, CompleteCommand, HandlePostWindowMiss, HandleTailFrame,
   HandleRetryDue, HandleHoldoffExpired, HandleRecoveryDue,
   HandleLearningFrame, HandleLearnExpiry, HandleRadioRecovered,
-  PublishDiagnostic, InvalidInternalEvent
+  PublishDiagnostic, InvalidInternalEvent, HandlePassiveCandidate,
+  HandleHeartbeatRequest
 };
 enum class NextStateId : std::uint8_t {
   Same, Computed, Unprovisioned, Idle, CommandPending, CommandLeaseIssued,

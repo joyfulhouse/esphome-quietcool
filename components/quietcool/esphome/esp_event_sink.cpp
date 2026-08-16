@@ -115,6 +115,8 @@ const char* evidence_name(::quietcool::EvidenceSource source) {
     case Source::TimerExpiryRecoveryConsensus: return "timer_expiry_recovery";
     case Source::PostCommandConsensus: return "post_command";
     case Source::FallbackQueryConsensus: return "fallback_query";
+    case Source::PassiveObservationConsensus: return "passive_observation";
+    case Source::HeartbeatQueryConsensus: return "heartbeat_query";
     case Source::ExternalDiagnostic: return "external_diagnostic";
     case Source::RestoredHint: return "restored_hint";
   }

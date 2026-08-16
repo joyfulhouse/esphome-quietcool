@@ -252,11 +252,15 @@ rather than separately joining fan state and `Fan State Known`, since those
 entities can be delivered in different API batches.
 
 Every genuinely new state/timer command and every actually executed non-query
-burst, including a spaced re-fire, invalidates both known flags. Only a response
-correlated to a local query or closed-loop consensus is eligible to restore
-them; the ambiguity and timer rules below can deliberately keep authority
-false. Passive OEM traffic is diagnostics-only because hearing a command does
-not prove receiver actuation.
+burst, including a spaced re-fire, invalidates both known flags. A response
+correlated to a local query or closed-loop consensus can restore them. Idle
+passive consensus can also restore them when content is response-only, or when
+an ambiguous first consensus burst is followed by a matching independently
+collected consensus burst 400–1600 ms later, after at least 300 ms of RF
+silence. The first ambiguous burst remains non-authoritative because hearing a
+command does not prove receiver actuation. If its bounded reply epoch ends
+without promotion, older authority is invalidated and the existing bounded
+OEM-activity recovery query is armed.
 
 Outgoing commands never optimistically arm or clear confirmed timer metadata.
 If all responses are lost, timer state remains unknown and an expiry cannot
@@ -271,6 +275,34 @@ but this is not a continuous motor sensor. If all frames from a later OEM
 exchange are missed, the last RF confirmation can become stale. Safety systems
 that require fresh physical truth need an explicit Refresh policy or an
 independent airflow/motor sensor.
+
+### Passive synchronization and heartbeat
+
+Idle passive classification uses content only where the documented command
+constructor makes it decisive: bit 7 clear cannot be an ordinary handheld
+command. Values with bit 7 set remain ambiguous because preserved fan replies
+include `90`, `B0`, `B1`, `9F`, and `BF`. An ambiguous consensus opens a
+receive-only evidence epoch; repeats from that burst are ignored, and only a
+second independent matching consensus in the inclusive 400–1600 ms window may
+publish after at least 300 ms of RF silence. That silence bound matches the
+documented duplicate epoch; live callbacks within one three-frame press are
+about 102 ms apart. Contradiction, collision, local work, learning, recovery,
+radio reset, or quarantine cancels the epoch. Timing is defensive correlation
+for inconclusive values, not a universal sender direction bit.
+
+Passive publication uses the normal authority store with the distinct
+`passive_observation` evidence source and never creates or completes a local
+transaction. All existing frame length, sender suffix, duplicated-byte,
+recovery quality, and consensus thresholds remain unchanged.
+
+A dedicated idle/provisioned heartbeat sends the same non-energizing `66 66`
+query. It defaults to 300 seconds, accepts `0s` to disable or `60s`–`3600s`,
+and applies deterministic ±10% jitter to every schedule, including the first,
+while never going below 60 seconds. Busy due times and authority confirmed
+within the configured interval suppress that attempt; the next due time is
+scheduled from the current clock, so loop delays cannot create catch-up bursts.
+Timeout, invalid traffic, or radio recovery counts a miss but preserves
+authority and never fabricates Off.
 
 ### Authority, manual-query, and burst-ordering refinements
 

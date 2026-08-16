@@ -16,11 +16,48 @@ constexpr char kTag[] = "quietcool";
 
 QuietCoolComponent::QuietCoolComponent(
     ::quietcool::Radio* radio, std::uint32_t sender_seed,
-    std::uint32_t preference_key, std::uint32_t jitter_seed)
+    std::uint32_t preference_key, std::uint32_t jitter_seed,
+    std::uint32_t heartbeat_interval_ms)
     : radio_(*radio),
       preferences_(preference_key, sender_seed),
       core_(::quietcool::CoreConfig{jitter_seed}),
-      burst_(clock_, radio_) {}
+      burst_(clock_, radio_),
+      heartbeat_interval_ms_(heartbeat_interval_ms),
+      heartbeat_jitter_seed_(jitter_seed) {}
+
+std::uint32_t QuietCoolComponent::heartbeat_delay(
+    std::uint32_t interval_ms, std::uint32_t seed, std::uint32_t sequence,
+    ::quietcool::MonotonicMs anchor_ms) {
+  if (interval_ms == 0) return 0;
+  const std::uint32_t range = interval_ms / 10U;
+  const std::uint32_t span = range * 2U + 1U;
+  const auto mixed = ::quietcool::deterministic_jitter_mix(
+      seed, 0x48425400U ^ sequence, anchor_ms);
+  const std::uint32_t delay = interval_ms - range + mixed % span;
+  return delay < 60000U ? 60000U : delay;
+}
+
+void QuietCoolComponent::schedule_next_heartbeat(
+    ::quietcool::MonotonicMs now_ms) {
+  const auto delay = heartbeat_delay(heartbeat_interval_ms_,
+                                     heartbeat_jitter_seed_,
+                                     heartbeat_schedule_sequence_++, now_ms);
+  const auto due = ::quietcool::saturating_add(now_ms, delay);
+  if (delay == 0 || due == now_ms)
+    next_heartbeat_due_ms_.reset();
+  else
+    next_heartbeat_due_ms_ = due;
+}
+
+void QuietCoolComponent::reset_heartbeat_schedule(
+    ::quietcool::MonotonicMs now_ms) {
+  heartbeat_schedule_sequence_ = 0;
+  if (!provisioned_sender_ || heartbeat_interval_ms_ == 0) {
+    next_heartbeat_due_ms_.reset();
+    return;
+  }
+  schedule_next_heartbeat(now_ms);
+}
 
 float QuietCoolComponent::get_setup_priority() const {
   return setup_priority::LATE;
@@ -82,6 +119,8 @@ void QuietCoolComponent::setup() {
     rx_valid_count_sensor_->publish_state(rx_valid_count_);
   if (rx_rejected_count_sensor_ != nullptr)
     rx_rejected_count_sensor_->publish_state(rx_rejected_count_);
+  if (!degraded_)
+    reset_heartbeat_schedule(clock_.now_ms());
 }
 
 void QuietCoolComponent::loop() {
@@ -90,6 +129,12 @@ void QuietCoolComponent::loop() {
   // Before the early returns, so a busy loop (callback/burst work every tick)
   // cannot starve the counter flush indefinitely.
   flush_rx_counter_publications(now_ms);
+  if (next_heartbeat_due_ms_ && now_ms >= *next_heartbeat_due_ms_) {
+    schedule_next_heartbeat(now_ms);
+    apply_effects(core_.request_heartbeat(now_ms, heartbeat_interval_ms_),
+                  now_ms);
+    if (degraded_) return;
+  }
   if (const auto callback = core_callbacks_.pop(now_ms)) {
     if (callback->kind == ::quietcool::CoreCallbackKind::TxRejected &&
         callback->token) {
@@ -366,10 +411,12 @@ void QuietCoolComponent::apply_effect(
     if (persistence->request.kind ==
         ::quietcool::PersistenceKind::SaveProvisioning) {
       provisioned_sender_ = persistence->request.sender;
+      reset_heartbeat_schedule(events_.now_ms());
       publish_remote_sender_id();
     } else if (persistence->request.kind ==
                ::quietcool::PersistenceKind::EraseProvisioning) {
       provisioned_sender_.reset();
+      reset_heartbeat_schedule(events_.now_ms());
       publish_remote_sender_id();
     }
     if (!preferences_.apply(persistence->request))

@@ -87,6 +87,19 @@ class ConfirmationCoreTestBuilder final {
   static void set_next_tx_token(ConfirmationCore& core, std::uint64_t next) {
     core.tx_tokens_ = MonotonicIdAllocator<TxToken>(next);
   }
+  static void arm_oem_recovery(ConfirmationCore& core, MonotonicMs now_ms) {
+    core.recovery_.arm_from_oem_activity(now_ms);
+  }
+  static void complete_oem_recovery(ConfirmationCore& core,
+                                    MonotonicMs now_ms) {
+    core.recovery_.arm_from_oem_activity(now_ms);
+    auto due = core.recovery_.snapshot().due_ms;
+    core.recovery_.note_query_started(due);
+    core.recovery_.note_empty_window(due);
+    due = core.recovery_.snapshot().due_ms;
+    core.recovery_.note_query_started(due);
+    core.recovery_.note_empty_window(due);
+  }
 };
 
 }  // namespace quietcool

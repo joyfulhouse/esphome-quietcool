@@ -18,6 +18,7 @@ CODEOWNERS = []
 
 CONF_ADAPTER_ID = "adapter_id"
 CONF_JITTER_SEED = "jitter_seed"
+CONF_HEARTBEAT_INTERVAL = "heartbeat_interval"
 CONF_PACKET = "packet"
 CONF_PREFERENCE_KEY = "preference_key"
 CONF_RADIO = "radio"
@@ -44,6 +45,16 @@ def validate_sender_seed(value):
     if value != 0 and (value >> 24) != 0xCB:
         raise cv.Invalid("sender_seed must be zero or begin with the OEM 0xCB prefix")
     return value
+
+
+def validate_heartbeat_interval(value):
+    interval = cv.positive_time_period_seconds(value)
+    seconds = interval.total_seconds
+    if seconds != 0 and not 60 <= seconds <= 3600:
+        raise cv.Invalid(
+            "heartbeat_interval must be 0s or between 60s and 3600s"
+        )
+    return interval
 
 
 RADIO_SCHEMA = cv.typed_schema(
@@ -77,6 +88,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SENDER_SEED, default=0): validate_sender_seed,
         cv.Optional(CONF_PREFERENCE_KEY, default=0x51434332): cv.hex_uint32_t,
         cv.Optional(CONF_JITTER_SEED, default=0x51434332): cv.hex_uint32_t,
+        cv.Optional(CONF_HEARTBEAT_INTERVAL, default="300s"):
+            validate_heartbeat_interval,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -171,6 +184,7 @@ async def to_code(config):
         config[CONF_SENDER_SEED],
         config[CONF_PREFERENCE_KEY],
         config[CONF_JITTER_SEED],
+        config[CONF_HEARTBEAT_INTERVAL].total_milliseconds,
     )
     await cg.register_component(var, config)
 

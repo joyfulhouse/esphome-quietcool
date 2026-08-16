@@ -83,9 +83,12 @@ action in Home Assistant, plus the bounded confirmation query and spaced re-fire
 attempts that action authorizes. It does, on its own, send a **non-energizing**
 `66 66` **status query** in a few cases — most importantly, a provisioned unit
 sends one shortly after boot (including the reboot after an OTA update) to
-re-establish confirmed state. A status query cannot start the fan. So the radio
-can be briefly live right after power-on: keep the antenna connected and observe
-the normal whole-house-fan safety precautions while flashing.
+re-establish confirmed state, then periodically with deterministic jitter of up
+to ±10%, never below 60 seconds. The `heartbeat_interval` component option
+defaults to `300s`, accepts `60s`–`3600s`, and uses `0s` to disable the periodic
+query. A status query cannot start the fan. So the radio can be briefly live
+right after power-on: keep the antenna connected and observe the normal
+whole-house-fan safety precautions while flashing.
 
 ## 3. Adopt in Home Assistant
 
@@ -161,10 +164,12 @@ replaced by whichever lone fan happened to transmit. Full details are in the
   treating it as physical success.
 - Press a button on the **OEM remote**: the controller records it in RF
   diagnostics, cancels conflicting local work, and never echoes it over RF.
-  It deliberately does not update the safety-facing fan entity from the
-  command alone, because hearing the command does not prove that the fan
-  accepted it. Press **Refresh Fan State** to request query-consensus evidence.
-  A downstream HA automation is a separate explicit command source.
+  The command alone cannot update the safety-facing fan entity. Repeated
+  response-only evidence can publish immediately; command-shaped evidence needs
+  a matching independent reply burst in the bounded window. Incomplete or
+  conflicting evidence publishes Unknown and arms one bounded recovery-query
+  cycle. Press **Refresh Fan State** for an explicit query-consensus check. A
+  downstream HA automation is a separate explicit command source.
 - **Timers.** The **Fan Timer** select runs the fan for 1 / 2 / 4 / 8 / 12
   hours, or `None` for no timer at all.
 
@@ -360,11 +365,13 @@ to finish, clears obsolete queued work, and executes the latest desired action.
   Remote ID`. The controller already has a bound ID (learned earlier, or
   compiled in via `quietcool_sender_id`). Re-pairing is deliberately two steps:
   press `Forget Remote ID`, then `Learn Remote ID` (see §5).
-- **HA entity doesn't follow the OEM remote** — this is intentional: a heard
-  command is diagnostics-only, not proof of fan actuation. Use **Refresh Fan
-  State** to seek authoritative consensus. If nothing changes even after a
-  Refresh, the remote may be unlearned or out of RX range (the device log shows
-  received frames).
+- **HA entity doesn't follow the OEM remote** — a lone command is intentionally
+  insufficient. The entity follows only response-only consensus or a matching
+  independent reply after command-shaped evidence; a missed or conflicting
+  reply makes authority Unknown and triggers bounded recovery. Use **Refresh
+  Fan State** for an explicit check. If nothing changes even after a Refresh,
+  the remote may be unlearned or out of RX range (the device log shows received
+  frames).
 - **Blank OLED on the V3 board** — the V3's display is powered through Vext;
   the config drives it, but early clones vary. See the `PIN CONFIDENCE` notes
   in `legacy/quietcool-lora-v3.yaml` and [docs/hardware.md](docs/hardware.md).

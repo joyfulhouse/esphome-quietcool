@@ -19,6 +19,9 @@ ResponseWindow ResponseWindow::query(QueryPurpose purpose, TxToken token,
     case QueryPurpose::Manual:
       return ResponseWindow(ManualQueryEpoch{token}, started_ms,
           kDirectQueryAcceptStartMs, kDirectQueryAcceptEndMs, kResponseTailEndMs);
+    case QueryPurpose::Heartbeat:
+      return ResponseWindow(HeartbeatQueryEpoch{token}, started_ms,
+          kDirectQueryAcceptStartMs, kDirectQueryAcceptEndMs, kResponseTailEndMs);
     case QueryPurpose::Fallback:
       return ResponseWindow(FallbackQueryEpoch{token}, started_ms,
           kDirectQueryAcceptStartMs, kDirectQueryAcceptEndMs, kResponseTailEndMs);

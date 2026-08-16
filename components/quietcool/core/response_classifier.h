@@ -6,6 +6,7 @@
 namespace quietcool {
 
 struct NoLocalEpoch final {};
+struct PassiveObservationContext final {};
 struct ActiveResponseWindow final {
   ResponseWindow window;
   std::uint32_t epoch_identity;
@@ -16,8 +17,8 @@ struct ClassificationTail final {
   FanState expected_state;
   std::uint32_t epoch_identity;
 };
-using ReceiveContext = std::variant<NoLocalEpoch, ActiveResponseWindow,
-                                    ClassificationTail>;
+using ReceiveContext = std::variant<NoLocalEpoch, PassiveObservationContext,
+                                    ActiveResponseWindow, ClassificationTail>;
 
 struct ExactOemQuery final {};
 struct LocalResponseCandidate final {
@@ -27,13 +28,15 @@ struct LocalResponseCandidate final {
 struct LocalTailRepeat final { FanState state; std::uint32_t epoch_identity; };
 struct LocalTailContradiction final { FanState state; std::uint32_t epoch_identity; };
 struct ExternalPriorityState final { FanState state; };
+struct PassiveResponseOnlyCandidate final { RecoveredResponse response; };
+struct PassiveAmbiguousCandidate final { RecoveredResponse response; };
 struct IgnoredPostCommandPreAcceptanceState final { FanState state; };
 struct SpecialDiagnostic final { FanState state; };
 struct InvalidOrIrrelevant final {};
 using ClassifiedFrame = std::variant<ExactOemQuery, LocalResponseCandidate,
     LocalTailRepeat, LocalTailContradiction, ExternalPriorityState,
-    IgnoredPostCommandPreAcceptanceState, SpecialDiagnostic,
-    InvalidOrIrrelevant>;
+    PassiveResponseOnlyCandidate, PassiveAmbiguousCandidate,
+    IgnoredPostCommandPreAcceptanceState, SpecialDiagnostic, InvalidOrIrrelevant>;
 
 class ResponseClassifier final {
  public:

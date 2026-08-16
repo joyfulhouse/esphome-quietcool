@@ -136,6 +136,9 @@ CoreEffects ConfirmationCore::dispatch(ActionId action,
   case ActionId::AcceptRefresh:
   case ActionId::RefuseRefresh:
     return handle_manual_refresh(action, input.now_ms);
+  case ActionId::HandleHeartbeatRequest:
+    return handle_heartbeat_request(input.heartbeat_interval_ms,
+                                    input.now_ms);
   case ActionId::HandleLearnRequest:
     return handle_learn(*input.learn_mode, input.now_ms);
   case ActionId::HandleForget:
@@ -209,6 +212,15 @@ CoreEffects ConfirmationCore::dispatch(ActionId action,
         PublishCoreEvent{{CoreEventKind::Diagnostic, state_, {}, {}, {}}});
     return effects;
   }
+  case ActionId::HandlePassiveCandidate:
+    if (const auto* decisive =
+            std::get_if<PassiveResponseOnlyCandidate>(input.classified))
+      return handle_passive_candidate(decisive->response, true, input.now_ms);
+    if (const auto* ambiguous =
+            std::get_if<PassiveAmbiguousCandidate>(input.classified))
+      return handle_passive_candidate(ambiguous->response, false,
+                                      input.now_ms);
+    return {};
   case ActionId::InvalidInternalEvent: {
     CoreEffects effects;
     effects.add(PublishCoreEvent{
@@ -238,6 +250,12 @@ CoreEffects ConfirmationCore::request_state(FanState requested,
 }
 CoreEffects ConfirmationCore::request_manual_refresh(MonotonicMs now_ms) {
   return reduce({EventKind::ManualRefreshRequested, now_ms});
+}
+CoreEffects ConfirmationCore::request_heartbeat(
+    MonotonicMs now_ms, MonotonicMs recent_interval_ms) {
+  ReducerInput input{EventKind::HeartbeatRequested, now_ms};
+  input.heartbeat_interval_ms = recent_interval_ms;
+  return reduce(input);
 }
 CoreEffects ConfirmationCore::request_learn(LearnMode mode,
                                             MonotonicMs now_ms) {
@@ -291,6 +309,10 @@ CoreEffects ConfirmationCore::on_frame(ByteView input, MonotonicMs now_ms) {
     kind = EventKind::ExactOemQueryHeard;
   else if (std::holds_alternative<ExternalPriorityState>(classified))
     kind = EventKind::ExternalStateHeard;
+  else if (std::holds_alternative<PassiveResponseOnlyCandidate>(classified))
+    kind = EventKind::PassiveResponseOnlyCandidateHeard;
+  else if (std::holds_alternative<PassiveAmbiguousCandidate>(classified))
+    kind = EventKind::PassiveAmbiguousCandidateHeard;
   else if (std::holds_alternative<LocalResponseCandidate>(classified))
     kind = EventKind::ResponseCandidate;
   else if (std::holds_alternative<LocalTailRepeat>(classified))
@@ -310,6 +332,8 @@ CoreEffects ConfirmationCore::on_frame(ByteView input, MonotonicMs now_ms) {
 }
 
 CoreEffects ConfirmationCore::poll(MonotonicMs now_ms) {
+  CoreEffects effects;
+  expire_passive_evidence(now_ms, effects);
   const auto permission = TransitionTable::rf_permission(state_);
   ReducerInput event{EventKind::Poll, now_ms};
   if (window_ && permission.accept_response) {
@@ -382,7 +406,18 @@ CoreEffects ConfirmationCore::poll(MonotonicMs now_ms) {
       event.token = token;
     }
   }
-  return reduce(event);
+  if (effects.size() == 0)
+    return reduce(event);
+  // Passive expiry emits exactly one authority publication and moves Idle to
+  // RecoveryQuietWait. The only event this poll can then select is RecoveryDue,
+  // whose handler emits no effects; every effect-emitting reduction takes the
+  // zero-copy branch above with the full buffer available.
+  static_assert(CoreEffects::kCapacity >= 1,
+                "same-tick passive publication must fit CoreEffects");
+  const auto reduced = reduce(event);
+  for (std::size_t index = 0; index < reduced.size(); ++index)
+    effects.add(reduced[index]);
+  return effects;
 }
 
 bool ConfirmationCore::token_matches(TxToken token) const {

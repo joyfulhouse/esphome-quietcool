@@ -35,7 +35,12 @@ constexpr std::array<QueryStates, 4> kQueryStates{{
 constexpr std::array<TemplateOrigin, 4> kOrigins{
     TemplateOrigin::BootQuery, TemplateOrigin::ManualQuery,
     TemplateOrigin::FallbackQuery, TemplateOrigin::RecoveryQuery};
-constexpr std::size_t kRuleCount = 357 + kCoordinatorStateCount;
+constexpr std::size_t kRuleCount = 359 + 2U * kCoordinatorStateCount;
+
+constexpr std::size_t query_family_index(QueryPurpose purpose) {
+  return static_cast<std::size_t>(
+      purpose == QueryPurpose::Heartbeat ? QueryPurpose::Manual : purpose);
+}
 
 constexpr NextStateId tail_or_computed(std::size_t family) {
   // Recovery misses consult the retry schedule; other query misses have a fixed tail.
@@ -112,6 +117,14 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
   std::size_t index = 0;
   for (std::size_t family = 0; family < 4; ++family)
     add_query_family(rules, index, family);
+  add_rule(rules, index, CoordinatorState::Idle,
+           EventKind::PassiveResponseOnlyCandidateHeard, GuardId::Always,
+           ActionId::HandlePassiveCandidate, NextStateId::Same, 1,
+           TemplateOrigin::None);
+  add_rule(rules, index, CoordinatorState::Idle,
+           EventKind::PassiveAmbiguousCandidateHeard, GuardId::Always,
+           ActionId::HandlePassiveCandidate, NextStateId::Computed, 1,
+           TemplateOrigin::None);
   for (const auto family : {0U, 1U, 3U}) {
     add_rule(rules, index, kQueryStates[family].response,
              EventKind::ConsensusReached, GuardId::Always,
@@ -128,6 +141,9 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
              state == CoordinatorState::Idle ? NextStateId::ManualQueryPending
                                              : NextStateId::Same,
              1, TemplateOrigin::None);
+    add_rule(rules, index, state, EventKind::HeartbeatRequested,
+             GuardId::Always, ActionId::HandleHeartbeatRequest,
+             NextStateId::Computed, 1, TemplateOrigin::None);
   }
   for (std::uint8_t value = 0; value < kCoordinatorStateCount; ++value) {
     const auto state = static_cast<CoordinatorState>(value);
@@ -384,24 +400,25 @@ bool TransitionTable::refresh_is_accepted(CoordinatorState state) {
 }
 
 CoordinatorState TransitionTable::query_lease_state(QueryPurpose purpose) {
-  return kQueryStates[static_cast<std::size_t>(purpose)].lease;
+  return kQueryStates[query_family_index(purpose)].lease;
 }
 
 CoordinatorState TransitionTable::query_transmitting_state(QueryPurpose purpose) {
-  return kQueryStates[static_cast<std::size_t>(purpose)].transmitting;
+  return kQueryStates[query_family_index(purpose)].transmitting;
 }
 
 CoordinatorState TransitionTable::query_response_state(QueryPurpose purpose) {
-  return kQueryStates[static_cast<std::size_t>(purpose)].response;
+  return kQueryStates[query_family_index(purpose)].response;
 }
 
 CoordinatorState TransitionTable::query_pending_state(QueryPurpose purpose) {
-  return kQueryStates[static_cast<std::size_t>(purpose)].pending;
+  return kQueryStates[query_family_index(purpose)].pending;
 }
 
 QueryPurpose TransitionTable::query_purpose(TxReason reason) {
   if (reason == TxReason::BootQuery) return QueryPurpose::Boot;
   if (reason == TxReason::ManualQuery) return QueryPurpose::Manual;
+  if (reason == TxReason::HeartbeatQuery) return QueryPurpose::Heartbeat;
   if (reason == TxReason::TransactionFallbackQuery) return QueryPurpose::Fallback;
   return QueryPurpose::Recovery;
 }
@@ -414,6 +431,8 @@ std::optional<QueryPurpose> TransitionTable::query_family_of(TxReason reason) {
     return QueryPurpose::Boot;
   case TxReason::ManualQuery:
     return QueryPurpose::Manual;
+  case TxReason::HeartbeatQuery:
+    return QueryPurpose::Heartbeat;
   case TxReason::TransactionFallbackQuery:
     return QueryPurpose::Fallback;
   case TxReason::RecoveryQueryInitial:

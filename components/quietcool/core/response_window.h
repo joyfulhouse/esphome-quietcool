@@ -7,11 +7,13 @@ namespace quietcool {
 struct PostCommandEpoch final { TransactionId transaction; AttemptNumber attempt; };
 struct BootQueryEpoch final { TxToken token; };
 struct ManualQueryEpoch final { TxToken token; };
+struct HeartbeatQueryEpoch final { TxToken token; };
 struct FallbackQueryEpoch final { TxToken token; };
 struct RecoveryQueryEpoch final { TxToken token; };
 struct TailEpoch final { MonotonicMs anchor_ms; };
 using ResponseEpoch = std::variant<PostCommandEpoch, BootQueryEpoch,
-    ManualQueryEpoch, FallbackQueryEpoch, RecoveryQueryEpoch, TailEpoch>;
+    ManualQueryEpoch, HeartbeatQueryEpoch, FallbackQueryEpoch,
+    RecoveryQueryEpoch, TailEpoch>;
 
 enum class WindowPosition : std::uint8_t {
   BeforeAcceptance, Accepting, ClassificationTail, Expired

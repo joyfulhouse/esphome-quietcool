@@ -231,6 +231,14 @@ struct CoreSnapshot final {
   std::uint32_t epoch_identity;
   std::uint32_t logical_command_bursts;
   std::uint32_t logical_query_bursts;
+  bool passive_observation_pending;
+  std::uint32_t passive_observation_epochs_opened;
+  std::uint32_t passive_confirmations_promoted;
+  std::uint32_t passive_epochs_cancelled_or_expired;
+  std::uint32_t heartbeat_queries_admitted;
+  std::uint32_t heartbeat_queries_skipped_busy;
+  std::uint32_t heartbeat_queries_suppressed_recent;
+  std::uint32_t heartbeat_misses;
 };
 
 #ifdef QUIETCOOL_HOST_TEST
@@ -244,6 +252,8 @@ class ConfirmationCore final {
   CoreEffects on_radio_ready(MonotonicMs now_ms);
   CoreEffects request_state(FanState requested, MonotonicMs now_ms);
   CoreEffects request_manual_refresh(MonotonicMs now_ms);
+  CoreEffects request_heartbeat(MonotonicMs now_ms,
+                                MonotonicMs recent_interval_ms);
   CoreEffects request_learn(LearnMode mode, MonotonicMs now_ms);
   CoreEffects request_forget(MonotonicMs now_ms);
   CoreEffects on_frame(ByteView input, MonotonicMs now_ms);
@@ -279,6 +289,7 @@ class ConfirmationCore final {
     std::optional<TxToken> token;
     std::optional<RecoveryDue> recovery_due;
     std::optional<MonotonicMs> timer_deadline;
+    MonotonicMs heartbeat_interval_ms{0};
   };
   static bool transaction_guard_matches(GuardId guard,
                                         const TransactionConsensusInput& input) {
@@ -301,6 +312,8 @@ class ConfirmationCore final {
   CoreEffects handle_radio_ready(MonotonicMs now_ms);
   CoreEffects handle_command_request(FanState requested, MonotonicMs now_ms);
   CoreEffects handle_manual_refresh(ActionId action, MonotonicMs now_ms);
+  CoreEffects handle_heartbeat_request(MonotonicMs recent_interval_ms,
+                                       MonotonicMs now_ms);
   CoreEffects handle_learn(LearnMode mode, MonotonicMs now_ms);
   CoreEffects handle_forget(MonotonicMs now_ms);
   CoreEffects handle_learning_frame(ByteView input, MonotonicMs now_ms);
@@ -312,6 +325,9 @@ class ConfirmationCore final {
   CoreEffects handle_tail_frame(EventKind kind, MonotonicMs now_ms);
   CoreEffects handle_recovery_due(const RecoveryDue& due);
   CoreEffects handle_timer_expiry(MonotonicMs deadline, MonotonicMs now_ms);
+  CoreEffects handle_passive_candidate(const RecoveredResponse& candidate,
+                                       bool response_only,
+                                       MonotonicMs now_ms);
   CoreEffects refuse(RefusalReason reason) const;
   CoreEffects assert_oem_priority(MonotonicMs now_ms, bool external_state);
   CoreEffects issue_command(MonotonicMs now_ms);
@@ -331,6 +347,10 @@ class ConfirmationCore final {
   CoreEffects begin_deferred(MonotonicMs now_ms);
   void finish_transaction(TransactionOutcome outcome, CoreEffects& effects);
   void enter_tail(TailExit exit, FanState expected);
+  void cancel_passive_observation();
+  void abandon_passive_observation(MonotonicMs now_ms,
+                                   CoreEffects& effects);
+  void expire_passive_evidence(MonotonicMs now_ms, CoreEffects& effects);
   ReceiveContext receive_context() const;
   bool token_matches(TxToken token) const;
   CoordinatorState state_{CoordinatorState::Unprovisioned};
@@ -341,6 +361,7 @@ class ConfirmationCore final {
   std::optional<PriorAuthoritySnapshot> deferred_prior_;
   std::optional<ResponseWindow> window_;
   ConsensusTracker consensus_;
+  ConsensusTracker passive_response_consensus_;
   AuthorityStore authority_;
   ObservationPolicy policy_;
   RecoveryScheduler recovery_;
@@ -354,6 +375,19 @@ class ConfirmationCore final {
   std::uint32_t epoch_identity_{0};
   std::uint32_t command_bursts_{0};
   std::uint32_t query_bursts_{0};
+  struct PassiveObservationEpoch final {
+    Consensus first_burst;
+    MonotonicMs opened_ms;
+    MonotonicMs last_first_burst_frame_ms;
+  };
+  std::optional<PassiveObservationEpoch> passive_observation_;
+  std::uint32_t passive_observation_epochs_opened_{0};
+  std::uint32_t passive_confirmations_promoted_{0};
+  std::uint32_t passive_epochs_cancelled_or_expired_{0};
+  std::uint32_t heartbeat_queries_admitted_{0};
+  std::uint32_t heartbeat_queries_skipped_busy_{0};
+  std::uint32_t heartbeat_queries_suppressed_recent_{0};
+  std::uint32_t heartbeat_misses_{0};
   bool radio_ready_seen_{false};
 };
 
