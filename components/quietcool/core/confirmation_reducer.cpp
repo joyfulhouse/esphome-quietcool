@@ -332,7 +332,10 @@ CoreEffects ConfirmationCore::on_frame(ByteView input, MonotonicMs now_ms) {
 }
 
 CoreEffects ConfirmationCore::poll(MonotonicMs now_ms) {
-  expire_passive_evidence(now_ms);
+  CoreEffects passive_effects;
+  expire_passive_evidence(now_ms, passive_effects);
+  if (passive_effects.size() != 0)
+    return passive_effects;
   const auto permission = TransitionTable::rf_permission(state_);
   ReducerInput event{EventKind::Poll, now_ms};
   if (window_ && permission.accept_response) {

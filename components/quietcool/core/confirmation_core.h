@@ -348,8 +348,9 @@ class ConfirmationCore final {
   void finish_transaction(TransactionOutcome outcome, CoreEffects& effects);
   void enter_tail(TailExit exit, FanState expected);
   void cancel_passive_observation();
-  void abandon_passive_observation(MonotonicMs now_ms);
-  void expire_passive_evidence(MonotonicMs now_ms);
+  void abandon_passive_observation(MonotonicMs now_ms,
+                                   CoreEffects& effects);
+  void expire_passive_evidence(MonotonicMs now_ms, CoreEffects& effects);
   ReceiveContext receive_context() const;
   bool token_matches(TxToken token) const;
   CoordinatorState state_{CoordinatorState::Unprovisioned};

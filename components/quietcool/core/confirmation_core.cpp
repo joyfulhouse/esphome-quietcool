@@ -57,7 +57,7 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
 }
 CoreEffects ConfirmationCore::handle_radio_ready(MonotonicMs now_ms) {
   CoreEffects effects;
-  abandon_passive_observation(now_ms);
+  abandon_passive_observation(now_ms, effects);
   if (radio_ready_seen_)
     return effects;
   radio_ready_seen_ = true;
@@ -238,9 +238,10 @@ CoreEffects ConfirmationCore::handle_manual_refresh(ActionId action,
 }
 CoreEffects ConfirmationCore::handle_heartbeat_request(
     MonotonicMs recent_interval_ms, MonotonicMs now_ms) {
-  expire_passive_evidence(now_ms);
+  CoreEffects effects;
+  expire_passive_evidence(now_ms, effects);
   if (!sender_)
-    return {};
+    return effects;
   const auto recovery = recovery_.snapshot();
   const bool recovery_pending =
       recovery.cause.has_value() && recovery.phase != RecoveryPhase::Inactive &&
@@ -249,7 +250,7 @@ CoreEffects ConfirmationCore::handle_heartbeat_request(
   if (state_ != CoordinatorState::Idle || passive_observation_ ||
       consensus_.snapshot().has_group || recovery_pending) {
     ++heartbeat_queries_skipped_busy_;
-    return {};
+    return effects;
   }
   const auto authority = authority_.snapshot(now_ms);
   if (const auto* confirmed =
@@ -257,7 +258,7 @@ CoreEffects ConfirmationCore::handle_heartbeat_request(
     const auto age = elapsed_since(now_ms, confirmed->observed_ms);
     if (age && *age <= recent_interval_ms) {
       ++heartbeat_queries_suppressed_recent_;
-      return {};
+      return effects;
     }
   }
   recovery_.cancel();
@@ -265,7 +266,7 @@ CoreEffects ConfirmationCore::handle_heartbeat_request(
   context_ = QueryPendingContext{QueryPurpose::Heartbeat,
                                  TxReason::HeartbeatQuery};
   ++heartbeat_queries_admitted_;
-  return {};
+  return effects;
 }
 CoreEffects ConfirmationCore::handle_learn(LearnMode mode, MonotonicMs now_ms) {
   // Re-learning a bound unit requires an explicit override: Forget, then Learn

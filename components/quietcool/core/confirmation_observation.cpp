@@ -14,13 +14,18 @@ void ConfirmationCore::cancel_passive_observation() {
     recovery_.cancel();
 }
 
-void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms) {
+void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
+                                                    CoreEffects& effects) {
   if (state_ != CoordinatorState::Idle) return;
+  const auto partial = consensus_.snapshot();
+  const bool ambiguous_partial =
+      partial.has_group && (partial.latest_raw_byte & 0x80U) != 0;
   consensus_.reset();
-  if (!passive_observation_) return;
+  if (!passive_observation_ && !ambiguous_partial) return;
   passive_observation_.reset();
   ++passive_epochs_cancelled_or_expired_;
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
+  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   const auto recovery = recovery_.snapshot();
   if (recovery.cause != RecoveryCause::OemActivity ||
       recovery.phase == RecoveryPhase::Inactive)
@@ -29,34 +34,39 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms) {
   context_ = RecoveryContext{RecoveryCause::OemActivity};
 }
 
-void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms) {
+void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms,
+                                                CoreEffects& effects) {
   if (state_ != CoordinatorState::Idle) return;
   if (passive_observation_) {
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs)
-      abandon_passive_observation(now_ms);
+      abandon_passive_observation(now_ms, effects);
     return;
   }
   const auto partial = consensus_.snapshot();
   if (!partial.has_group) return;
   const auto age = elapsed_since(now_ms, partial.last_candidate_ms);
-  if (!age || *age > kPassiveReplyAcceptEndMs) consensus_.reset();
+  if (!age || *age > kPassiveReplyAcceptEndMs) {
+    if ((partial.latest_raw_byte & 0x80U) != 0)
+      abandon_passive_observation(now_ms, effects);
+    else
+      consensus_.reset();
+  }
 }
 
 CoreEffects ConfirmationCore::handle_passive_candidate(
     const RecoveredResponse& candidate, bool response_only,
     MonotonicMs now_ms) {
-  if (passive_observation_ && response_only)
-    cancel_passive_observation();
-  if (passive_observation_) {
+  CoreEffects effects;
+  if (passive_observation_ && !response_only) {
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs) {
-      abandon_passive_observation(now_ms);
-      return {};
+      abandon_passive_observation(now_ms, effects);
+      return effects;
     } else if (!candidate.state.semantically_equals(
                    passive_observation_->first_burst.state)) {
-      cancel_passive_observation();
-      return {};
+      abandon_passive_observation(now_ms, effects);
+      return effects;
     } else {
       const auto silence = elapsed_since(
           now_ms, passive_observation_->last_first_burst_frame_ms);
@@ -69,7 +79,7 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
   }
 
   const auto consensus = consensus_.observe(candidate, now_ms);
-  if (!consensus) return {};
+  if (!consensus) return effects;
   consensus_.reset();
 
   if (!passive_observation_ && !response_only) {
@@ -77,7 +87,7 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
         PassiveObservationEpoch{*consensus, now_ms, now_ms};
     recovery_.arm_from_oem_activity(now_ms);
     ++passive_observation_epochs_opened_;
-    return {};
+    return effects;
   }
 
   std::uint8_t independent_candidates = consensus->independent_candidates;
@@ -90,7 +100,6 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
     passive_observation_.reset();
   }
 
-  CoreEffects effects;
   promote_authority(
       AcceptedObservation{consensus->state,
                           consensus->capability,

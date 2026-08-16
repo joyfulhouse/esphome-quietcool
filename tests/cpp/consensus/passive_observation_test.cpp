@@ -106,7 +106,7 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
-        "same-burst repeats and passive window boundaries cannot promote") {
+        "same-burst repeats cannot promote and partial expiry recovers") {
   auto core = passive_core();
   passive_consensus(core, 0xBF, 1000);
   const auto repeat = passive_frame(0xBF);
@@ -117,11 +117,15 @@ QC_TEST("passive_observation",
   auto insufficient = passive_core();
   const auto lone = passive_frame(0xBF);
   insufficient.on_frame(ByteView(lone.bytes), 1000);
-  insufficient.poll(1000 + kPassiveReplyAcceptEndMs + 1);
+  const auto expiry =
+      insufficient.poll(1000 + kPassiveReplyAcceptEndMs + 1);
+  const auto authority = published(expiry);
+  QC_CHECK(authority.has_value());
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(authority->state));
   insufficient.request_heartbeat(300000, 300000);
   const auto after_stale_partial = insufficient.snapshot(300000);
-  QC_CHECK_EQ(after_stale_partial.heartbeat_queries_admitted, 1U);
-  QC_CHECK_EQ(after_stale_partial.heartbeat_queries_skipped_busy, 0U);
+  QC_CHECK_EQ(after_stale_partial.heartbeat_queries_admitted, 0U);
+  QC_CHECK_EQ(after_stale_partial.heartbeat_queries_skipped_busy, 1U);
 }
 
 QC_TEST("passive_observation", "reply-window end is inclusive") {
@@ -137,8 +141,10 @@ QC_TEST("passive_observation", "reply-window end is inclusive") {
   auto end_excluded = passive_core();
   passive_consensus(end_excluded, 0xBF, 1000);
   end_excluded.on_frame(ByteView(frame.bytes), 2601);
-  QC_CHECK(!published(end_excluded.on_frame(ByteView(frame.bytes), 2661))
-                .has_value());
+  const auto excluded =
+      published(end_excluded.on_frame(ByteView(frame.bytes), 2661));
+  QC_CHECK(excluded.has_value());
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(excluded->state));
 }
 
 QC_TEST("passive_observation", "inter-burst silence is inclusive") {
@@ -194,17 +200,51 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
-        "contradiction and local ownership cancel passive evidence") {
+        "incomplete response-only evidence preserves ambiguous recovery") {
+  auto core = passive_core();
+  passive_consensus(core, 0x1F, 1000);
+  passive_consensus(core, 0xBF, 2000);
+  const auto response_only = passive_frame(0x1F);
+  const auto first = core.on_frame(ByteView(response_only.bytes), 2200);
+  QC_CHECK(!published(first).has_value());
+
+  auto snapshot = core.snapshot(2200);
+  QC_CHECK(snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::QuietWait);
+
+  const auto expiry = core.poll(2060 + kPassiveReplyAcceptEndMs + 1);
+  const auto authority = published(expiry);
+  QC_CHECK(authority.has_value());
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&authority->state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+  snapshot = core.snapshot(3661);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
+}
+
+QC_TEST("passive_observation",
+        "contradiction abandons while local ownership cancels evidence") {
   auto contradiction = passive_core();
-  passive_consensus(contradiction, 0xBF, 1000);
+  passive_consensus(contradiction, 0x1F, 1000);
+  passive_consensus(contradiction, 0xBF, 2000);
   const auto other = passive_frame(0x9F);
-  contradiction.on_frame(
-      ByteView(other.bytes), 1060 + kPassiveReplyAcceptStartMs);
-  auto snapshot = contradiction.snapshot(1460);
+  const auto conflict =
+      contradiction.on_frame(ByteView(other.bytes), 2200);
+  const auto conflict_authority = published(conflict);
+  QC_CHECK(conflict_authority.has_value());
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&conflict_authority->state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+  auto snapshot = contradiction.snapshot(2200);
   QC_CHECK(!snapshot.passive_observation_pending);
   QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 1U);
-  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(
-      snapshot.authority.state));
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
+  QC_CHECK_EQ(snapshot.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
 
   auto command = passive_core();
   passive_consensus(command, 0xBF, 1000);
@@ -237,7 +277,7 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
-        "post-setup radio readiness abandons a pending passive epoch") {
+        "post-setup radio readiness publishes abandoned authority") {
   auto core = passive_core();
   core.on_radio_ready(0);
   const auto boot_query = requested_tx(core.poll(0));
@@ -249,15 +289,19 @@ QC_TEST("passive_observation",
   QC_CHECK_EQ(core.snapshot(kResponseTailEndMs + 1).state,
               CoordinatorState::Idle);
 
+  passive_consensus(core, 0x1F, 2700);
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      core.snapshot(2760).authority.state));
   passive_consensus(core, 0xBF, 3000);
   QC_CHECK(core.snapshot(3060).passive_observation_pending);
   const auto effects = core.on_radio_ready(3200);
   const auto snapshot = core.snapshot(3200);
-  QC_CHECK_EQ(effects.size(), 0U);
+  const auto authority = published(effects);
+  QC_CHECK(authority.has_value());
   QC_CHECK(!snapshot.passive_observation_pending);
   QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 1U);
   const auto* unknown =
-      std::get_if<UnknownStateAuthority>(&snapshot.authority.state);
+      std::get_if<UnknownStateAuthority>(&authority->state);
   QC_CHECK(unknown != nullptr);
   QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
   QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
@@ -273,16 +317,6 @@ QC_TEST("passive_observation",
       promoted, 0xBF, 1060 + kPassiveReplyAcceptStartMs);
   QC_CHECK(published(promotion).has_value());
   auto snapshot = promoted.snapshot(1520);
-  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::Inactive);
-  QC_CHECK(!snapshot.recovery.cause.has_value());
-
-  auto conflicted = passive_core();
-  passive_consensus(conflicted, 0xBF, 1000);
-  const auto contradiction = passive_frame(0x9F);
-  conflicted.on_frame(ByteView(contradiction.bytes), 1200);
-  snapshot = conflicted.snapshot(1200);
-  QC_CHECK(!snapshot.passive_observation_pending);
-  QC_CHECK_EQ(snapshot.state, CoordinatorState::Idle);
   QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::Inactive);
   QC_CHECK(!snapshot.recovery.cause.has_value());
 
@@ -303,10 +337,13 @@ QC_TEST("passive_observation",
   passive_consensus(missed, 0xBF, 2000);
   QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
       missed.snapshot(2060).authority.state));
-  missed.poll(2060 + kPassiveReplyAcceptEndMs + 1);
+  const auto missed_expiry =
+      missed.poll(2060 + kPassiveReplyAcceptEndMs + 1);
+  const auto missed_authority = published(missed_expiry);
+  QC_CHECK(missed_authority.has_value());
   snapshot = missed.snapshot(3661);
   const auto* unknown =
-      std::get_if<UnknownStateAuthority>(&snapshot.authority.state);
+      std::get_if<UnknownStateAuthority>(&missed_authority->state);
   QC_CHECK(unknown != nullptr);
   QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
   QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
@@ -316,17 +353,42 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
-        "early contradiction cancels ambiguous evidence") {
-  auto core = passive_core();
-  passive_consensus(core, 0xBF, 1000);
-  const auto contradiction = passive_frame(0x9F);
-  core.on_frame(ByteView(contradiction.bytes), 1200);
+        "single ambiguous candidate expires but invalid noise does not") {
+  auto ambiguous = passive_core();
+  passive_consensus(ambiguous, 0x1F, 1000);
+  const auto command_shaped = passive_frame(0xBF);
+  ambiguous.on_frame(ByteView(command_shaped.bytes), 2000);
+  const auto expiry = ambiguous.poll(2000 + kPassiveReplyAcceptEndMs + 1);
+  const auto authority = published(expiry);
+  QC_CHECK(authority.has_value());
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&authority->state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+  const auto snapshot = ambiguous.snapshot(3601);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
+  QC_CHECK_EQ(snapshot.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
 
-  const auto snapshot = core.snapshot(1200);
-  QC_CHECK(!snapshot.passive_observation_pending);
-  QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 1U);
-  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(
-      snapshot.authority.state));
+  auto malformed = passive_core();
+  passive_consensus(malformed, 0x1F, 1000);
+  auto malformed_frame = passive_frame(0xBF);
+  malformed_frame.bytes[5] = 0x9F;
+  QC_CHECK(!published(malformed.on_frame(ByteView(malformed_frame.bytes), 2000))
+                .has_value());
+  QC_CHECK(!published(malformed.poll(3601)).has_value());
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      malformed.snapshot(3601).authority.state));
+
+  auto foreign = passive_core();
+  passive_consensus(foreign, 0x1F, 1000);
+  auto foreign_frame = passive_frame(0xBF);
+  foreign_frame.bytes[3] ^= 1U;
+  QC_CHECK(!published(foreign.on_frame(ByteView(foreign_frame.bytes), 2000))
+                .has_value());
+  QC_CHECK(!published(foreign.poll(3601)).has_value());
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      foreign.snapshot(3601).authority.state));
 }
 
 QC_TEST("passive_observation",

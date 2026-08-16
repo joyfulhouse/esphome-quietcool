@@ -53,8 +53,13 @@
   update order is not atomic. `Fan State Known` remains the entity-authority
   diagnostic, and `Timer State Known` gates the select/countdown. A new
   command and every actually executed non-query burst must invalidate both;
-  only correlated local-query consensus may set them. Passive OEM traffic is
-  diagnostics-only and must never mutate the safety fan entity. Outgoing
+  correlated local-query consensus or conservative passive consensus may set
+  them. A lone OEM command must never publish state: response-only evidence
+  still requires normal consensus, while command-shaped evidence requires a
+  matching independent reply burst inside the bounded timing/silence window.
+  Incomplete or conflicting passive evidence must publish Unknown and retain
+  bounded OEM-activity recovery. Preserve the configurable, jittered periodic
+  non-energizing heartbeat; a missing response must never fabricate Off. Outgoing
   commands must not optimistically arm/clear timer metadata. A countdown may
   be armed only from a confirmed locally initiated timer command; manual-query
   active-timer reports have unknown age, and estimated expiry must invalidate

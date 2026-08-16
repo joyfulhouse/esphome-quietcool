@@ -195,6 +195,15 @@ re-fire backstop continue up to its fixed attempt budget. Every outcome —
 remote` — is published to Home Assistant, and a physical OEM remote press
 always takes priority over pending automatic work.
 
+Idle passive traffic is deliberately conservative. A remote command by itself
+never publishes fan state. A response-only value still needs normal repeated
+consensus; a command-shaped value needs a matching second consensus burst in
+the bounded reply window after the required RF silence. If that evidence stays
+incomplete or conflicts, authority becomes unknown immediately and one bounded
+OEM-activity recovery query cycle is armed. A provisioned controller also sends
+a jittered non-energizing heartbeat query periodically (five minutes by
+default; configurable from 60–3600 seconds, or `0s` to disable).
+
 The full engineering detail lives in the docs, not here:
 
 - the query/response timing model, transaction/consensus rules, Off-variant
@@ -272,12 +281,13 @@ query and the spaced re-fire attempts, both volatile and hard-limited. No
 *command* transmits at boot, after OTA, on reconnect, from restored state, or
 from a received frame. The radio does send bounded, **non-energizing** `66 66`
 status queries on its own — a provisioned unit sends one shortly after boot (and
-after an OTA reboot), and one a few seconds after it hears an OEM-remote press,
-to re-establish confirmed state — none of which can start the fan. Repeated
-equivalent Off requests are transaction-idempotent:
+after an OTA reboot), on the configured jittered heartbeat schedule, and after
+unresolved OEM activity, to re-establish confirmed state — none of which can
+start the fan. Repeated equivalent Off requests are transaction-idempotent:
 they cannot transmit, replenish attempts, clear confirmation evidence, or
-extend the terminal deadline. A heard OEM-remote press cancels all pending
-automatic work.
+extend the terminal deadline. A heard OEM-remote press supersedes conflicting
+local work; passive state is published only under the conservative consensus
+rules above.
 
 Home Assistant safety automations should use the single `Fan Confirmed Off`
 binary sensor when they need an Off assertion. On initial API subscription the
