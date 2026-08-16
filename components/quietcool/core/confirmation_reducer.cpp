@@ -332,10 +332,8 @@ CoreEffects ConfirmationCore::on_frame(ByteView input, MonotonicMs now_ms) {
 }
 
 CoreEffects ConfirmationCore::poll(MonotonicMs now_ms) {
-  CoreEffects passive_effects;
-  expire_passive_evidence(now_ms, passive_effects);
-  if (passive_effects.size() != 0)
-    return passive_effects;
+  CoreEffects effects;
+  expire_passive_evidence(now_ms, effects);
   const auto permission = TransitionTable::rf_permission(state_);
   ReducerInput event{EventKind::Poll, now_ms};
   if (window_ && permission.accept_response) {
@@ -408,7 +406,12 @@ CoreEffects ConfirmationCore::poll(MonotonicMs now_ms) {
       event.token = token;
     }
   }
-  return reduce(event);
+  if (effects.size() == 0)
+    return reduce(event);
+  const auto reduced = reduce(event);
+  for (std::size_t index = 0; index < reduced.size(); ++index)
+    effects.add(reduced[index]);
+  return effects;
 }
 
 bool ConfirmationCore::token_matches(TxToken token) const {

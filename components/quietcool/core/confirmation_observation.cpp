@@ -5,6 +5,7 @@ namespace quietcool {
 void ConfirmationCore::cancel_passive_observation() {
   if (state_ != CoordinatorState::Idle) return;
   consensus_.reset();
+  passive_response_consensus_.reset();
   if (!passive_observation_) return;
   passive_observation_.reset();
   ++passive_epochs_cancelled_or_expired_;
@@ -18,10 +19,9 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
                                                     CoreEffects& effects) {
   if (state_ != CoordinatorState::Idle) return;
   const auto partial = consensus_.snapshot();
-  const bool ambiguous_partial =
-      partial.has_group && (partial.latest_raw_byte & 0x80U) != 0;
   consensus_.reset();
-  if (!passive_observation_ && !ambiguous_partial) return;
+  passive_response_consensus_.reset();
+  if (!passive_observation_ && !partial.has_group) return;
   passive_observation_.reset();
   ++passive_epochs_cancelled_or_expired_;
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
@@ -43,14 +43,19 @@ void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms,
       abandon_passive_observation(now_ms, effects);
     return;
   }
-  const auto partial = consensus_.snapshot();
-  if (!partial.has_group) return;
-  const auto age = elapsed_since(now_ms, partial.last_candidate_ms);
-  if (!age || *age > kPassiveReplyAcceptEndMs) {
-    if ((partial.latest_raw_byte & 0x80U) != 0)
+  const auto ambiguous = consensus_.snapshot();
+  if (ambiguous.has_group) {
+    const auto age = elapsed_since(now_ms, ambiguous.last_candidate_ms);
+    if (!age || *age > kPassiveReplyAcceptEndMs) {
       abandon_passive_observation(now_ms, effects);
-    else
-      consensus_.reset();
+      return;
+    }
+  }
+  const auto response = passive_response_consensus_.snapshot();
+  if (response.has_group) {
+    const auto age = elapsed_since(now_ms, response.last_candidate_ms);
+    if (!age || *age > kPassiveReplyAcceptEndMs)
+      passive_response_consensus_.reset();
   }
 }
 
@@ -78,9 +83,11 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
     }
   }
 
-  const auto consensus = consensus_.observe(candidate, now_ms);
+  auto& tracker =
+      response_only ? passive_response_consensus_ : consensus_;
+  const auto consensus = tracker.observe(candidate, now_ms);
   if (!consensus) return effects;
-  consensus_.reset();
+  tracker.reset();
 
   if (!passive_observation_ && !response_only) {
     passive_observation_ =
@@ -92,13 +99,19 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
 
   std::uint8_t independent_candidates = consensus->independent_candidates;
   if (passive_observation_) {
-    const auto first = passive_observation_->first_burst.independent_candidates;
-    independent_candidates =
-        first > static_cast<std::uint8_t>(0xFFU - independent_candidates)
-            ? 0xFFU
-            : static_cast<std::uint8_t>(first + independent_candidates);
+    if (consensus->state.semantically_equals(
+            passive_observation_->first_burst.state)) {
+      const auto first =
+          passive_observation_->first_burst.independent_candidates;
+      independent_candidates =
+          first > static_cast<std::uint8_t>(0xFFU - independent_candidates)
+              ? 0xFFU
+              : static_cast<std::uint8_t>(first + independent_candidates);
+    }
     passive_observation_.reset();
   }
+  consensus_.reset();
+  passive_response_consensus_.reset();
 
   promote_authority(
       AcceptedObservation{consensus->state,

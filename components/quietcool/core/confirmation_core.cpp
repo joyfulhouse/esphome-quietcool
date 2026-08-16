@@ -13,6 +13,7 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
   clear_deferred();
   window_.reset();
   consensus_.reset();
+  passive_response_consensus_.reset();
   passive_observation_.reset();
   recovery_.cancel();
   learn_.cancel();
@@ -248,7 +249,8 @@ CoreEffects ConfirmationCore::handle_heartbeat_request(
       recovery.phase != RecoveryPhase::Complete &&
       recovery.phase != RecoveryPhase::Expired;
   if (state_ != CoordinatorState::Idle || passive_observation_ ||
-      consensus_.snapshot().has_group || recovery_pending) {
+      consensus_.snapshot().has_group ||
+      passive_response_consensus_.snapshot().has_group || recovery_pending) {
     ++heartbeat_queries_skipped_busy_;
     return effects;
   }

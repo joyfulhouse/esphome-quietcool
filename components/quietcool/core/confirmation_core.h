@@ -361,6 +361,7 @@ class ConfirmationCore final {
   std::optional<PriorAuthoritySnapshot> deferred_prior_;
   std::optional<ResponseWindow> window_;
   ConsensusTracker consensus_;
+  ConsensusTracker passive_response_consensus_;
   AuthorityStore authority_;
   ObservationPolicy policy_;
   RecoveryScheduler recovery_;
