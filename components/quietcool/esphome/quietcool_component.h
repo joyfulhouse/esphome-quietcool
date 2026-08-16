@@ -256,8 +256,8 @@ class QuietCoolComponent final : public Component {
   ::quietcool::BurstTransmitter burst_;
   ::quietcool::CoreEffectDrain effect_drain_;
   ::quietcool::CoreCallbackQueue core_callbacks_;
-  std::uint32_t heartbeat_interval_ms_{300000};
-  std::uint32_t heartbeat_jitter_seed_{0};
+  std::uint32_t heartbeat_interval_ms_;
+  std::uint32_t heartbeat_jitter_seed_;
   std::uint32_t heartbeat_schedule_sequence_{0};
   std::optional<::quietcool::MonotonicMs> next_heartbeat_due_ms_;
   AuthorityPublisher* authority_publishers_[kMaxAuthorityPublishers]{};

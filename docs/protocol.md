@@ -297,12 +297,12 @@ recovery quality, and consensus thresholds remain unchanged.
 
 A dedicated idle/provisioned heartbeat sends the same non-energizing `66 66`
 query. It defaults to 300 seconds, accepts `0s` to disable or `60s`–`3600s`,
-and applies deterministic ±10% jitter after the first full interval while
-never going below 60 seconds. Busy due times and authority confirmed within
-the configured interval suppress that attempt; the next due time is scheduled
-from the current clock, so loop delays cannot create catch-up bursts. Timeout,
-invalid traffic, or radio recovery counts a miss but preserves authority and
-never fabricates Off.
+and applies deterministic ±10% jitter to every schedule, including the first,
+while never going below 60 seconds. Busy due times and authority confirmed
+within the configured interval suppress that attempt; the next due time is
+scheduled from the current clock, so loop delays cannot create catch-up bursts.
+Timeout, invalid traffic, or radio recovery counts a miss but preserves
+authority and never fabricates Off.
 
 ### Authority, manual-query, and burst-ordering refinements
 
