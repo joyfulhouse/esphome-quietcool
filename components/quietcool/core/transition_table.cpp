@@ -123,7 +123,7 @@ constexpr std::array<TransitionRule, kRuleCount> make_rules() {
            TemplateOrigin::None);
   add_rule(rules, index, CoordinatorState::Idle,
            EventKind::PassiveAmbiguousCandidateHeard, GuardId::Always,
-           ActionId::HandlePassiveCandidate, NextStateId::Same, 1,
+           ActionId::HandlePassiveCandidate, NextStateId::Computed, 1,
            TemplateOrigin::None);
   for (const auto family : {0U, 1U, 3U}) {
     add_rule(rules, index, kQueryStates[family].response,

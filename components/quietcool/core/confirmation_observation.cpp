@@ -8,6 +8,25 @@ void ConfirmationCore::cancel_passive_observation() {
   if (!passive_observation_) return;
   passive_observation_.reset();
   ++passive_epochs_cancelled_or_expired_;
+  const auto recovery = recovery_.snapshot();
+  if (recovery.cause == RecoveryCause::OemActivity &&
+      recovery.phase != RecoveryPhase::Inactive)
+    recovery_.cancel();
+}
+
+void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms) {
+  if (state_ != CoordinatorState::Idle) return;
+  consensus_.reset();
+  if (!passive_observation_) return;
+  passive_observation_.reset();
+  ++passive_epochs_cancelled_or_expired_;
+  authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
+  const auto recovery = recovery_.snapshot();
+  if (recovery.cause != RecoveryCause::OemActivity ||
+      recovery.phase == RecoveryPhase::Inactive)
+    recovery_.arm_from_oem_activity(now_ms);
+  state_ = CoordinatorState::RecoveryQuietWait;
+  context_ = RecoveryContext{RecoveryCause::OemActivity};
 }
 
 void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms) {
@@ -15,7 +34,7 @@ void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms) {
   if (passive_observation_) {
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs)
-      cancel_passive_observation();
+      abandon_passive_observation(now_ms);
     return;
   }
   const auto partial = consensus_.snapshot();
@@ -32,7 +51,8 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
   if (passive_observation_) {
     const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs) {
-      cancel_passive_observation();
+      abandon_passive_observation(now_ms);
+      return {};
     } else if (!candidate.state.semantically_equals(
                    passive_observation_->first_burst.state)) {
       cancel_passive_observation();
@@ -55,6 +75,7 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
   if (!passive_observation_ && !response_only) {
     passive_observation_ =
         PassiveObservationEpoch{*consensus, now_ms, now_ms};
+    recovery_.arm_from_oem_activity(now_ms);
     ++passive_observation_epochs_opened_;
     return {};
   }
@@ -83,6 +104,7 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
                           {},
                           false},
       now_ms, effects);
+  recovery_.cancel();
   ++passive_confirmations_promoted_;
   return effects;
 }

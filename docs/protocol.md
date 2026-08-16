@@ -258,7 +258,9 @@ passive consensus can also restore them when content is response-only, or when
 an ambiguous first consensus burst is followed by a matching independently
 collected consensus burst 400–1600 ms later, after at least 300 ms of RF
 silence. The first ambiguous burst remains non-authoritative because hearing a
-command does not prove receiver actuation.
+command does not prove receiver actuation. If its bounded reply epoch ends
+without promotion, older authority is invalidated and the existing bounded
+OEM-activity recovery query is armed.
 
 Outgoing commands never optimistically arm or clear confirmed timer metadata.
 If all responses are lost, timer state remains unknown and an expiry cannot

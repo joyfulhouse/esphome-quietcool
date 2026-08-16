@@ -119,6 +119,27 @@ QC_TEST("heartbeat_core",
   QC_CHECK_EQ(after.heartbeat_queries_admitted, 0U);
 }
 
+QC_TEST("heartbeat_core", "armed recovery makes an idle heartbeat busy") {
+  auto core = heartbeat_core();
+  ConfirmationCoreTestBuilder::arm_oem_recovery(core, 1000);
+  const auto before = core.snapshot(1000);
+  QC_CHECK_EQ(before.state, CoordinatorState::Idle);
+  QC_CHECK_EQ(before.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+  QC_CHECK_EQ(before.recovery.phase, RecoveryPhase::QuietWait);
+
+  const auto effects = core.request_heartbeat(1100, 300000);
+  const auto after = core.snapshot(1100);
+  QC_CHECK_EQ(effects.size(), 0U);
+  QC_CHECK_EQ(after.state, CoordinatorState::Idle);
+  QC_CHECK_EQ(after.recovery.cause, before.recovery.cause);
+  QC_CHECK_EQ(after.recovery.phase, before.recovery.phase);
+  QC_CHECK_EQ(after.heartbeat_queries_skipped_busy,
+              before.heartbeat_queries_skipped_busy + 1U);
+  QC_CHECK_EQ(after.heartbeat_queries_admitted,
+              before.heartbeat_queries_admitted);
+}
+
 QC_TEST("heartbeat_core",
         "confirmed response promotes heartbeat evidence without transaction") {
   auto core = heartbeat_core();

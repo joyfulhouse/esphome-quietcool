@@ -87,6 +87,9 @@ class ConfirmationCoreTestBuilder final {
   static void set_next_tx_token(ConfirmationCore& core, std::uint64_t next) {
     core.tx_tokens_ = MonotonicIdAllocator<TxToken>(next);
   }
+  static void arm_oem_recovery(ConfirmationCore& core, MonotonicMs now_ms) {
+    core.recovery_.arm_from_oem_activity(now_ms);
+  }
 };
 
 }  // namespace quietcool

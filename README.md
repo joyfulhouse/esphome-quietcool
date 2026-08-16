@@ -128,13 +128,10 @@ Three things are worth spelling out, and the table claims nothing beyond them:
   the atomic `Fan Confirmed Off` diagnostic is the recommended HA interlock
   input. Every equivalent request joins its active transaction without
   transmitting again or resetting its fixed, spaced attempt budget. After a
-  physical OEM remote is used, strictly validated fan-reply consensus updates
-  HA as soon as the reply burst completes. Command-shaped values require a
-  second independently collected burst in the 400–1600 ms passive reply
-  window after at least 300 ms of RF silence; response-only encodings can
-  promote directly. A jittered five-minute heartbeat reconciles traffic the
-  bridge missed; while authority is lost the OLED suffixes the state word with
-  `?`.
+  physical OEM remote is used, the controller waits 3 s for the exchange to
+  finish and then sends one automatic status query, so HA authority recovers
+  in seconds instead of waiting for a manual Refresh; while authority is lost
+  the OLED suffixes the state word with `?`.
 - **Direct RF fan control** — Off / Low / Medium / High on the fan entity,
   transmitted as the exact OEM frames. On the C++ build the entity's speed band
   tracks the fan's *confirmed* capability rather than being fixed at compile
@@ -163,13 +160,12 @@ Three things are worth spelling out, and the table claims nothing beyond them:
   a live RF-interference meter. An OEM-set timer that expires unobserved now
   invalidates its stale display at the observation-time upper bound and
   re-queries, instead of showing the old program forever.
-- **Immediate remote synchronization** — the controller *listens* without
-  echoing OEM traffic. A passively heard command alone never mutates the fan
-  entity, but validated fan-confirmation consensus can: response-only bytes
-  promote immediately, while ambiguous command-shaped bytes need a second
-  consensus burst inside the evidence-backed passive reply window. Sender,
-  duplication, recovery, consensus, collision, and quarantine gates are the
-  same ones used by local confirmation.
+- **Bi-directional diagnostics, query-confirmed state** — the controller also
+  *listens* and records strictly validated OEM traffic without echoing it over
+  RF. A passively heard OEM command cancels conflicting local work and is
+  visible in RF diagnostics, but it never mutates the safety-facing fan entity:
+  hearing a command is not proof that the receiver acted. Only consensus from
+  this controller's locally anchored query can publish physical state.
 - **On-device OLED** — animated fan icon, timer countdown, three
   HA-relayed temperatures (indoor / outdoor / attic) with semantic icons, and a
   WiFi / API / battery status row. Temperature sources are configurable from the
@@ -177,11 +173,8 @@ Three things are worth spelling out, and the table claims nothing beyond them:
 - **Safety-first** — never sends a fan *command* unbidden: commands come only
   from an explicit press or HA request, plus the bounded confirmation query and
   spaced re-fires they arm. (It does send non-energizing `66 66` status queries
-  on its own — after boot/OTA, for recovery, and by default every five minutes
-  while idle when authority is not recent — which cannot start the fan.) The
-  heartbeat is configurable from `0s` (disabled) or `60s`–`3600s`, never
-  catches up missed intervals, and never treats a miss as Off. Multi-model
-  adversarially reviewed.
+  on its own — after boot/OTA and a few seconds after hearing the OEM remote —
+  which cannot start the fan.) Multi-model adversarially reviewed.
 - **Multi-board & multi-fan** — two board configs (SX1278 / SX1262) kept
   behaviorally identical; a second fan on the same board type can be a thin
   per-device wrapper overriding only the device-identity substitutions.
@@ -278,17 +271,13 @@ Assistant command, plus the bounded follow-ups those arm — the confirmation
 query and the spaced re-fire attempts, both volatile and hard-limited. No
 *command* transmits at boot, after OTA, on reconnect, from restored state, or
 from a received frame. The radio does send bounded, **non-energizing** `66 66`
-  status queries on its own — a provisioned unit sends one shortly after boot
-  (and after an OTA reboot), for bounded recovery, and on the idle five-minute
-  heartbeat when confirmed authority is not recent — none of which can start
-  the fan. A skipped heartbeat is rescheduled from the current time and a miss
-  preserves the last authoritative state. Repeated
+status queries on its own — a provisioned unit sends one shortly after boot (and
+after an OTA reboot), and one a few seconds after it hears an OEM-remote press,
+to re-establish confirmed state — none of which can start the fan. Repeated
 equivalent Off requests are transaction-idempotent:
 they cannot transmit, replenish attempts, clear confirmation evidence, or
 extend the terminal deadline. A heard OEM-remote press cancels all pending
-  automatic work. A heard command by itself is not authoritative; only
-  response consensus satisfying the passive burst-order contract can update
-  the fan entity.
+automatic work.
 
 Home Assistant safety automations should use the single `Fan Confirmed Off`
 binary sensor when they need an Off assertion. On initial API subscription the

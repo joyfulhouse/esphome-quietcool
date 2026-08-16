@@ -69,13 +69,19 @@ void publish_recent_passive_authority(QuietCoolComponent& component) {
 }
 
 QC_TEST("heartbeat_scheduler",
-        "default waits five minutes and zero disables scheduling") {
+        "default first schedule is jittered and zero disables scheduling") {
   ScopedPreferences preferences;
   HeartbeatHarness enabled;
   enabled.setup();
   QC_CHECK(enabled.reach_idle());
+  const auto due = enabled.component().next_heartbeat_due_for_test();
+  QC_CHECK(due.has_value());
+  QC_CHECK_EQ(*due, QuietCoolComponent::heartbeat_delay_for_test(
+                        300000, kJitterSeed, 0, 0));
+  QC_CHECK(*due >= 270000);
+  QC_CHECK(*due <= 330000);
   const auto now = enabled.component().now_ms();
-  enabled.loop_after(static_cast<std::uint32_t>(299999U - now));
+  enabled.loop_after(static_cast<std::uint32_t>(*due - now - 1U));
   QC_CHECK_EQ(enabled.component().snapshot().heartbeat_queries_admitted, 0U);
   enabled.loop_after(1);
   QC_CHECK_EQ(enabled.component().snapshot().heartbeat_queries_admitted, 1U);
@@ -167,7 +173,7 @@ QC_TEST("heartbeat_scheduler",
 QC_TEST("heartbeat_scheduler",
         "learning arms a fresh schedule and forget disarms it") {
   ScopedPreferences preferences;
-  HeartbeatHarness harness(60000, 0);
+  HeartbeatHarness harness(300000, 0);
   harness.setup();
   QC_CHECK_EQ(harness.component().snapshot().state,
               ::quietcool::CoordinatorState::Unprovisioned);
@@ -196,8 +202,12 @@ QC_TEST("heartbeat_scheduler",
   const auto learned_ms = harness.component().now_ms();
   const auto due = harness.component().next_heartbeat_due_for_test();
   QC_CHECK(due.has_value());
-  QC_CHECK_EQ(*due, learned_ms + 60000U);
-  harness.loop_after(59999);
+  const auto delay = QuietCoolComponent::heartbeat_delay_for_test(
+      300000, kJitterSeed, 0, learned_ms);
+  QC_CHECK_EQ(*due, learned_ms + delay);
+  QC_CHECK(delay >= 270000);
+  QC_CHECK(delay <= 330000);
+  harness.loop_after(delay - 1U);
   QC_CHECK_EQ(harness.component().snapshot().heartbeat_queries_admitted, 0U);
   harness.loop_after(1);
   QC_CHECK_EQ(harness.component().snapshot().heartbeat_queries_admitted, 1U);

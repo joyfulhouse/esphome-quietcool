@@ -55,13 +55,13 @@ CoreEffects ConfirmationCore::handle_restore(const RestorableState &restored,
   effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   return effects;
 }
-CoreEffects ConfirmationCore::handle_radio_ready(MonotonicMs) {
+CoreEffects ConfirmationCore::handle_radio_ready(MonotonicMs now_ms) {
   CoreEffects effects;
+  abandon_passive_observation(now_ms);
   if (radio_ready_seen_)
     return effects;
   radio_ready_seen_ = true;
   if (state_ == CoordinatorState::Idle && sender_) {
-    cancel_passive_observation();
     state_ = CoordinatorState::BootQueryPending;
     context_ = QueryPendingContext{QueryPurpose::Boot, TxReason::BootQuery};
   }
@@ -241,8 +241,13 @@ CoreEffects ConfirmationCore::handle_heartbeat_request(
   expire_passive_evidence(now_ms);
   if (!sender_)
     return {};
+  const auto recovery = recovery_.snapshot();
+  const bool recovery_pending =
+      recovery.cause.has_value() && recovery.phase != RecoveryPhase::Inactive &&
+      recovery.phase != RecoveryPhase::Complete &&
+      recovery.phase != RecoveryPhase::Expired;
   if (state_ != CoordinatorState::Idle || passive_observation_ ||
-      consensus_.snapshot().has_group) {
+      consensus_.snapshot().has_group || recovery_pending) {
     ++heartbeat_queries_skipped_busy_;
     return {};
   }

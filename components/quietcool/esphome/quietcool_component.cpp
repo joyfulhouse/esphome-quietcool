@@ -56,12 +56,7 @@ void QuietCoolComponent::reset_heartbeat_schedule(
     next_heartbeat_due_ms_.reset();
     return;
   }
-  const auto due =
-      ::quietcool::saturating_add(now_ms, heartbeat_interval_ms_);
-  if (due == now_ms)
-    next_heartbeat_due_ms_.reset();
-  else
-    next_heartbeat_due_ms_ = due;
+  schedule_next_heartbeat(now_ms);
 }
 
 float QuietCoolComponent::get_setup_priority() const {

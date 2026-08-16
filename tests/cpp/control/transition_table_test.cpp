@@ -25,6 +25,9 @@ bool computed_transition_is_justified(const TransitionRule& rule) {
     case ActionId::HandleRadioRecovered:
     case ActionId::HandleHeartbeatRequest:
       return true;
+    case ActionId::HandlePassiveCandidate:
+      return rule.state == CoordinatorState::Idle &&
+             rule.event == EventKind::PassiveAmbiguousCandidateHeard;
     case ActionId::HandleLearnRequest:
       // Owns its resulting state (issue #16): LearningAwaitingFirst when the
       // core is unprovisioned, unchanged on the AlreadyProvisioned refusal. A
@@ -117,6 +120,7 @@ QC_TEST("transition_table", "every non-Computed next state resolves authoritativ
   const auto view = TransitionTable::rules();
   std::size_t computed_rows = 0;
   std::size_t heartbeat_rows = 0;
+  std::size_t computed_passive_ambiguous_rows = 0;
   for (std::size_t index = 0; index < view.size; ++index) {
     const auto& rule = view.data[index];
     if (rule.action == ActionId::HandleHeartbeatRequest) ++heartbeat_rows;
@@ -126,6 +130,8 @@ QC_TEST("transition_table", "every non-Computed next state resolves authoritativ
       QC_CHECK(!resolved.has_value());
       QC_CHECK(computed_transition_is_justified(rule));
       ++computed_rows;
+      if (rule.event == EventKind::PassiveAmbiguousCandidateHeard)
+        ++computed_passive_ambiguous_rows;
       continue;
     }
     QC_CHECK(resolved.has_value());
@@ -134,6 +140,7 @@ QC_TEST("transition_table", "every non-Computed next state resolves authoritativ
   }
   QC_CHECK(computed_rows > 0U);
   QC_CHECK_EQ(heartbeat_rows, kCoordinatorStateCount);
+  QC_CHECK_EQ(computed_passive_ambiguous_rows, 1U);
 }
 
 QC_TEST("transition_table", "query families share template but keep state IDs") {

@@ -114,19 +114,6 @@ QC_TEST("passive_observation",
   QC_CHECK(!published(core.on_frame(ByteView(repeat.bytes), 1180)).has_value());
   QC_CHECK(core.snapshot(1180).passive_observation_pending);
 
-  // Synthetic boundary vectors: exact one-millisecond misses around the named
-  // inclusive evidence window, not claims about observed RF timestamps.
-  auto early = passive_core();
-  passive_consensus(early, 0xBF, 1000);
-  QC_CHECK(!published(passive_consensus(
-      early, 0xBF, 1060 + kPassiveReplyAcceptStartMs - 1)).has_value());
-
-  auto late = passive_core();
-  passive_consensus(late, 0xBF, 1000);
-  QC_CHECK(!published(passive_consensus(
-      late, 0xBF, 1060 + kPassiveReplyAcceptEndMs + 1)).has_value());
-  QC_CHECK_EQ(late.snapshot(3000).passive_epochs_cancelled_or_expired, 1U);
-
   auto insufficient = passive_core();
   const auto lone = passive_frame(0xBF);
   insufficient.on_frame(ByteView(lone.bytes), 1000);
@@ -135,6 +122,40 @@ QC_TEST("passive_observation",
   const auto after_stale_partial = insufficient.snapshot(300000);
   QC_CHECK_EQ(after_stale_partial.heartbeat_queries_admitted, 1U);
   QC_CHECK_EQ(after_stale_partial.heartbeat_queries_skipped_busy, 0U);
+}
+
+QC_TEST("passive_observation", "reply-window end is inclusive") {
+  // Synthetic protocol-model timestamps, not claimed RF captures. The first
+  // ambiguous consensus opens at 1060 ms.
+  auto end_included = passive_core();
+  passive_consensus(end_included, 0xBF, 1000);
+  const auto frame = passive_frame(0xBF);
+  end_included.on_frame(ByteView(frame.bytes), 2600);
+  QC_CHECK(published(end_included.on_frame(ByteView(frame.bytes), 2660))
+               .has_value());
+
+  auto end_excluded = passive_core();
+  passive_consensus(end_excluded, 0xBF, 1000);
+  end_excluded.on_frame(ByteView(frame.bytes), 2601);
+  QC_CHECK(!published(end_excluded.on_frame(ByteView(frame.bytes), 2661))
+                .has_value());
+}
+
+QC_TEST("passive_observation", "inter-burst silence is inclusive") {
+  const auto frame = passive_frame(0xBF);
+  auto silence_included = passive_core();
+  passive_consensus(silence_included, 0xBF, 1000);
+  silence_included.on_frame(ByteView(frame.bytes), 1160);
+  silence_included.on_frame(ByteView(frame.bytes), 1460);
+  QC_CHECK(published(silence_included.on_frame(ByteView(frame.bytes), 1520))
+               .has_value());
+
+  auto silence_excluded = passive_core();
+  passive_consensus(silence_excluded, 0xBF, 1000);
+  silence_excluded.on_frame(ByteView(frame.bytes), 1161);
+  silence_excluded.on_frame(ByteView(frame.bytes), 1460);
+  QC_CHECK(!published(silence_excluded.on_frame(ByteView(frame.bytes), 1520))
+                .has_value());
 }
 
 QC_TEST("passive_observation",
@@ -213,6 +234,85 @@ QC_TEST("passive_observation",
   snapshot = recovery.snapshot(1200);
   QC_CHECK(!snapshot.passive_observation_pending);
   QC_CHECK_EQ(snapshot.state, CoordinatorState::OemHoldoff);
+}
+
+QC_TEST("passive_observation",
+        "post-setup radio readiness abandons a pending passive epoch") {
+  auto core = passive_core();
+  core.on_radio_ready(0);
+  const auto boot_query = requested_tx(core.poll(0));
+  QC_CHECK(boot_query.has_value());
+  core.on_tx_started(boot_query->token, 0);
+  core.on_tx_complete(boot_query->token, 0);
+  core.poll(kDirectQueryAcceptEndMs + 1);
+  core.poll(kResponseTailEndMs + 1);
+  QC_CHECK_EQ(core.snapshot(kResponseTailEndMs + 1).state,
+              CoordinatorState::Idle);
+
+  passive_consensus(core, 0xBF, 3000);
+  QC_CHECK(core.snapshot(3060).passive_observation_pending);
+  const auto effects = core.on_radio_ready(3200);
+  const auto snapshot = core.snapshot(3200);
+  QC_CHECK_EQ(effects.size(), 0U);
+  QC_CHECK(!snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 1U);
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&snapshot.authority.state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
+  QC_CHECK_EQ(snapshot.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+}
+
+QC_TEST("passive_observation",
+        "ambiguous epoch outcomes isolate provisional recovery") {
+  auto promoted = passive_core();
+  passive_consensus(promoted, 0xBF, 1000);
+  const auto promotion = passive_consensus(
+      promoted, 0xBF, 1060 + kPassiveReplyAcceptStartMs);
+  QC_CHECK(published(promotion).has_value());
+  auto snapshot = promoted.snapshot(1520);
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::Inactive);
+  QC_CHECK(!snapshot.recovery.cause.has_value());
+
+  auto conflicted = passive_core();
+  passive_consensus(conflicted, 0xBF, 1000);
+  const auto contradiction = passive_frame(0x9F);
+  conflicted.on_frame(ByteView(contradiction.bytes), 1200);
+  snapshot = conflicted.snapshot(1200);
+  QC_CHECK(!snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::Idle);
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::Inactive);
+  QC_CHECK(!snapshot.recovery.cause.has_value());
+
+  auto local = passive_core();
+  passive_consensus(local, 0xBF, 1000);
+  local.request_state(
+      FanState::command(Speed::Low, Duration::Continuous), 1200);
+  snapshot = local.snapshot(1200);
+  QC_CHECK(!snapshot.passive_observation_pending);
+  QC_CHECK(snapshot.transaction.has_value());
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::Inactive);
+  QC_CHECK(!snapshot.recovery.cause.has_value());
+
+  auto missed = passive_core();
+  passive_consensus(missed, 0x1F, 1000);
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      missed.snapshot(1060).authority.state));
+  passive_consensus(missed, 0xBF, 2000);
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      missed.snapshot(2060).authority.state));
+  missed.poll(2060 + kPassiveReplyAcceptEndMs + 1);
+  snapshot = missed.snapshot(3661);
+  const auto* unknown =
+      std::get_if<UnknownStateAuthority>(&snapshot.authority.state);
+  QC_CHECK(unknown != nullptr);
+  QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
+  QC_CHECK_EQ(snapshot.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::QuietWait);
 }
 
 QC_TEST("passive_observation",
