@@ -15,6 +15,17 @@ void ConfirmationCore::cancel_passive_observation() {
     recovery_.cancel();
 }
 
+void ConfirmationCore::ensure_oem_activity_recovery(MonotonicMs now_ms) {
+  const auto recovery = recovery_.snapshot();
+  const bool terminal = recovery.phase == RecoveryPhase::Complete ||
+                        recovery.phase == RecoveryPhase::Expired ||
+                        recovery_.poll(now_ms).status ==
+                            RecoveryDueStatus::Expired;
+  if (recovery.cause != RecoveryCause::OemActivity ||
+      recovery.phase == RecoveryPhase::Inactive || terminal)
+    recovery_.arm_from_oem_activity(now_ms);
+}
+
 void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
                                                     CoreEffects& effects) {
   if (state_ != CoordinatorState::Idle) return;
@@ -28,14 +39,7 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
   if (ambiguous) ++passive_epochs_cancelled_or_expired_;
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
   effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
-  const auto recovery = recovery_.snapshot();
-  const bool terminal = recovery.phase == RecoveryPhase::Complete ||
-                        recovery.phase == RecoveryPhase::Expired ||
-                        recovery_.poll(now_ms).status ==
-                            RecoveryDueStatus::Expired;
-  if (recovery.cause != RecoveryCause::OemActivity ||
-      recovery.phase == RecoveryPhase::Inactive || terminal)
-    recovery_.arm_from_oem_activity(now_ms);
+  ensure_oem_activity_recovery(now_ms);
   state_ = CoordinatorState::RecoveryQuietWait;
   context_ = RecoveryContext{RecoveryCause::OemActivity};
 }
@@ -47,15 +51,18 @@ void ConfirmationCore::abandon_passive_response(MonotonicMs now_ms,
   if (!response.has_group || state_ != CoordinatorState::Idle) return;
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
   effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
-  const auto recovery = recovery_.snapshot();
-  const bool terminal = recovery.phase == RecoveryPhase::Complete ||
-                        recovery.phase == RecoveryPhase::Expired ||
-                        recovery_.poll(now_ms).status ==
-                            RecoveryDueStatus::Expired;
-  if (recovery.cause != RecoveryCause::OemActivity ||
-      recovery.phase == RecoveryPhase::Inactive || terminal)
-    recovery_.arm_from_oem_activity(now_ms);
-  if (passive_observation_ || consensus_.snapshot().has_group) return;
+  ensure_oem_activity_recovery(now_ms);
+  const auto partial = consensus_.snapshot();
+  const bool ambiguous = passive_observation_.has_value() || partial.has_group;
+  if (ambiguous) {
+    const auto anchor = passive_observation_ ? passive_observation_->opened_ms
+                                             : partial.last_candidate_ms;
+    const auto age = elapsed_since(now_ms, anchor);
+    if (age && *age <= kPassiveReplyAcceptEndMs) return;
+    passive_observation_.reset();
+    consensus_.reset();
+    ++passive_epochs_cancelled_or_expired_;
+  }
   state_ = CoordinatorState::RecoveryQuietWait;
   context_ = RecoveryContext{RecoveryCause::OemActivity};
 }
