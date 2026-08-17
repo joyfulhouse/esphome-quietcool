@@ -349,6 +349,7 @@ class ConfirmationCore final {
   void enter_tail(TailExit exit, FanState expected);
   void cancel_passive_observation();
   void ensure_oem_activity_recovery(MonotonicMs now_ms);
+  bool passive_ambiguity_expired(MonotonicMs now_ms) const;
   void abandon_passive_observation(MonotonicMs now_ms,
                                    CoreEffects& effects);
   void abandon_passive_response(MonotonicMs now_ms, CoreEffects& effects);

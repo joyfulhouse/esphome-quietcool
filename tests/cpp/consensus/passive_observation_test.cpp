@@ -362,6 +362,47 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
+        "live ambiguity defers due response recovery until expiry") {
+  constexpr MonotonicMs kRefreshGapMs = 50;
+  static_assert(kRefreshGapMs < kMinIndependentCandidateGapMs);
+  auto core = passive_core();
+  passive_consensus(core, 0x1F, 100);
+  const auto response_only = passive_frame(0x1F);
+  const auto ambiguous = passive_frame(0xBF);
+  core.on_frame(ByteView(response_only.bytes), 1000);
+  core.on_frame(ByteView(ambiguous.bytes), 1060);
+  const MonotonicMs response_expiry_ms =
+      1000 + kPassiveReplyAcceptEndMs + 1;
+  MonotonicMs last_refresh_ms = 1060;
+  for (MonotonicMs now_ms = 1100; now_ms < response_expiry_ms;
+       now_ms += kRefreshGapMs) {
+    core.on_frame(ByteView(ambiguous.bytes), now_ms);
+    last_refresh_ms = now_ms;
+  }
+  core.poll(response_expiry_ms);
+
+  const auto due_ms = core.snapshot(response_expiry_ms).recovery.due_ms;
+  for (MonotonicMs now_ms = last_refresh_ms + kRefreshGapMs;
+       now_ms < due_ms; now_ms += kRefreshGapMs) {
+    core.on_frame(ByteView(ambiguous.bytes), now_ms);
+    last_refresh_ms = now_ms;
+  }
+  QC_CHECK(due_ms - last_refresh_ms <= kPassiveReplyAcceptEndMs);
+  QC_CHECK(!published(core.poll(due_ms)).has_value());
+  auto snapshot = core.snapshot(due_ms);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::Idle);
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::QuietWait);
+
+  const auto stale_ms =
+      last_refresh_ms + kPassiveReplyAcceptEndMs + 1;
+  const auto expiry = published(core.poll(stale_ms));
+  QC_CHECK(expiry.has_value());
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(expiry->state));
+  snapshot = core.snapshot(stale_ms);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQueryPending);
+}
+
+QC_TEST("passive_observation",
         "ambiguity completion before response recovery due cancels recovery") {
   auto core = passive_core();
   passive_consensus(core, 0x1F, 100);
