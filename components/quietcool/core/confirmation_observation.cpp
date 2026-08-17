@@ -23,8 +23,9 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
   consensus_.reset();
   passive_response_consensus_.reset();
   if (!passive_observation_ && !partial.has_group && !response.has_group) return;
+  const bool ambiguous = passive_observation_.has_value() || partial.has_group;
   passive_observation_.reset();
-  ++passive_epochs_cancelled_or_expired_;
+  if (ambiguous) ++passive_epochs_cancelled_or_expired_;
   authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
   effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
   const auto recovery = recovery_.snapshot();
@@ -35,6 +36,26 @@ void ConfirmationCore::abandon_passive_observation(MonotonicMs now_ms,
   if (recovery.cause != RecoveryCause::OemActivity ||
       recovery.phase == RecoveryPhase::Inactive || terminal)
     recovery_.arm_from_oem_activity(now_ms);
+  state_ = CoordinatorState::RecoveryQuietWait;
+  context_ = RecoveryContext{RecoveryCause::OemActivity};
+}
+
+void ConfirmationCore::abandon_passive_response(MonotonicMs now_ms,
+                                                CoreEffects& effects) {
+  const auto response = passive_response_consensus_.snapshot();
+  passive_response_consensus_.reset();
+  if (!response.has_group || state_ != CoordinatorState::Idle) return;
+  authority_.invalidate(AuthorityLossReason::ExternalStateTraffic, now_ms);
+  effects.add(PublishAuthorityEffect{authority_.snapshot(now_ms)});
+  const auto recovery = recovery_.snapshot();
+  const bool terminal = recovery.phase == RecoveryPhase::Complete ||
+                        recovery.phase == RecoveryPhase::Expired ||
+                        recovery_.poll(now_ms).status ==
+                            RecoveryDueStatus::Expired;
+  if (recovery.cause != RecoveryCause::OemActivity ||
+      recovery.phase == RecoveryPhase::Inactive || terminal)
+    recovery_.arm_from_oem_activity(now_ms);
+  if (passive_observation_ || consensus_.snapshot().has_group) return;
   state_ = CoordinatorState::RecoveryQuietWait;
   context_ = RecoveryContext{RecoveryCause::OemActivity};
 }
@@ -60,7 +81,7 @@ void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms,
   if (response.has_group) {
     const auto age = elapsed_since(now_ms, response.last_candidate_ms);
     if (!age || *age > kPassiveReplyAcceptEndMs)
-      abandon_passive_observation(now_ms, effects);
+      abandon_passive_response(now_ms, effects);
   }
 }
 
@@ -90,11 +111,17 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
 
   if (response_only) {
     const auto response = passive_response_consensus_.snapshot();
-    const auto prior = FanState::observed(response.latest_raw_byte);
-    if (response.has_group && prior &&
-        !candidate.state.semantically_equals(prior.value())) {
-      abandon_passive_observation(now_ms, effects);
-      return effects;
+    if (response.has_group) {
+      const auto age = elapsed_since(now_ms, response.last_candidate_ms);
+      if (!age || *age > kPassiveReplyAcceptEndMs) {
+        abandon_passive_response(now_ms, effects);
+        return effects;
+      }
+      const auto prior = FanState::observed(response.latest_raw_byte);
+      if (prior && !candidate.state.semantically_equals(prior.value())) {
+        abandon_passive_response(now_ms, effects);
+        return effects;
+      }
     }
   }
 

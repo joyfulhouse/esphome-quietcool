@@ -408,10 +408,10 @@ CoreEffects ConfirmationCore::poll(MonotonicMs now_ms) {
   }
   if (effects.size() == 0)
     return reduce(event);
-  // Passive expiry emits exactly one authority publication and moves Idle to
-  // RecoveryQuietWait. The only event this poll can then select is RecoveryDue,
-  // whose handler emits no effects; every effect-emitting reduction takes the
-  // zero-copy branch above with the full buffer available.
+  // Passive expiry emits exactly one authority publication. It either moves
+  // Idle to RecoveryQuietWait, where only zero-effect RecoveryDue is selectable,
+  // or retains Idle for newer ambiguous evidence after invalidating timer
+  // authority, leaving no effect-emitting event selectable this tick.
   static_assert(CoreEffects::kCapacity >= 1,
                 "same-tick passive publication must fit CoreEffects");
   const auto reduced = reduce(event);

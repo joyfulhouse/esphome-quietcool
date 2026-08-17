@@ -77,6 +77,32 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
+        "response-only consensus expiry boundary is inclusive") {
+  const auto response = passive_frame(0x1F);
+
+  auto end_minus_one = passive_core();
+  end_minus_one.on_frame(ByteView(response.bytes), 1000);
+  QC_CHECK(published(end_minus_one.on_frame(
+      ByteView(response.bytes), 1000 + kPassiveReplyAcceptEndMs - 1))
+               .has_value());
+
+  auto end = passive_core();
+  end.on_frame(ByteView(response.bytes), 1000);
+  QC_CHECK(published(end.on_frame(
+      ByteView(response.bytes), 1000 + kPassiveReplyAcceptEndMs))
+               .has_value());
+
+  auto end_plus_one = passive_core();
+  end_plus_one.on_frame(ByteView(response.bytes), 1000);
+  const auto expired = published(end_plus_one.on_frame(
+      ByteView(response.bytes), 1000 + kPassiveReplyAcceptEndMs + 1));
+  QC_CHECK(expired.has_value());
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(expired->state));
+  QC_CHECK_EQ(end_plus_one.snapshot(2601).state,
+              CoordinatorState::RecoveryQuietWait);
+}
+
+QC_TEST("passive_observation",
         "incomplete response-only expiry invalidates known authority") {
   auto core = passive_core();
   passive_consensus(core, 0x1F, 100);
@@ -93,8 +119,9 @@ QC_TEST("passive_observation",
   QC_CHECK(unknown != nullptr);
   QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
 
-  const auto recovery =
-      core.snapshot(1000 + kPassiveReplyAcceptEndMs + 1).recovery;
+  const auto snapshot = core.snapshot(1000 + kPassiveReplyAcceptEndMs + 1);
+  QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 0U);
+  const auto recovery = snapshot.recovery;
   QC_CHECK_EQ(recovery.cause,
               std::optional<RecoveryCause>(RecoveryCause::OemActivity));
   QC_CHECK_EQ(recovery.phase, RecoveryPhase::QuietWait);
@@ -121,13 +148,26 @@ QC_TEST("passive_observation",
   QC_CHECK(unknown != nullptr);
   QC_CHECK_EQ(unknown->reason, AuthorityLossReason::ExternalStateTraffic);
 
-  const auto recovery = core.snapshot(1060).recovery;
+  const auto snapshot = core.snapshot(1060);
+  QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 0U);
+  const auto recovery = snapshot.recovery;
   QC_CHECK_EQ(recovery.cause,
               std::optional<RecoveryCause>(RecoveryCause::OemActivity));
   QC_CHECK_EQ(recovery.phase, RecoveryPhase::QuietWait);
   core.poll(recovery.due_ms);
   QC_CHECK_EQ(core.snapshot(recovery.due_ms).state,
               CoordinatorState::RecoveryQueryPending);
+
+  auto no_seed = passive_core();
+  passive_consensus(no_seed, 0x1F, 100);
+  no_seed.on_frame(ByteView(first.bytes), 1000);
+  no_seed.on_frame(ByteView(conflicting.bytes), 1060);
+  const auto expires_ms = no_seed.snapshot(1060).recovery.expires_ms;
+  no_seed.poll(expires_ms + 1);
+  QC_CHECK_EQ(no_seed.snapshot(expires_ms + 1).state, CoordinatorState::Idle);
+  QC_CHECK(!published(no_seed.on_frame(ByteView(conflicting.bytes),
+                                      expires_ms + 2))
+                .has_value());
 }
 
 QC_TEST("passive_observation",
@@ -252,6 +292,32 @@ QC_TEST("passive_observation",
   QC_CHECK_EQ(snapshot.state, CoordinatorState::RecoveryQuietWait);
   QC_CHECK_EQ(snapshot.recovery.cause,
               std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+}
+
+QC_TEST("passive_observation",
+        "response expiry preserves newer ambiguous evidence") {
+  auto core = passive_core();
+  passive_consensus(core, 0x5F, 100);
+  const auto response_only = passive_frame(0x1F);
+  const auto ambiguous = passive_frame(0xBF);
+  core.on_frame(ByteView(response_only.bytes), 1000);
+  core.on_frame(ByteView(ambiguous.bytes), 1060);
+
+  const auto expiry = core.poll(1000 + kPassiveReplyAcceptEndMs + 1);
+  const auto authority = published(expiry);
+  QC_CHECK(authority.has_value());
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(authority->state));
+  auto snapshot = core.snapshot(2601);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::Idle);
+  QC_CHECK_EQ(snapshot.recovery.cause,
+              std::optional<RecoveryCause>(RecoveryCause::OemActivity));
+
+  const auto completion = core.on_frame(
+      ByteView(ambiguous.bytes), 1060 + kPassiveReplyAcceptEndMs);
+  QC_CHECK(!published(completion).has_value());
+  snapshot = core.snapshot(2660);
+  QC_CHECK(snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.passive_observation_epochs_opened, 1U);
 }
 
 QC_TEST("passive_observation",

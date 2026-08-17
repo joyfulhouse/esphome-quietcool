@@ -350,6 +350,7 @@ class ConfirmationCore final {
   void cancel_passive_observation();
   void abandon_passive_observation(MonotonicMs now_ms,
                                    CoreEffects& effects);
+  void abandon_passive_response(MonotonicMs now_ms, CoreEffects& effects);
   void expire_passive_evidence(MonotonicMs now_ms, CoreEffects& effects);
   ReceiveContext receive_context() const;
   bool token_matches(TxToken token) const;
