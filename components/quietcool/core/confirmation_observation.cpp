@@ -80,13 +80,12 @@ void ConfirmationCore::abandon_passive_response(MonotonicMs now_ms,
 void ConfirmationCore::expire_passive_evidence(MonotonicMs now_ms,
                                                 CoreEffects& effects) {
   if (state_ != CoordinatorState::Idle) return;
-  const bool observation = passive_observation_.has_value();
-  const bool ambiguous = observation || consensus_.snapshot().has_group;
+  const bool ambiguous =
+      passive_observation_.has_value() || consensus_.snapshot().has_group;
   if (ambiguous && passive_ambiguity_expired(now_ms)) {
     abandon_passive_observation(now_ms, effects);
     return;
   }
-  if (observation) return;
   const auto response = passive_response_consensus_.snapshot();
   if (response.has_group) {
     const auto age = elapsed_since(now_ms, response.last_candidate_ms);
@@ -109,6 +108,10 @@ CoreEffects ConfirmationCore::handle_passive_candidate(
       return effects;
     } else {
       const auto age = elapsed_since(now_ms, passive_observation_->opened_ms);
+      if (!age) {
+        abandon_passive_observation(now_ms, effects);
+        return effects;
+      }
       const auto silence = elapsed_since(
           now_ms, passive_observation_->last_first_burst_frame_ms);
       if (*age < kPassiveReplyAcceptStartMs || !silence ||

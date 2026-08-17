@@ -343,6 +343,32 @@ QC_TEST("passive_observation",
 }
 
 QC_TEST("passive_observation",
+        "expired response publishes while live ambiguous epoch survives") {
+  auto core = passive_core();
+  passive_consensus(core, 0x1F, 100);
+  const auto response_only = passive_frame(0x1F);
+  core.on_frame(ByteView(response_only.bytes), 1000);
+  passive_consensus(core, 0xBF, 1100);
+  const auto recovery_before = core.snapshot(1160).recovery;
+
+  const auto expiry = published(core.poll(2601));
+  QC_CHECK(expiry.has_value());
+  QC_CHECK(std::holds_alternative<UnknownStateAuthority>(expiry->state));
+  auto snapshot = core.snapshot(2601);
+  QC_CHECK_EQ(snapshot.state, CoordinatorState::Idle);
+  QC_CHECK(snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.passive_epochs_cancelled_or_expired, 0U);
+  QC_CHECK_EQ(snapshot.recovery.due_ms, recovery_before.due_ms);
+  QC_CHECK_EQ(snapshot.recovery.expires_ms, recovery_before.expires_ms);
+
+  QC_CHECK(!published(core.on_frame(ByteView(response_only.bytes), 2602))
+                .has_value());
+  snapshot = core.snapshot(2602);
+  QC_CHECK(snapshot.passive_observation_pending);
+  QC_CHECK_EQ(snapshot.recovery.phase, RecoveryPhase::QuietWait);
+}
+
+QC_TEST("passive_observation",
         "response recovery due before ambiguity completes progresses") {
   auto core = passive_core();
   passive_consensus(core, 0x1F, 100);
