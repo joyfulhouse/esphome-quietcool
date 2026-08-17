@@ -39,16 +39,19 @@ other ESPHome external component, from your existing ESPHome Device Builder
 
    ```yaml
    external_components:
-     - source: github://joyfulhouse/esphome-quietcool@v0.2.0
+     - source: github://joyfulhouse/esphome-quietcool@8fadbccd890ed30fd0202e282c2cd61906828100
        components: [quietcool]
    ```
 
-   (Pin a release tag. `@main` tracks development.) Keep the example's
-   `esp32:` block exactly: **esp-idf with `loop_task_stack_size: 16384` is
-   REQUIRED** — codegen rejects anything less, because the Arduino default
-   stack crash-looped a production controller. No `esphome: includes:` bridge
-   is needed for the GitHub source; that bridge exists only for this repo's
-   own local-path builds.
+   `v0.2.0` is a legacy release without heartbeat or passive synchronization.
+   Until a newer release is tagged, those features require the commit shown
+   above (a known-good commit containing both features) or a later commit/ref.
+   Pin an exact commit for reproducible builds; `@main` tracks development.
+   Keep the example's `esp32:` block exactly: **esp-idf with
+   `loop_task_stack_size: 16384` is REQUIRED** — codegen rejects anything less,
+   because the Arduino default stack crash-looped a production controller. No
+   `esphome: includes:` bridge is needed for the GitHub source; that bridge
+   exists only for this repo's own local-path builds.
 3. Add your Wi-Fi / API / OTA credentials the normal Builder way (its managed
    `secrets.yaml`), then **Install → Wirelessly / Plug into this computer**.
    Antenna on first. Later updates arrive like any other ESPHome device:
