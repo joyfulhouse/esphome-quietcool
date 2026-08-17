@@ -607,6 +607,30 @@ interval:
             call.set_state(active);
             call.perform();
           }
+  # RX watchdog (2026-08-17). The SX127x FSK packet engine can wedge in
+  # variable-length mode (payload_length: 0): a truncated burst tail or
+  # corrupted length byte starts a phantom packet whose bit clock stalls on
+  # noise, and the radio then delivers NOTHING until a mode change resets the
+  # engine. Observed on the downstairs unit: deaf windows opened right after
+  # each received burst and ended only at the next TX (heartbeat) or when
+  # noise eventually completed the phantom as one garbage frame. Re-arming RX
+  # whenever the radio has been quiet bounds a wedge to ~5-10 s instead of a
+  # full heartbeat interval. The 5 s guard on BOTH taps keeps the reset away
+  # from an in-flight reception or transmit burst; OEM frames repeat within a
+  # press, so the rare frame lost to a re-arm is re-heard immediately.
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const uint32_t now = millis();
+              return (now - id(last_rx_ms) > 5000) &&
+                     (now - id(last_tx_ms) > 5000);
+          then:
+            - sx127x.set_mode_standby:
+                id: fan_radio
+            - sx127x.set_mode_rx:
+                id: fan_radio
 
 display:
   - platform: ssd1306_i2c
