@@ -6,6 +6,8 @@ no BLE. The RF protocol was **reverse-engineered from the OEM handheld remote's
 firmware** (an STM32 dump + SDR captures); this repository is an independent,
 clean-room implementation of what that analysis found.
 
+[![Built with Omnigent][omnigent-shield]][omnigent]
+
 > QuietCool's wireless wall/handheld controls speak a proprietary 2-FSK protocol
 > that ordinary 433 MHz gear (Sonoff RF Bridge, OOK/ASK bridges) can't reproduce.
 > This project drives the fan directly with a Semtech LoRa transceiver in raw FSK
@@ -468,3 +470,14 @@ Code, tooling, and docs are MIT-licensed (see [LICENSE](LICENSE)). The OEM
 firmware itself is not redistributed — only independently derived facts about the
 protocol are documented here. "QuietCool" is a trademark of its owner; this
 project is not affiliated with or endorsed by QuietCool.
+
+---
+
+<p align="center">
+  <a href="https://github.com/omnigent-ai/omnigent"><img src="https://raw.githubusercontent.com/joyfulhouse/.github/main/assets/badges/built-with-omnigent.svg" alt="Built with Omnigent"></a>
+  <br>
+  <sub>Built with <a href="https://github.com/omnigent-ai/omnigent">Omnigent</a> — the open-source AI agent framework and meta-harness.</sub>
+</p>
+
+[omnigent-shield]: https://raw.githubusercontent.com/joyfulhouse/.github/main/assets/badges/built-with-omnigent.svg
+[omnigent]: https://github.com/omnigent-ai/omnigent
