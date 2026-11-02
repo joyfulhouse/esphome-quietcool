@@ -75,6 +75,17 @@ substitutions:
   #
   # (`!secret` needs no such treatment: ESPHome falls back to the main
   # config's secrets.yaml when an included file's directory has none.)
+  #
+  # ESPHome Device Builder / github:// installs (no checkout on disk, #44):
+  # the github:// external component fetches only the C++ component, never
+  # fonts/ or images/, so "." would point at the Builder's own config
+  # directory. Point assets_root at the SAME release tag's raw files instead;
+  # `font` and `image` both download https:// paths at build time:
+  #
+  #   assets_root: "https://raw.githubusercontent.com/joyfulhouse/esphome-quietcool/v0.3.1"
+  #
+  # (and replace the local external_components source with
+  # `github://joyfulhouse/esphome-quietcool@v0.3.1`; see INSTALL.md §1).
   cpp_components_root: "components"
   assets_root: "."
 

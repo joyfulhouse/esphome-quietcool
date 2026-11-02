@@ -8,6 +8,20 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- The full-OLED config (`quietcool-cpp-lora32.yaml`) could not be used from
+  the ESPHome Device Builder: its font and fan bitmaps resolve through
+  `${assets_root}` (default `"."`, the Builder's own config directory), and a
+  `github://` component source does not bring `fonts/`/`images/` along, so
+  validation failed with `Could not find file
+  '/config/esphome/fonts/materialdesignicons-webfont.ttf'` (#44). No firmware
+  change was needed: `font` and `image` download `https://` paths, so Builder
+  users point `assets_root` at the release's raw-GitHub URL. INSTALL.md §1 and
+  the config's header now document this, and a test checks that every display
+  asset is referenced through `${assets_root}` so the one override covers all
+  of them.
+
 ## [0.3.1] - 2026-11-01
 
 ### Fixed
