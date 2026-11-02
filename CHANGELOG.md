@@ -8,6 +8,8 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-01
+
 ### Fixed
 
 - ESPHome Device Builder / `github://` installs failed to compile with
@@ -84,7 +86,8 @@ and this project adheres to
   reference configuration with OLED status display.
 - Replaces the legacy YAML-only build (retained under `legacy/`).
 
-[Unreleased]: https://github.com/joyfulhouse/esphome-quietcool/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/joyfulhouse/esphome-quietcool/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/joyfulhouse/esphome-quietcool/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/joyfulhouse/esphome-quietcool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/joyfulhouse/esphome-quietcool/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/joyfulhouse/esphome-quietcool/releases/tag/v0.1.0

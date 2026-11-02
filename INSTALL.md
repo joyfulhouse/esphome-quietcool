@@ -39,19 +39,19 @@ other ESPHome external component, from your existing ESPHome Device Builder
 
    ```yaml
    external_components:
-     - source: github://joyfulhouse/esphome-quietcool@main
+     - source: github://joyfulhouse/esphome-quietcool@v0.3.1
        components: [quietcool]
    ```
 
-   **Use `@main` (or a commit/tag that contains the issue #42 fix) — not
-   `v0.3.0` or earlier.** Releases up to and including `v0.3.0` cannot build
-   from a `github://` source: the component's C++ lives in subdirectories that
-   ESPHome does not copy for external components, and those releases relied on
-   an `esphome: includes:` bridge that only works from a local checkout, so the
-   compile fails with `quietcool/esphome/quietcool_component.h: No such file or
-   directory`. The component now copies its own source tree into the build.
-   Once a release after `v0.3.0` is tagged, pin that tag (or an exact commit)
-   for reproducible builds; `@main` tracks development.
+   **Use `v0.3.1` or later — not `v0.3.0` or earlier.** Releases up to and
+   including `v0.3.0` cannot build from a `github://` source: the component's
+   C++ lives in subdirectories that ESPHome does not copy for external
+   components, and those releases relied on an `esphome: includes:` bridge
+   that only works from a local checkout, so the compile fails with
+   `quietcool/esphome/quietcool_component.h: No such file or directory`
+   (#42). From `v0.3.1` the component copies its own source tree into the
+   build. Pin a release tag (or an exact commit) for reproducible builds;
+   `@main` tracks development.
    Keep the example's `esp32:` block exactly: **esp-idf with
    `loop_task_stack_size: 16384` is REQUIRED** — codegen rejects anything less,
    because the Arduino default stack crash-looped a production controller. No
