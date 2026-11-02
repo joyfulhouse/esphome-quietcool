@@ -1,15 +1,19 @@
 """QuietCool confirmation controller external component."""
 
+from pathlib import Path
+
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import sx126x, sx127x
 import esphome.config_validation as cv
 import esphome.final_validate as fv
 from esphome.const import CONF_ID, CONF_TYPE
+from esphome.core import CORE
+from esphome.helpers import copy_file_if_changed
 
 
 # "select" must be here even though only some configs declare a select: block:
-# the includes bridge copies quietcool_timer_select.cpp into EVERY build, and
+# _copy_source_tree copies quietcool_timer_select.cpp into EVERY build, and
 # its select/select.h include only resolves when the select component is
 # loaded — without this, a config with no select: block (both CI example
 # YAMLs) fails to compile (adversarial round 4, codex).
@@ -150,13 +154,56 @@ def _validate_loop_task_stack(config):
 FINAL_VALIDATE_SCHEMA = _validate_loop_task_stack
 
 
+_COMPONENT_DIR = Path(__file__).resolve().parent
+_SOURCE_TREE_DIRS = ("core", "ports", "radio", "esphome")
+_SOURCE_SUFFIXES = frozenset({".h", ".hpp", ".c", ".cpp", ".tcc"})
+
+
+def _source_tree_files():
+    """(relative path, absolute path) of every C/C++ file in the source tree."""
+    files = []
+    for top in _SOURCE_TREE_DIRS:
+        for path in sorted((_COMPONENT_DIR / top).rglob("*")):
+            if path.is_file() and path.suffix in _SOURCE_SUFFIXES:
+                files.append((path.relative_to(_COMPONENT_DIR), path))
+    return files
+
+
+def _copy_source_tree():
+    """Copy core/ports/radio/esphome into the build at src/quietcool/.
+
+    ESPHome copies only the top-level C++ files of an external component
+    (recursion into subdirectories is reserved for ESPHome's own core), and
+    every file of this component lives in a subdirectory. Without this step a
+    github:// source -- the ESPHome Device Builder install -- compiles a
+    main.cpp whose quietcool headers do not exist (issue #42). Doing the copy
+    here makes the component self-contained however it is sourced, with no
+    `esphome: includes:` bridge (which only accepts local paths).
+
+    Files are copied only when changed, so incremental builds stay
+    incremental, and source files no longer in the tree are pruned so a
+    removed .cpp cannot linger in the build and be compiled.
+    """
+    dest_root = Path(CORE.relative_src_path("quietcool"))
+    wanted = set()
+    for rel, src in _source_tree_files():
+        dst = dest_root / rel
+        wanted.add(dst)
+        copy_file_if_changed(src, dst)
+    if dest_root.is_dir():
+        for stale in dest_root.rglob("*"):
+            if (stale.is_file() and stale.suffix in _SOURCE_SUFFIXES
+                    and stale not in wanted):
+                stale.unlink()
+
+
 async def to_code(config):
-    # ESPHome 2025.11 copies only top-level external-component C++ resources.
-    # The contractual source tree is supplied by the example's esphome.includes
-    # directory bridge, which lands at src/quietcool. All cross-directory
-    # includes are src-rooted ("quietcool/core/...") so they resolve from the
-    # build's src/ include root under both PlatformIO and ESP-IDF without any
-    # -I flag (a relative -I breaks under ESP-IDF's build directory layout).
+    # Supply the C++ source tree at src/quietcool (see _copy_source_tree).
+    # All cross-directory includes are src-rooted ("quietcool/core/...") so
+    # they resolve from the build's src/ include root under both PlatformIO
+    # and ESP-IDF without any -I flag (a relative -I breaks under ESP-IDF's
+    # build directory layout).
+    _copy_source_tree()
     # ESPHome auto-includes only top-level component headers into main.cpp;
     # this component's C++ lives in subdirectories, so the generated code's
     # class declarations need their headers added explicitly. The two radio
