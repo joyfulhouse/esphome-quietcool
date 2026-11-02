@@ -3893,5 +3893,49 @@ class SourceTreeCopyTest(unittest.TestCase):
                 )
 
 
+class BuilderAssetsTest(unittest.TestCase):
+    """Builder installs get display assets via one `assets_root` URL (#44).
+
+    A github:// source fetches only the component, so a Builder user points
+    `assets_root` at the release's raw-GitHub URL (INSTALL.md §1). That only
+    works if EVERY local asset goes through `${assets_root}`: a bare
+    `fonts/…` or `images/…` path would still look in the Builder's config
+    directory and fail with "Could not find file".
+    """
+
+    def test_every_local_display_asset_goes_through_assets_root(self) -> None:
+        refs = [
+            ref
+            for ref in _FILE_REF.findall(_strip_comments(CPP_CONFIG.read_text()))
+            if "://" not in ref
+        ]
+        self.assertGreaterEqual(len(refs), 14, "asset enumeration rotted")
+        for ref in refs:
+            with self.subTest(file=ref):
+                self.assertTrue(
+                    ref.startswith("${assets_root}/"),
+                    f"{ref} bypasses ${{assets_root}}, so a Builder install "
+                    "cannot redirect it to the release URL",
+                )
+
+    def test_install_guide_pins_assets_and_component_to_one_tag(self) -> None:
+        text = (ROOT / "INSTALL.md").read_text()
+        assets = re.findall(
+            r'assets_root: "https://raw\.githubusercontent\.com/'
+            r'joyfulhouse/esphome-quietcool/([^"/]+)"',
+            text,
+        )
+        sources = re.findall(
+            r"github://joyfulhouse/esphome-quietcool@(\S+)", text
+        )
+        self.assertTrue(assets, "INSTALL.md lacks the Builder assets_root recipe")
+        self.assertEqual(
+            set(assets) | set(sources),
+            set(sources),
+            "INSTALL.md pins the assets to a different tag than the component",
+        )
+        self.assertEqual(len(set(sources)), 1, "INSTALL.md mixes release tags")
+
+
 if __name__ == "__main__":
     unittest.main()

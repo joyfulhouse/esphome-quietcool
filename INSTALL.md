@@ -65,6 +65,35 @@ other ESPHome external component, from your existing ESPHome Device Builder
 The Heltec/HiLetgo **V3 (SX1262)** board works the same way — use the SX1262
 radio block shown at the bottom of the example config.
 
+### Full OLED display from the Builder
+
+The example config above has no display. For the full OLED (status icons,
+animated fan) start from
+[`quietcool-cpp-lora32.yaml`](quietcool-cpp-lora32.yaml) instead. It reads
+its MDI icon font and 13 fan bitmaps from `fonts/` and `images/` via
+`${assets_root}`, which defaults to `"."` — the directory of the config the
+Builder is building (`/config/esphome`). A `github://` external component
+does not download those files, so validation fails with
+`Could not find file '/config/esphome/fonts/materialdesignicons-webfont.ttf'`
+(#44). Make two edits:
+
+```yaml
+substitutions:
+  # ...keep the rest of the block...
+  assets_root: "https://raw.githubusercontent.com/joyfulhouse/esphome-quietcool/v0.3.1"
+
+external_components:
+  - source: github://joyfulhouse/esphome-quietcool@v0.3.1
+    components: [quietcool]
+```
+
+ESPHome's `font` and `image` both accept `https://` paths: they download the
+files on the first build and cache them under `.esphome/`. Use **the same tag
+in both places** so the assets match the component, and update both when you
+upgrade. You don't need to copy anything into `/config/esphome/`. Copying the
+14 files there by hand also works, but nothing keeps that copy in step with
+the release.
+
 ## 2. Developer install (from a checkout)
 
 Only for working **on** the component itself — the repo's own configs build
