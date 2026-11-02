@@ -39,19 +39,24 @@ other ESPHome external component, from your existing ESPHome Device Builder
 
    ```yaml
    external_components:
-     - source: github://joyfulhouse/esphome-quietcool@8fadbccd890ed30fd0202e282c2cd61906828100
+     - source: github://joyfulhouse/esphome-quietcool@main
        components: [quietcool]
    ```
 
-   `v0.2.0` is a legacy release without heartbeat or passive synchronization.
-   Until a newer release is tagged, those features require the commit shown
-   above (a known-good commit containing both features) or a later commit/ref.
-   Pin an exact commit for reproducible builds; `@main` tracks development.
+   **Use `@main` (or a commit/tag that contains the issue #42 fix) — not
+   `v0.3.0` or earlier.** Releases up to and including `v0.3.0` cannot build
+   from a `github://` source: the component's C++ lives in subdirectories that
+   ESPHome does not copy for external components, and those releases relied on
+   an `esphome: includes:` bridge that only works from a local checkout, so the
+   compile fails with `quietcool/esphome/quietcool_component.h: No such file or
+   directory`. The component now copies its own source tree into the build.
+   Once a release after `v0.3.0` is tagged, pin that tag (or an exact commit)
+   for reproducible builds; `@main` tracks development.
    Keep the example's `esp32:` block exactly: **esp-idf with
    `loop_task_stack_size: 16384` is REQUIRED** — codegen rejects anything less,
    because the Arduino default stack crash-looped a production controller. No
-   `esphome: includes:` bridge is needed for the GitHub source; that bridge
-   exists only for this repo's own local-path builds.
+   `esphome: includes:` entry is needed (and `includes:` cannot point at a
+   `github://` source anyway) — the component supplies its own C++ tree.
 3. Add your Wi-Fi / API / OTA credentials the normal Builder way (its managed
    `secrets.yaml`), then **Install → Wirelessly / Plug into this computer**.
    Antenna on first. Later updates arrive like any other ESPHome device:

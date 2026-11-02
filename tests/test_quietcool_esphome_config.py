@@ -3804,11 +3804,93 @@ class QuietCoolHeartbeatSchemaTest(unittest.TestCase):
             mock.patch.object(
                 quietcool.cg, "register_component", new=mock.AsyncMock()
             ),
+            mock.patch.object(quietcool, "_copy_source_tree"),
         ):
             asyncio.run(quietcool.to_code(config))
 
         self.assertEqual(len(emitted), 2)
         self.assertEqual(emitted[1][-1], 300000)
+
+
+class SourceTreeCopyTest(unittest.TestCase):
+    """The component must ship its own C++ tree into the build (issue #42).
+
+    ESPHome copies only top-level external-component C++ files; every file of
+    this component is in a subdirectory, and an `esphome: includes:` bridge
+    cannot reference a github:// source. So codegen copies the tree itself.
+    """
+
+    COMPONENT = ROOT / "components" / "quietcool"
+
+    def _expected(self) -> set[Path]:
+        return {
+            p.relative_to(self.COMPONENT)
+            for top in ("core", "ports", "radio", "esphome")
+            for p in (self.COMPONENT / top).rglob("*")
+            if p.is_file() and p.suffix in {".h", ".hpp", ".c", ".cpp", ".tcc"}
+        }
+
+    def _copy(self, build: Path) -> Path:
+        with mock.patch.object(quietcool.CORE, "build_path", build):
+            quietcool._copy_source_tree()
+        return build / "src" / "quietcool"
+
+    def test_every_source_file_lands_under_src_quietcool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = self._copy(Path(tmp))
+            copied = {p.relative_to(dest) for p in dest.rglob("*") if p.is_file()}
+            self.assertEqual(copied, self._expected())
+            for rel in copied:
+                self.assertEqual(
+                    (dest / rel).read_bytes(),
+                    (self.COMPONENT / rel).read_bytes(),
+                )
+
+    def test_tree_covers_every_subdirectory_with_sources(self) -> None:
+        # A new top-level source directory must be added to _SOURCE_TREE_DIRS,
+        # or its files would silently never reach a github:// build.
+        dirs_with_sources = {
+            p.relative_to(self.COMPONENT).parts[0]
+            for p in self.COMPONENT.rglob("*")
+            if p.is_file()
+            and p.suffix in {".h", ".hpp", ".c", ".cpp", ".tcc"}
+            and p.parent != self.COMPONENT
+        }
+        self.assertLessEqual(dirs_with_sources, set(quietcool._SOURCE_TREE_DIRS))
+
+    def test_injected_headers_are_in_the_copied_tree(self) -> None:
+        source = (self.COMPONENT / "__init__.py").read_text()
+        for module in ("fan.py", "button.py", "select.py"):
+            path = self.COMPONENT / module
+            if path.is_file():
+                source += path.read_text()
+        injected = set(re.findall(r'#include "quietcool/([^"]+)"', source))
+        self.assertTrue(injected)
+        expected = {str(p) for p in self._expected()}
+        self.assertLessEqual(injected, expected)
+
+    def test_stale_sources_are_pruned_and_other_files_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "src" / "quietcool"
+            (dest / "core").mkdir(parents=True)
+            stale = dest / "core" / "removed_module.cpp"
+            stale.write_text("#error stale\n")
+            unrelated = dest / "notes.txt"
+            unrelated.write_text("keep\n")
+            self._copy(Path(tmp))
+            self.assertFalse(stale.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_repo_configs_need_no_includes_bridge(self) -> None:
+        for name in (
+            "quietcool-cpp-example.yaml",
+            "quietcool-cpp-example-sx126x.yaml",
+            "quietcool-cpp-lora32.yaml",
+        ):
+            with self.subTest(config=name):
+                self.assertNotRegex(
+                    (ROOT / name).read_text(), r"(?m)^\s+includes:"
+                )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,20 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- ESPHome Device Builder / `github://` installs failed to compile with
+  `quietcool/esphome/quietcool_component.h: No such file or directory`
+  (#42). ESPHome copies only the top-level C++ files of an external
+  component, and all of this component's C++ lives in subdirectories; the
+  tree reached the build only through an `esphome: includes:` bridge, which
+  accepts local paths only. The component now copies its
+  `core/`/`ports/`/`radio/`/`esphome/` tree into the build itself (pruning
+  stale files), so it is self-contained however it is sourced. The bridge is
+  removed from the repo's configs, so CI's `esphome compile` now exercises the
+  same path as a Builder install. Local wrapper configs that still carry the
+  bridge keep working (it copies identical files), but can drop it.
+
 ## [0.3.0] - 2026-08-17
 
 ### Added
