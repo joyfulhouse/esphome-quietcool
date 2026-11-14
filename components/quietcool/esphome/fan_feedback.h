@@ -36,7 +36,7 @@ struct FanFeedback final {
 //
 // The confirmed report's own capability marker bits are deliberately ignored
 // (issue #31 review): an outbound command frame's marker bits (10) alias
-// SpeedCapability::Two, so a frame that may be our own echo reads as a 2-speed
+// SpeedCapability::Two, so a frame that may be a command reads as a 2-speed
 // report. The core already ranks that ambiguity and keeps the sticky
 // capability, so honouring the raw marker here made the published LEVEL
 // disagree with the published BAND — a confirmed HIGH on a known 3-speed fan
@@ -128,21 +128,25 @@ std::uint8_t command_speed_count(
 // Choosing the widest unlearned band removes the ONE widening the fan takes on
 // every install, but not every widening: an Unambiguous report overwrites the
 // sticky capability outright (AuthorityStore::promote), so a 3-speed fan first
-// mis-learned as Two from its own echo — the acknowledged cost of ranking
-// echo-indistinguishable evidence — self-heals Two -> Three and would widen the
+// mis-learned as Two from a command frame — the acknowledged cost of ranking
+// command-indistinguishable evidence — self-heals Two -> Three and would widen the
 // entity from 2 back to 3 mid-session. Home Assistant cached 2 at ListEntities
 // and cannot be told otherwise until it reconnects, so its "100%" would arrive
 // as level 2, map against a band of 3 and transmit MED: HIGH unreachable for
 // the rest of the session, and the fan STOPPED if the mis-learn was right.
 //
-// So the entity band is LATCHED monotonically non-increasing for the life of
-// this object — one boot, and a boot always re-lists. Every capability the fan
-// can prove may narrow it; nothing may widen it. A widening therefore costs a
-// reboot, which is the same reboot that re-lists, and it is a widening only
-// Home Assistant's own view was ever missing: the persisted capability makes
-// the next boot list the fan's real band from the first ListEntities. (An API
-// reconnect also re-lists, but nothing in the fan entity can observe one, so
-// the latch stays conservative rather than guessing.)
+// So the entity band is LATCHED monotonically non-increasing for as long as
+// anything can be holding a listing of it. Every capability the fan can prove
+// may narrow it; nothing may widen it under a live listing.
+//
+// The latch is released by relist(), which the fan entity calls only while NO
+// API client is connected (issue #46). With nobody connected nobody holds a
+// cached band, and whoever connects next lists the entity afresh, so the band
+// may then return to exactly what the sticky capability says. Before that
+// release existed a transient narrowing — however it was caused — outlived the
+// capability that caused it until a manual restart, while every diagnostic
+// already read 3. A reboot releases it too: it constructs a fresh object, and
+// the persisted capability makes the first ListEntities list the real band.
 //
 // The command band is not latched (nothing caches it) but is BOUNDED by the
 // latched entity band, which is what makes it <= whatever band Home Assistant
@@ -158,12 +162,22 @@ class FanSpeedBands final {
   // never keep aiming a level press.
   void observe(std::optional<::quietcool::SpeedCapability> capability);
 
+  // Releases the latch: the entity band returns to what the last observed
+  // capability says, and the command band follows. ONLY safe while nothing
+  // holds a listing of the entity band — i.e. no API client is connected — so
+  // the caller owns that precondition. Returns whether the entity band
+  // changed, which is when the published level must be re-derived against it.
+  bool relist();
+
   // What get_traits() lists and authority_to_feedback publishes levels inside.
   std::uint8_t entity() const { return entity_; }
   // What control() maps an inbound Home Assistant level against.
   std::uint8_t command() const { return command_; }
 
  private:
+  // The last observed capability, kept only so relist() can re-derive both
+  // bands from it; observe() itself never reads it back.
+  std::optional<::quietcool::SpeedCapability> capability_;
   std::uint8_t entity_{kUnlearnedEntitySpeedCount};
   std::uint8_t command_{kUnlearnedCommandSpeedCount};
 };

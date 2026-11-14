@@ -118,58 +118,72 @@ QC_TEST("consensus", "canonical change resets all group facts") {
   QC_CHECK(!snapshot.has_exact);
 }
 
-// Issue #31 review: a 2-speed fan's confirming report is byte-identical to the
-// command frame — both carry marker bits 10 — so the echo filter cannot tell
-// them apart. It must therefore RANK the evidence, not drop it: dropping it
-// would make capability Two unlearnable on the command path, so a fan driven
-// only by successful commands would never confirm or persist its band and
-// every boot would fall back to the conservative unknown-capability
-// assumption.
-QC_TEST("consensus", "an echo-indistinguishable candidate still teaches the band") {
+// Issue #31 review: a 2-speed fan's confirming report is byte-identical to a
+// command frame — both carry marker bits 10 — so the receiver cannot tell them
+// apart. It must therefore RANK the evidence, not drop it: dropping it would
+// make capability Two unlearnable, so a 2-speed fan would never confirm or
+// persist its band and every boot would fall back to the conservative
+// unknown-capability assumption.
+QC_TEST("consensus", "a command-shaped candidate still teaches the band") {
   ConsensusTracker tracker;
-  QC_CHECK(!tracker.observe(response(0xCB, 0x9F), 100, 0x9F).has_value());
-  const auto consensus = tracker.observe(response(0xCB, 0x9F), 160, 0x9F);
-  QC_CHECK(consensus.has_value());
-  QC_CHECK_EQ(consensus->capability, SpeedCapability::Two);
-  QC_CHECK_EQ(consensus->capability_evidence,
-              CapabilityEvidence::PossiblyOwnEcho);
-}
-
-// ...but that evidence is the WEAKEST kind. A 3-speed fan answers our 0xAF
-// command with 0xEF: a different raw byte, the same canonical byte, so it
-// joins the very same group. Its Three must beat the echo's aliased Two
-// whichever frame lands first — otherwise arrival order decides the fan's
-// band.
-QC_TEST("consensus", "unambiguous capability outranks an echo alias in both orders") {
-  {
-    ConsensusTracker tracker;  // echo first, genuine second
-    tracker.observe(response(0xCB, 0xAF), 100, 0xAF);
-    const auto consensus = tracker.observe(response(0xCB, 0xEF), 160, 0xAF);
-    QC_CHECK(consensus.has_value());
-    QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
-    QC_CHECK_EQ(consensus->capability_evidence,
-                CapabilityEvidence::Unambiguous);
-  }
-  {
-    ConsensusTracker tracker;  // genuine first, echo second
-    tracker.observe(response(0xCB, 0xEF), 100, 0xAF);
-    const auto consensus = tracker.observe(response(0xCB, 0xAF), 160, 0xAF);
-    QC_CHECK(consensus.has_value());
-    QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
-    QC_CHECK_EQ(consensus->capability_evidence,
-                CapabilityEvidence::Unambiguous);
-  }
-}
-
-// No local command byte in flight (every query window) means nothing can be
-// our echo, whatever the marker bits say.
-QC_TEST("consensus", "without an outbound byte every candidate is unambiguous") {
-  ConsensusTracker tracker;
-  tracker.observe(response(0xCB, 0x9F), 100);
+  QC_CHECK(!tracker.observe(response(0xCB, 0x9F), 100).has_value());
   const auto consensus = tracker.observe(response(0xCB, 0x9F), 160);
   QC_CHECK(consensus.has_value());
   QC_CHECK_EQ(consensus->capability, SpeedCapability::Two);
-  QC_CHECK_EQ(consensus->capability_evidence, CapabilityEvidence::Unambiguous);
+  QC_CHECK_EQ(consensus->capability_evidence,
+              CapabilityEvidence::CommandShaped);
+}
+
+// ...but that evidence is the WEAKEST kind. A 3-speed fan answers a 0xAF
+// command with 0xEF: a different raw byte, the same canonical byte, so it
+// joins the very same group. Its Three must beat the command's aliased Two
+// whichever frame lands first — otherwise arrival order decides the fan's
+// band.
+QC_TEST("consensus", "unambiguous capability outranks a command alias in both orders") {
+  {
+    ConsensusTracker tracker;  // command first, genuine second
+    tracker.observe(response(0xCB, 0xAF), 100);
+    const auto consensus = tracker.observe(response(0xCB, 0xEF), 160);
+    QC_CHECK(consensus.has_value());
+    QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
+    QC_CHECK_EQ(consensus->capability_evidence,
+                CapabilityEvidence::Unambiguous);
+  }
+  {
+    ConsensusTracker tracker;  // genuine first, command second
+    tracker.observe(response(0xCB, 0xEF), 100);
+    const auto consensus = tracker.observe(response(0xCB, 0xAF), 160);
+    QC_CHECK(consensus.has_value());
+    QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
+    QC_CHECK_EQ(consensus->capability_evidence,
+                CapabilityEvidence::Unambiguous);
+  }
+}
+
+// Issue #46: the rank is a property of the frame's SHAPE, not of the window it
+// was heard in. No window can rule out the paired OEM remote, whose commands
+// carry our sender ID and marker bits 10; only bit 6 — which no command
+// constructor sets — makes a capability unambiguous.
+QC_TEST("consensus", "only a capability no command can carry is unambiguous") {
+  const std::array<std::uint8_t, 4> command_shaped{{0x9F, 0xAF, 0xBF, 0x90}};
+  for (const auto byte : command_shaped) {
+    ConsensusTracker tracker;
+    tracker.observe(response(0xCB, byte), 100);
+    const auto consensus = tracker.observe(response(0xCB, byte), 160);
+    QC_CHECK(consensus.has_value());
+    QC_CHECK_EQ(consensus->capability, SpeedCapability::Two);
+    QC_CHECK_EQ(consensus->capability_evidence,
+                CapabilityEvidence::CommandShaped);
+  }
+  const std::array<std::uint8_t, 2> fan_only{{0x5F, 0xDF}};
+  for (const auto byte : fan_only) {
+    ConsensusTracker tracker;
+    tracker.observe(response(0xCB, byte), 100);
+    const auto consensus = tracker.observe(response(0xCB, byte), 160);
+    QC_CHECK(consensus.has_value());
+    QC_CHECK_EQ(consensus->capability_evidence,
+                CapabilityEvidence::Unambiguous);
+  }
 }
 
 QC_TEST("consensus", "special responses do not participate or reset") {

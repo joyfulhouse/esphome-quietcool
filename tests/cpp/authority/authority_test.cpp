@@ -192,41 +192,42 @@ QC_TEST("authority", "clear_confirmed_capability drops the sticky value") {
               SpeedCapability::Three);
 }
 
-// Issue #31 review: capability evidence that could be our own echo is admitted
-// only into an EMPTY slot. That is the whole reason a 2-speed fan — whose
-// confirming report is byte-identical to the command by construction — can
-// still teach its band, while an echo can never demote a fan whose capability
-// is already known from a frame that could not have been ours.
-QC_TEST("authority", "echo-ranked capability fills an empty slot but never overwrites") {
+// Issue #31 review, issue #46: command-shaped capability evidence (marker bits
+// 10 — our own echo, the paired remote's command, or a genuine 2-speed report)
+// is admitted only into an EMPTY slot. That is the whole reason a 2-speed fan —
+// whose every report is byte-identical to a command by construction — can
+// still teach its band, while neither an echo nor a wall-remote press can ever
+// demote a fan whose capability is already known.
+QC_TEST("authority", "command-shaped capability fills an empty slot but never overwrites") {
   {
     AuthorityStore authority;
     auto value = accepted(FanState::observed(0x9F).value(),
                           EvidenceSource::PostCommandConsensus, 100);
     value.capability = SpeedCapability::Two;
-    value.capability_evidence = CapabilityEvidence::PossiblyOwnEcho;
+    value.capability_evidence = CapabilityEvidence::CommandShaped;
     authority.promote(value, 100);
     QC_CHECK_EQ(authority.snapshot(100).speed_capability.value(),
                 SpeedCapability::Two);
+    // ...and a fresh unit that mis-learned Two from a command self-heals: the
+    // fan's first unambiguous report always wins.
+    authority.promote(accepted(FanState::observed(0xDF).value(),
+                               EvidenceSource::RecoveryQueryConsensus, 200), 200);
+    QC_CHECK_EQ(authority.snapshot(200).speed_capability.value(),
+                SpeedCapability::Three);
   }
   {
     AuthorityStore authority;
-    // Known Three from an unambiguous frame; an echo-ranked Two must bounce.
+    // Known Three from an unambiguous frame; a command-shaped Two must bounce,
+    // whatever window it was heard in (issue #46: passive observation).
     authority.promote(accepted(FanState::observed(0xDF).value(),
                                EvidenceSource::BootQueryConsensus, 100), 100);
-    auto echo = accepted(FanState::observed(0x9F).value(),
-                         EvidenceSource::PostCommandConsensus, 200);
-    echo.capability = SpeedCapability::Two;
-    echo.capability_evidence = CapabilityEvidence::PossiblyOwnEcho;
-    authority.promote(echo, 200);
+    auto remote = accepted(FanState::observed(0xBF).value(),
+                           EvidenceSource::PassiveObservationConsensus, 200);
+    remote.capability = SpeedCapability::Two;
+    remote.capability_evidence = CapabilityEvidence::CommandShaped;
+    authority.promote(remote, 200);
     QC_CHECK_EQ(authority.snapshot(200).speed_capability.value(),
                 SpeedCapability::Three);
-    // ...and the mis-learned case self-heals: an unambiguous frame always wins.
-    auto genuine = accepted(FanState::observed(0x9F).value(),
-                            EvidenceSource::ManualQueryConsensus, 300);
-    genuine.capability = SpeedCapability::Two;
-    authority.promote(genuine, 300);
-    QC_CHECK_EQ(authority.snapshot(300).speed_capability.value(),
-                SpeedCapability::Two);
   }
 }
 

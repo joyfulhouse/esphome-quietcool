@@ -111,14 +111,15 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
   // cleared only through clear_confirmed_capability(), when the binding
   // itself changes (Forget, or learning a different fan).
   //
-  // Evidence that could be our own echo (marker bits 10, byte-identical to the
-  // frame we just transmitted) is admitted only into an EMPTY slot. That is
-  // what lets a 2-speed fan's confirming report — indistinguishable from an
-  // echo by construction — teach the band on a fresh unit, while making it
-  // impossible for an echo to demote a fan whose capability is already known
-  // from an unambiguous frame (issue #31 review). If a fresh unit ever does
-  // mis-learn Two from a pure echo, the next unambiguous report (any query
-  // reply, or the fan's answer to the re-aimed command) overwrites it.
+  // Command-shaped evidence (marker bits 10: our own echo, the paired OEM
+  // remote's command, or a genuine 2-speed report — indistinguishable by
+  // construction) is admitted only into an EMPTY slot. That is what lets a
+  // 2-speed fan teach its band on a fresh unit, while making it impossible for
+  // an echo (issue #31 review) or a wall-remote press (issue #46) to demote a
+  // fan whose capability is already known. If a fresh unit ever does mis-learn
+  // Two from a command, the fan's first unambiguous report overwrites it. The
+  // cost: a known capability is never lowered to Two by observation — swapping
+  // in a 2-speed fan under the same sender ID needs Forget + Learn.
   if (accepted.capability != SpeedCapability::Unknown &&
       (accepted.capability_evidence == CapabilityEvidence::Unambiguous ||
        !confirmed_capability_))

@@ -8,6 +8,31 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- A 3-speed fan could drop to two listed speeds (LOW/HIGH, Medium missing in
+  Home Assistant and on the OLED) until the controller was restarted, while
+  `Fan Speed Capability` read 3 (#46). The paired wall remote's command
+  frames carry marker bits `10`, which is also the encoding of a 2-speed
+  capability, and they are sent under the sender ID the controller is bound
+  to. Only the controller's *own* echo was down-ranked (#31), so remote
+  bursts overheard in passive observation, or in the recovery-query window
+  the remote's activity arms, were taken as full-weight proof of a 2-speed
+  fan. Every command-shaped frame is now weak capability evidence in every
+  receive context: it can teach a fan whose band is still unknown, but never
+  lower one already known. Swapping in a 2-speed fan under the same remote ID
+  therefore needs Forget + Learn.
+
+### Changed
+
+- The listed speed band is no longer latched until reboot. It still never
+  widens while a Home Assistant API client is connected (HA caches the speed
+  count per connection), but it is re-derived from the confirmed capability
+  whenever no API client is connected, so any narrowing is corrected at the
+  next reconnect instead of needing a manual restart (#46). Builds with MQTT
+  keep the until-reboot latch. Band changes are logged at INFO under
+  `quietcool.fan`.
+
 ## [0.3.1] - 2026-11-01
 
 ### Fixed

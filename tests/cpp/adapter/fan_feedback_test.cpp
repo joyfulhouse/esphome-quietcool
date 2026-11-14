@@ -26,6 +26,7 @@
 
 #include "support/test.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -289,6 +290,59 @@ QC_TEST("fan_feedback", "the command band is never wider than the listed band") 
   fresh.observe(Capability::Three);
   QC_CHECK_EQ(fresh.entity(), 3);
   QC_CHECK_EQ(fresh.command(), 3);
+}
+
+// Issue #46: the latch is released by relist(), which the fan entity calls only
+// while no API client is connected — nobody then holds a listing of the old
+// band, and the next connection lists afresh. A transient narrowing therefore
+// costs a reconnect, not a manual restart.
+QC_TEST("fan_feedback", "relist returns both bands to the current capability") {
+  // The reported sequence: a known 3-speed fan transiently reads Two, then
+  // heals. The band stays latched at 2 under the live listing...
+  FanSpeedBands bands;
+  bands.observe(Capability::Three);
+  bands.observe(Capability::Two);
+  bands.observe(Capability::Three);
+  QC_CHECK_EQ(bands.entity(), 2);
+  QC_CHECK_EQ(bands.command(), 2);
+  // ...and re-widens the moment the listing is known to be gone.
+  QC_CHECK(bands.relist());
+  QC_CHECK_EQ(bands.entity(), 3);
+  QC_CHECK_EQ(bands.command(), 3);
+  // Idempotent: nothing left to release.
+  QC_CHECK(!bands.relist());
+
+  // A band that is genuinely narrow stays narrow: relist only forgets latch
+  // history, it never invents width the capability does not have.
+  FanSpeedBands two;
+  two.observe(Capability::Two);
+  QC_CHECK(!two.relist());
+  QC_CHECK_EQ(two.entity(), 2);
+  QC_CHECK_EQ(two.command(), 2);
+
+  // After Forget / a re-bind the capability is absent: the listed band returns
+  // to the widest, the command band to the MED-free one.
+  FanSpeedBands forgotten;
+  forgotten.observe(Capability::One);
+  forgotten.observe(kUnlearned);
+  QC_CHECK_EQ(forgotten.entity(), 1);
+  QC_CHECK(forgotten.relist());
+  QC_CHECK_EQ(forgotten.entity(), kUnlearnedEntitySpeedCount);
+  QC_CHECK_EQ(forgotten.command(), kUnlearnedCommandSpeedCount);
+
+  // command <= entity survives relist from every reachable history.
+  const std::array<std::optional<Capability>, 4> all{
+      {kUnlearned, Capability::One, Capability::Two, Capability::Three}};
+  for (const auto first : all)
+    for (const auto second : all) {
+      FanSpeedBands any;
+      any.observe(first);
+      any.observe(second);
+      any.relist();
+      QC_CHECK(any.command() <= any.entity());
+      QC_CHECK_EQ(any.entity(), entity_speed_count(second));
+      QC_CHECK_EQ(any.command(), command_speed_count(second));
+    }
 }
 
 // The acceptance property the two bands exist for, driven over every band Home

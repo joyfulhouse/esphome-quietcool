@@ -132,23 +132,29 @@ enum class EvidenceSource : std::uint8_t {
   RestoredHint
 };
 enum class EvidenceConfidence : std::uint8_t { ExactBackedConsensus, RecoveredOnlyConsensus };
-// How much a reported SpeedCapability may be trusted (issue #31 review). A
-// command frame and a 2-speed fan's report are byte-identical by construction —
-// both carry marker bits 10, which is also the encoding of SpeedCapability::Two
-// — so a frame matching our own in-flight command is PossiblyOwnEcho: real
-// evidence of a 2-speed fan, or no evidence at all if it was our own echo. The
-// rank exists because the two failure modes are wildly asymmetric. Discarding
-// such evidence makes capability Two unlearnable from a SUCCESSFUL command — a
-// confirmed command never opens a fallback query, and outside a response window
-// a report classifies as ExternalPriorityState, which invalidates rather than
-// promotes — so a 2-speed fan driven only by commands would never confirm or
+// How much a reported SpeedCapability may be trusted (issue #31 review, issue
+// #46). Marker bits 10 are BOTH the encoding of SpeedCapability::Two and the
+// handheld's command marker, so a frame carrying them is one of three things
+// the receiver cannot tell apart: a genuine 2-speed fan's report, the bridge's
+// own echo, or a command from the paired OEM remote — which transmits under
+// the very sender ID the bridge is bound to, and whose bursts land in passive
+// observation and in the recovery-query windows its own activity arms. Such a
+// frame is CommandShaped: real evidence of a 2-speed fan, or no evidence at
+// all. Bits 01 and 11 have bit 6 set, which no command constructor produces,
+// so they are Unambiguous.
+//
+// The rank exists because the two failure modes are wildly asymmetric.
+// Discarding CommandShaped evidence makes capability Two unlearnable — a
+// 2-speed fan's every report is command-shaped — so it would never confirm or
 // persist its band, and every boot would fall back to the conservative
 // unknown-capability assumption instead of to proof. Trusting it blindly is the
-// worse half: an echo can then DEMOTE a fan already known to have three speeds,
-// narrowing its entity to two levels across reboots and putting MED out of
-// reach on a fan that has it. So PossiblyOwnEcho evidence is used, but never in
-// preference to a frame that could not have been ours.
-enum class CapabilityEvidence : std::uint8_t { Unambiguous, PossiblyOwnEcho };
+// worse half: an echo or a wall-remote press can then DEMOTE a fan already
+// known to have three speeds, narrowing its entity to two levels and putting
+// MED out of reach on a fan that has it (issue #46 was exactly that, from the
+// remote; issue #31 closed only the own-echo case). So CommandShaped evidence
+// is used, but only to fill an empty slot — never in preference to a frame
+// that could not have been a command.
+enum class CapabilityEvidence : std::uint8_t { Unambiguous, CommandShaped };
 enum class AuthorityLossReason : std::uint8_t {
   Boot, Unprovisioned, LocalCommandPending, ManualRevalidationPending,
   ExactOemQuery, ExternalStateTraffic, AmbiguousOemYield, ContradictoryTail,
