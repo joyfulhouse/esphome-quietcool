@@ -203,6 +203,39 @@ QC_TEST("persistence", "restore seeds and publishes the persisted capability") {
               SpeedCapability::Two);
 }
 
+// Issue #46 follow-up, end to end: a query window on a known 3-speed fan in
+// which one of the two replies was damaged identically in both state bytes —
+// bit 7 lost (0xDF -> 0x5F, a valid frame naming a 1-speed fan) or bit 6 lost
+// (0xDF -> 0x9F, naming a 2-speed one). The state is confirmed; the stored
+// capability is untouched and nothing is written to flash.
+QC_TEST("persistence", "one corrupted query reply cannot change a known capability") {
+  for (const std::uint8_t damaged : {std::uint8_t(0x5F), std::uint8_t(0x9F)}) {
+    for (const bool damaged_first : {false, true}) {
+      ConfirmationCore core(CoreConfig{59});
+      RestorableState restored;
+      restored.sender = persistence_sender();
+      restored.speed_capability = SpeedCapability::Three;
+      core.restore(restored, 0);
+
+      core.request_manual_refresh(0);
+      const auto query = persistence_tx(core.poll(0));
+      QC_CHECK(query.has_value());
+      core.on_tx_started(query->token, 0);
+      core.on_tx_complete(query->token, 100);
+      const auto first = report_frame(damaged_first ? damaged : 0xDF);
+      const auto second = report_frame(damaged_first ? 0xDF : damaged);
+      core.on_frame(ByteView(first.bytes), 300);
+      const auto effects = core.on_frame(ByteView(second.bytes), 360);
+
+      QC_CHECK(!persistence_request(effects, PersistenceKind::SaveSpeedCapability)
+                    .has_value());
+      const auto after = core.snapshot(400).authority;
+      QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(after.state));
+      QC_CHECK_EQ(after.speed_capability.value(), SpeedCapability::Three);
+    }
+  }
+}
+
 QC_TEST("persistence", "confirmed capability is saved only when it changes") {
   auto core = restored_core();
   // 0x9F: capability Two, LOW, continuous. First confirmation persists it.

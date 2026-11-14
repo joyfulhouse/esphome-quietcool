@@ -231,6 +231,35 @@ QC_TEST("authority", "command-shaped capability fills an empty slot but never ov
   }
 }
 
+// Issue #46 follow-up: a fan-only capability carried by a single frame of the
+// consensus is Uncorroborated. It teaches a fresh unit, but one corrupted
+// reply must never re-teach a band that is already known.
+QC_TEST("authority", "uncorroborated capability fills an empty slot but never overwrites") {
+  AuthorityStore authority;
+  auto first = accepted(FanState::observed(0xDF).value(),
+                        EvidenceSource::BootQueryConsensus, 100);
+  first.capability_evidence = CapabilityEvidence::Uncorroborated;
+  authority.promote(first, 100);
+  QC_CHECK_EQ(authority.snapshot(100).speed_capability.value(),
+              SpeedCapability::Three);
+
+  auto corrupted = accepted(FanState::observed(0x5F).value(),
+                            EvidenceSource::HeartbeatQueryConsensus, 200);
+  corrupted.capability = SpeedCapability::One;
+  corrupted.capability_evidence = CapabilityEvidence::Uncorroborated;
+  authority.promote(corrupted, 200);
+  QC_CHECK_EQ(authority.snapshot(200).speed_capability.value(),
+              SpeedCapability::Three);
+
+  // A corroborated report still changes it: the fan really is different.
+  auto genuine = accepted(FanState::observed(0x5F).value(),
+                          EvidenceSource::HeartbeatQueryConsensus, 300);
+  genuine.capability = SpeedCapability::One;
+  authority.promote(genuine, 300);
+  QC_CHECK_EQ(authority.snapshot(300).speed_capability.value(),
+              SpeedCapability::One);
+}
+
 QC_TEST("authority", "restore creates diagnostic hint and no authority") {
   AuthorityStore authority;
   RestorableState restored;

@@ -94,9 +94,9 @@ using TimerAuthority = std::variant<UnknownTimerAuthority,
 struct AcceptedObservation final {
   FanState state;
   SpeedCapability capability;
-  // Rank of `capability` (issue #31 review, issue #46). CommandShaped may only
-  // FILL an empty sticky slot; it may never overwrite a capability already
-  // learned.
+  // Rank of `capability` (issue #31 review, issue #46). Only Unambiguous may
+  // overwrite a capability already learned; CommandShaped and Uncorroborated
+  // may only FILL an empty sticky slot.
   CapabilityEvidence capability_evidence;
   EvidenceSource source;
   EvidenceConfidence confidence;

@@ -111,15 +111,21 @@ void AuthorityStore::promote(const AcceptedObservation& accepted,
   // cleared only through clear_confirmed_capability(), when the binding
   // itself changes (Forget, or learning a different fan).
   //
-  // Command-shaped evidence (marker bits 10: our own echo, the paired OEM
-  // remote's command, or a genuine 2-speed report — indistinguishable by
-  // construction) is admitted only into an EMPTY slot. That is what lets a
-  // 2-speed fan teach its band on a fresh unit, while making it impossible for
-  // an echo (issue #31 review) or a wall-remote press (issue #46) to demote a
-  // fan whose capability is already known. If a fresh unit ever does mis-learn
-  // Two from a command, the fan's first unambiguous report overwrites it. The
-  // cost: a known capability is never lowered to Two by observation — swapping
-  // in a 2-speed fan under the same sender ID needs Forget + Learn.
+  // Only Unambiguous evidence — a fan-only capability carried by at least two
+  // independent frames of the consensus — may CHANGE a known capability.
+  // Everything weaker is admitted only into an EMPTY slot:
+  //  - CommandShaped (marker bits 10: our own echo, a paired remote's command,
+  //    or a genuine 2-speed report — indistinguishable by construction). This
+  //    is what lets a 2-speed fan teach its band on a fresh unit while neither
+  //    an echo (issue #31 review) nor a remote press (issue #46) can demote a
+  //    known fan.
+  //  - Uncorroborated (a fan-only capability seen in one frame only). One
+  //    reply with bit 6 or 7 lost in both state bytes is a valid frame naming
+  //    a different capability; it must not re-teach a known band (issue #46).
+  // A fresh unit that mis-learns from weak evidence is corrected by the fan's
+  // next corroborated report. The cost: a known capability is never lowered
+  // to Two by observation — swapping in a 2-speed fan under the same sender
+  // ID needs Forget + Learn.
   if (accepted.capability != SpeedCapability::Unknown &&
       (accepted.capability_evidence == CapabilityEvidence::Unambiguous ||
        !confirmed_capability_))

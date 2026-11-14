@@ -22,6 +22,14 @@ and this project adheres to
   receive context: it can teach a fan whose band is still unknown, but never
   lower one already known. Swapping in a 2-speed fan under the same remote ID
   therefore needs Forget + Learn.
+- A single corrupted fan reply could re-teach the speed capability (#46).
+  Matching state bytes are the protocol's only integrity check, and a reply
+  with bit 6 or 7 lost in both bytes is a valid frame naming a different
+  capability; one such frame completing a consensus was enough to store it.
+  A fan-reported capability must now be carried by at least two independent
+  frames of a consensus, and outnumber any other, before it can change a
+  capability that is already known. A single frame still teaches a fan whose
+  band is unknown.
 
 ### Changed
 
