@@ -154,7 +154,19 @@ enum class EvidenceConfidence : std::uint8_t { ExactBackedConsensus, RecoveredOn
 // remote; issue #31 closed only the own-echo case). So CommandShaped evidence
 // is used, but only to fill an empty slot — never in preference to a frame
 // that could not have been a command.
-enum class CapabilityEvidence : std::uint8_t { Unambiguous, CommandShaped };
+//
+// A fan-only capability still needs CORROBORATION before it may change a
+// known one (issue #46 follow-up). The protocol's only integrity check is
+// that the two state bytes match, and field logs show link corruption that
+// hits both identically; a single reply with bit 6 or 7 lost reads as a
+// different, perfectly valid capability. So a capability carried by just one
+// frame of a consensus — or contested by another fan-only value in the same
+// consensus — is Uncorroborated and, like CommandShaped, may only fill an
+// empty slot. Unambiguous now means: at least two independent frames of the
+// consensus carried this fan-only capability and they outnumber any other.
+enum class CapabilityEvidence : std::uint8_t {
+  Unambiguous, Uncorroborated, CommandShaped
+};
 enum class AuthorityLossReason : std::uint8_t {
   Boot, Unprovisioned, LocalCommandPending, ManualRevalidationPending,
   ExactOemQuery, ExternalStateTraffic, AmbiguousOemYield, ContradictoryTail,

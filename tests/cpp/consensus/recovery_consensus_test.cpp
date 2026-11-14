@@ -77,7 +77,10 @@ QC_TEST("consensus", "one exact plus an independent match reaches consensus") {
   QC_CHECK_EQ(consensus->state.raw_byte(), 0xDF);
   QC_CHECK_EQ(consensus->confidence, EvidenceConfidence::ExactBackedConsensus);
   QC_CHECK_EQ(consensus->independent_candidates, 2);
-  QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
+  // The two frames agree on the STATE (same canonical byte) but name different
+  // fan-only capabilities, one vote each. This used to report the later
+  // frame's; a split is now no capability at all (issue #46 follow-up).
+  QC_CHECK_EQ(consensus->capability, SpeedCapability::Unknown);
 }
 
 QC_TEST("consensus", "recovered-only consensus requires three independent candidates") {
@@ -139,15 +142,16 @@ QC_TEST("consensus", "a command-shaped candidate still teaches the band") {
 // joins the very same group. Its Three must beat the command's aliased Two
 // whichever frame lands first — otherwise arrival order decides the fan's
 // band.
-QC_TEST("consensus", "unambiguous capability outranks a command alias in both orders") {
+QC_TEST("consensus", "a fan-only capability outranks a command alias in both orders") {
   {
     ConsensusTracker tracker;  // command first, genuine second
     tracker.observe(response(0xCB, 0xAF), 100);
     const auto consensus = tracker.observe(response(0xCB, 0xEF), 160);
     QC_CHECK(consensus.has_value());
     QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
+    // One fan frame names the band but is not corroboration (issue #46).
     QC_CHECK_EQ(consensus->capability_evidence,
-                CapabilityEvidence::Unambiguous);
+                CapabilityEvidence::Uncorroborated);
   }
   {
     ConsensusTracker tracker;  // genuine first, command second
@@ -155,8 +159,9 @@ QC_TEST("consensus", "unambiguous capability outranks a command alias in both or
     const auto consensus = tracker.observe(response(0xCB, 0xAF), 160);
     QC_CHECK(consensus.has_value());
     QC_CHECK_EQ(consensus->capability, SpeedCapability::Three);
+    // One fan frame names the band but is not corroboration (issue #46).
     QC_CHECK_EQ(consensus->capability_evidence,
-                CapabilityEvidence::Unambiguous);
+                CapabilityEvidence::Uncorroborated);
   }
 }
 
@@ -193,6 +198,57 @@ QC_TEST("consensus", "special responses do not participate or reset") {
   QC_CHECK(tracker.observe(response(0xCB, 0x1F), 60).has_value());
   tracker.reset();
   QC_CHECK(!tracker.snapshot().has_group);
+}
+
+}  // namespace
+}  // namespace quietcool
+
+namespace quietcool {
+namespace {
+
+// Issue #46 follow-up: matching state bytes are the protocol's only integrity
+// check, and the reporter's link was logged corrupting both alike. A reply
+// with bit 6 lost (0xDF -> 0x9F) or bit 7 lost (0xDF -> 0x5F) is a valid frame
+// with the same canonical byte and a different capability. One such frame must
+// not be able to name the band of a consensus it merely completes.
+QC_TEST("consensus", "one corrupted reply cannot carry a corroborated capability") {
+  struct Case { std::array<std::uint8_t, 3> bytes; std::size_t size;
+                SpeedCapability capability; CapabilityEvidence evidence; };
+  const std::array<Case, 7> cases{{
+      // Clean replies: corroborated.
+      {{{0xDF, 0xDF, 0}}, 2, SpeedCapability::Three, CapabilityEvidence::Unambiguous},
+      {{{0x5F, 0x5F, 0}}, 2, SpeedCapability::One, CapabilityEvidence::Unambiguous},
+      // Bit 6 lost on either frame: the surviving Three stands, uncorroborated.
+      {{{0xDF, 0x9F, 0}}, 2, SpeedCapability::Three, CapabilityEvidence::Uncorroborated},
+      {{{0x9F, 0xDF, 0}}, 2, SpeedCapability::Three, CapabilityEvidence::Uncorroborated},
+      // Bit 7 lost on either frame: one vote each, so no capability at all.
+      {{{0xDF, 0x5F, 0}}, 2, SpeedCapability::Unknown, CapabilityEvidence::Uncorroborated},
+      {{{0x5F, 0xDF, 0}}, 2, SpeedCapability::Unknown, CapabilityEvidence::Uncorroborated},
+      // No capability metadata and one fan frame (a remote press, then a reply).
+      {{{0x1F, 0xDF, 0}}, 2, SpeedCapability::Three, CapabilityEvidence::Uncorroborated},
+  }};
+  for (const auto& c : cases) {
+    ConsensusTracker tracker;
+    std::optional<Consensus> consensus;
+    for (std::size_t i = 0; i < c.size; ++i)
+      consensus = tracker.observe(response(0xCB, c.bytes[i]),
+                                  100 + 60 * static_cast<MonotonicMs>(i));
+    QC_CHECK(consensus.has_value());
+    QC_CHECK_EQ(consensus->capability, c.capability);
+    QC_CHECK_EQ(consensus->capability_evidence, c.evidence);
+  }
+}
+
+// A same-burst repeat is not a second witness: it neither counts toward the
+// consensus nor casts a capability vote.
+QC_TEST("consensus", "same-burst repeats do not corroborate a capability") {
+  ConsensusTracker tracker;
+  tracker.observe(response(0xCB, 0x1F), 100);
+  QC_CHECK(!tracker.observe(response(0xCB, 0x5F), 110).has_value());
+  QC_CHECK(!tracker.observe(response(0xCB, 0x5F), 120).has_value());
+  const auto consensus = tracker.observe(response(0xCB, 0x1F), 180);
+  QC_CHECK(consensus.has_value());
+  QC_CHECK_EQ(consensus->capability, SpeedCapability::Unknown);
 }
 
 }  // namespace

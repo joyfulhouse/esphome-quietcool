@@ -31,12 +31,17 @@ class ConsensusTracker final {
   // A candidate carrying marker bits 10 may be a command — the bridge's own
   // echo or the paired OEM remote's — rather than a 2-speed fan's report, so
   // it is ranked CapabilityEvidence::CommandShaped in EVERY receive context
-  // (issue #46: ranking only frames that matched our own in-flight byte left
-  // the wall remote's commands at full weight). It still groups, counts and
-  // confirms — a genuine 2-speed fan's confirmation is byte-identical, and
-  // both semantic confirmation and 2-speed band learning depend on it — but
-  // within a group any Unambiguous capability outranks it, so a 3-speed fan's
-  // own report in the same window wins (issue #31 review).
+  // (issue #46). It still groups, counts and confirms — a genuine 2-speed
+  // fan's confirmation is byte-identical, and both semantic confirmation and
+  // 2-speed band learning depend on it — but within a group any fan-only
+  // capability outranks it, so a 3-speed fan's own report in the same window
+  // wins (issue #31 review).
+  //
+  // Fan-only capabilities (bit 6 set: One, Three) are VOTED: each independent
+  // candidate casts one vote, and the consensus reports the value only as
+  // Unambiguous when it holds at least two votes and a strict majority. One
+  // vote is Uncorroborated; a tie is no capability at all. A single corrupted
+  // reply therefore cannot re-teach a known band (issue #46 follow-up).
   std::optional<Consensus> observe(const RecoveredResponse& candidate,
                                    MonotonicMs now_ms);
   void reset();
@@ -44,12 +49,20 @@ class ConsensusTracker final {
  private:
   struct Group final {
     FanState state;
-    SpeedCapability capability;
-    CapabilityEvidence capability_evidence;
+    std::uint8_t one_votes;
+    std::uint8_t three_votes;
+    bool command_shaped;
     std::uint8_t count;
     bool has_exact;
     MonotonicMs last_ms;
   };
+  struct Verdict final {
+    SpeedCapability capability;
+    CapabilityEvidence evidence;
+  };
+  static Group open_group(const RecoveredResponse& candidate, MonotonicMs now_ms);
+  static void vote(Group& group, const FanState& state);
+  static Verdict verdict(const Group& group);
   std::optional<Group> group_;
 };
 
