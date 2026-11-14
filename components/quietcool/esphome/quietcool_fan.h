@@ -7,6 +7,8 @@
 #include "esphome/components/fan/fan.h"
 #include "esphome/core/component.h"
 
+#include <optional>
+
 namespace esphome::quietcool {
 
 class QuietCoolFan final : public Component,
@@ -19,6 +21,7 @@ class QuietCoolFan final : public Component,
   }
 
   void setup() override;
+  void loop() override;
   void dump_config() override;
   fan::FanTraits get_traits() override;
   void publish_authority(
@@ -36,6 +39,9 @@ class QuietCoolFan final : public Component,
   // is mapped against — from drifting apart, and keeps the listed band from
   // widening under a connection that cannot be re-listed (issue #31 review).
   FanSpeedBands bands_;
+  // The state behind the last published level, kept so the level can be
+  // re-derived when relist() widens the band it was published inside.
+  std::optional<::quietcool::FanState> published_state_;
 };
 
 }  // namespace esphome::quietcool

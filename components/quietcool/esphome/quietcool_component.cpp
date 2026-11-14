@@ -366,8 +366,7 @@ void QuietCoolComponent::apply_effect(
           std::get_if<::quietcool::RequestTxBurst>(&effect)) {
     const auto accept_result = burst_.accept(request->request);
     // Last TX Command: LATCHED here for a real state command (never a query
-    // burst — the same restriction confirmation_reducer.cpp applies to the
-    // capability echo guard's own_outbound_byte), but PUBLISHED only at
+    // burst), but PUBLISHED only at
     // BurstComplete. Publishing at acceptance claimed a transmission that a
     // radio fault could still prevent, so the diagnostic could name a byte
     // that never went on air while TX Count stayed flat (round 1, codex).

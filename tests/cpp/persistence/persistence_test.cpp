@@ -497,17 +497,19 @@ QC_TEST("persistence", "the press after a two-speed confirmation never transmits
 }
 
 // A query window is opened by a 0x66 burst, so nothing heard in it can be an
-// echo of one of our state frames — even though the command transaction that
-// scheduled the fallback query is still live. Keying the echo filter on "a
-// transaction exists" instead of "we are in the post-command window" would
-// rank this reply as a possible echo, and a possible echo cannot correct an
-// already-stored capability: the wrong band would survive the very query sent
-// to resolve it (issue #31 review).
-QC_TEST("persistence", "a fallback query reply outranks a stored capability") {
+// echo of one of our state frames — but it can still be a command from the
+// paired OEM remote, which transmits under our sender ID and whose marker bits
+// 10 alias capability Two (issue #46). No window can rule that out, so a
+// command-shaped reply confirms STATE here and leaves a stored capability
+// alone. This reverses the issue #31 review decision that a query reply may
+// lower a stored Three: that path was the one a wall-remote press used to take
+// a 3-speed fan down to two speeds. A stored capability that really is wrong
+// (a different fan under the same remote ID) is corrected by Forget + Learn.
+QC_TEST("persistence", "a command-shaped query reply cannot lower a stored capability") {
   ConfirmationCore core(CoreConfig{59});
   RestorableState restored;
   restored.sender = persistence_sender();
-  restored.speed_capability = SpeedCapability::Three;  // stale/wrong record
+  restored.speed_capability = SpeedCapability::Three;
   core.restore(restored, 0);
 
   core.request_state(FanState::command(Speed::Low, Duration::Continuous), 0);
@@ -528,7 +530,8 @@ QC_TEST("persistence", "a fallback query reply outranks a stored capability") {
   core.on_tx_started(query->token, 400 + kResponseTailEndMs + 2);
   core.on_tx_complete(query->token, 400 + kResponseTailEndMs + 102);
 
-  // The 2-speed fan answers with the same byte our command carried.
+  // A command-shaped frame carrying the byte our command did: a 2-speed fan's
+  // reply and a remote's LOW press are indistinguishable.
   const auto reply = report_frame(0x9F);
   const MonotonicMs anchor = 400 + kResponseTailEndMs + 102;
   core.on_frame(ByteView(reply.bytes), anchor + kDirectQueryAcceptStartMs + 1);
@@ -537,10 +540,12 @@ QC_TEST("persistence", "a fallback query reply outranks a stored capability") {
       anchor + kDirectQueryAcceptStartMs + 1 + kMinIndependentCandidateGapMs);
   const auto save =
       persistence_request(effects, PersistenceKind::SaveSpeedCapability);
-  QC_CHECK(save.has_value());
-  QC_CHECK_EQ(save->speed_capability.value(), SpeedCapability::Two);
-  QC_CHECK_EQ(core.snapshot(anchor + 1000).authority.speed_capability.value(),
-              SpeedCapability::Two);
+  QC_CHECK(!save.has_value());
+  const auto after = core.snapshot(anchor + 1000);
+  QC_CHECK_EQ(after.authority.speed_capability.value(), SpeedCapability::Three);
+  // The state itself is still confirmed: only the capability is withheld.
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(
+      after.authority.state));
 }
 
 // Issue #31 review: the worst-case CONFIRMING-PROMOTE reduction emits four

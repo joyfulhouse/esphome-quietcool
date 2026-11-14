@@ -94,9 +94,9 @@ using TimerAuthority = std::variant<UnknownTimerAuthority,
 struct AcceptedObservation final {
   FanState state;
   SpeedCapability capability;
-  // Rank of `capability` (issue #31 review). PossiblyOwnEcho may only FILL an
-  // empty sticky slot; it may never overwrite a capability already learned
-  // from a frame that could not have been our own transmission.
+  // Rank of `capability` (issue #31 review, issue #46). CommandShaped may only
+  // FILL an empty sticky slot; it may never overwrite a capability already
+  // learned.
   CapabilityEvidence capability_evidence;
   EvidenceSource source;
   EvidenceConfidence confidence;

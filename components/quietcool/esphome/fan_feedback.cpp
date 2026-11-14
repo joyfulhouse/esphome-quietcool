@@ -76,10 +76,9 @@ void FanSpeedBands::observe(
   // The latch, and the only band state that is not a pure function of the
   // current capability: the entity band may narrow but never widen, because
   // Home Assistant cached it at ListEntities and cannot be told otherwise
-  // within the connection. Deliberately conservative — an API reconnect would
-  // in principle re-list, but nothing down here can observe one, so the latch
-  // is released only by a reboot, which constructs a fresh object. See the
-  // header.
+  // within the connection. Nothing in here can observe a connection, so the
+  // latch is released from outside — relist(), or a reboot. See the header.
+  capability_ = capability;
   const std::uint8_t entity = entity_speed_count(capability);
   if (entity < entity_) entity_ = entity;
   // Bounded by the latched entity band, never latched itself: an absent
@@ -88,6 +87,17 @@ void FanSpeedBands::observe(
   // Home Assistant is actually working in.
   const std::uint8_t command = command_speed_count(capability);
   command_ = command < entity_ ? command : entity_;
+}
+
+bool FanSpeedBands::relist() {
+  // Both bands become pure functions of the last observed capability again.
+  // Narrowing is already applied eagerly by observe(), so the only change this
+  // can make is a widening — the one move that needs the caller's guarantee
+  // that no listing of the old band is still held (issue #46).
+  const std::uint8_t before = entity_;
+  entity_ = entity_speed_count(capability_);
+  command_ = command_speed_count(capability_);
+  return entity_ != before;
 }
 
 }  // namespace esphome::quietcool

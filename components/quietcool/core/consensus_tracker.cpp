@@ -10,22 +10,21 @@ SpeedCapability capability_of(const FanState& state) {
 }  // namespace
 
 std::optional<Consensus> ConsensusTracker::observe(
-    const RecoveredResponse& candidate, MonotonicMs now_ms,
-    std::optional<std::uint8_t> own_outbound_byte) {
+    const RecoveredResponse& candidate, MonotonicMs now_ms) {
   if (candidate.kind == ResponseKind::Special) return std::nullopt;
   const auto capability = capability_of(candidate.state);
-  // A frame byte-identical to the state frame this epoch transmitted may be
-  // our own echo, whose outbound marker bits (10) alias SpeedCapability::Two.
-  // It is RANKED, not discarded: a 2-speed fan's confirming report is
-  // byte-identical to the command by construction, so discarding it would make
-  // capability Two unlearnable on the command path altogether — and outside a
-  // response window a report classifies as ExternalPriorityState, which
-  // invalidates authority rather than promoting it, so there is no other
-  // learning path for an unsolicited report either (issue #31 review).
-  const auto evidence =
-      own_outbound_byte && candidate.state.raw_byte() == *own_outbound_byte
-          ? CapabilityEvidence::PossiblyOwnEcho
-          : CapabilityEvidence::Unambiguous;
+  // Marker bits 10 alias SpeedCapability::Two, and they are what every command
+  // frame carries: our own echo, and the paired OEM remote's bursts, which use
+  // the sender ID we are bound to and are heard in passive observation and in
+  // the recovery-query windows the remote's own activity arms (issue #46).
+  // Such a frame is RANKED, not discarded: a 2-speed fan's report is
+  // byte-identical to a command by construction, so discarding it would make
+  // capability Two unlearnable altogether (issue #31 review). The rank is a
+  // property of the frame's shape, not of the window it was heard in — the
+  // window can rule out our own echo, never the remote.
+  const auto evidence = candidate.state.has_outbound_command_marker()
+                            ? CapabilityEvidence::CommandShaped
+                            : CapabilityEvidence::Unambiguous;
   if (!group_) {
     group_ = Group{candidate.state, capability, evidence, 1,
                    candidate.quality == RecoveryQuality::Exact, now_ms};
@@ -39,8 +38,8 @@ std::optional<Consensus> ConsensusTracker::observe(
     return std::nullopt;
   }
   group_->state = candidate.state;
-  // Precedence inside the group: an Unambiguous capability always wins, an
-  // echo-indistinguishable one only fills a gap. A 3-speed fan answers our
+  // Precedence inside the group: an Unambiguous capability always wins, a
+  // command-shaped one only fills a gap. A 3-speed fan answers our
   // 0xAF command with 0xEF — a different raw byte but the same canonical byte,
   // so it joins this very group — and its Three must beat the echo's aliased
   // Two whichever of the two frames arrives first.

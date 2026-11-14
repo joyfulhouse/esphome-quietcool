@@ -28,19 +28,17 @@ struct ConsensusSnapshot final {
 class ConsensusTracker final {
  public:
   ConsensusTracker() = default;
-  // `own_outbound_byte` is the raw byte of the state frame this epoch's burst
-  // actually transmitted, supplied ONLY in a post-command window — the only
-  // window a state frame of ours opens. A candidate matching it may be the
-  // bridge's own echo (echoes are a documented field phenomenon here) and an
-  // echo's marker bits (10) alias SpeedCapability::Two, so such a candidate is
-  // ranked CapabilityEvidence::PossiblyOwnEcho. It still groups, counts and
-  // confirms — a genuine 2-speed fan's confirmation is byte-identical to the
-  // echo, and both semantic confirmation and 2-speed band learning depend on
-  // it — but within a group any Unambiguous capability outranks it, so a
-  // 3-speed fan's own report in the same window wins (issue #31 review).
-  std::optional<Consensus> observe(
-      const RecoveredResponse& candidate, MonotonicMs now_ms,
-      std::optional<std::uint8_t> own_outbound_byte = std::nullopt);
+  // A candidate carrying marker bits 10 may be a command — the bridge's own
+  // echo or the paired OEM remote's — rather than a 2-speed fan's report, so
+  // it is ranked CapabilityEvidence::CommandShaped in EVERY receive context
+  // (issue #46: ranking only frames that matched our own in-flight byte left
+  // the wall remote's commands at full weight). It still groups, counts and
+  // confirms — a genuine 2-speed fan's confirmation is byte-identical, and
+  // both semantic confirmation and 2-speed band learning depend on it — but
+  // within a group any Unambiguous capability outranks it, so a 3-speed fan's
+  // own report in the same window wins (issue #31 review).
+  std::optional<Consensus> observe(const RecoveredResponse& candidate,
+                                   MonotonicMs now_ms);
   void reset();
   ConsensusSnapshot snapshot() const;
  private:

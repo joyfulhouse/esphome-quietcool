@@ -323,8 +323,7 @@ class QuietCoolComponent final : public Component {
   std::optional<::quietcool::SenderId> provisioned_sender_;
   // Restored diagnostics (Task 4). Last TX Command is published only for
   // TxReason::TransactionCommand (never a query burst) at the same
-  // RequestTxBurst acceptance site that feeds the capability echo guard
-  // (issue #31) — see confirmation_reducer.cpp's own_outbound_byte. Last
+  // RequestTxBurst acceptance site. Last
   // Valid RX Frame is published alongside rx_valid_count_. Neither byte is
   // latched as state here: each is read directly off the effect/packet that
   // is already in hand at its one publication site.

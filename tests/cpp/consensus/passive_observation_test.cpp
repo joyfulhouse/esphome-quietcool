@@ -760,5 +760,40 @@ QC_TEST("passive_observation",
   QC_CHECK_EQ(confirmed->state.raw_byte(), std::uint8_t(0xD1));
 }
 
+// Issue #46: the paired wall remote's command frames carry the handheld marker
+// bits 10, which is also the encoding of SpeedCapability::Two, and they are
+// sent under the very sender ID the bridge is bound to. Two remote bursts heard
+// while Idle used to promote with a full-weight Two, demoting a fan already
+// proven to have three speeds; the entity band latched at 2 until a reboot even
+// though the fan's next real report healed the sticky capability back to Three.
+QC_TEST("passive_observation",
+        "remote command bursts cannot demote a known three-speed fan") {
+  ConfirmationCore core(CoreConfig{23});
+  RestorableState restored;
+  restored.sender = passive_sender();
+  restored.speed_capability = SpeedCapability::Three;
+  core.restore(restored, 0);
+
+  passive_consensus(core, 0xBF, 1000);
+  const auto authority = published(
+      passive_consensus(core, 0xBF, 1060 + kPassiveReplyAcceptStartMs));
+  QC_CHECK(authority.has_value());
+  QC_CHECK(std::holds_alternative<ConfirmedStateAuthority>(authority->state));
+  QC_CHECK_EQ(authority->speed_capability.value(), SpeedCapability::Three);
+}
+
+// ...while a fan whose band is still unknown may learn Two from the same
+// frames: a genuine 2-speed fan's report is byte-identical to a command, so
+// this is the only way its band is ever learned from passive traffic.
+QC_TEST("passive_observation",
+        "command-shaped bursts still teach an unknown band") {
+  auto core = passive_core();
+  passive_consensus(core, 0xBF, 1000);
+  const auto authority = published(
+      passive_consensus(core, 0xBF, 1060 + kPassiveReplyAcceptStartMs));
+  QC_CHECK(authority.has_value());
+  QC_CHECK_EQ(authority->speed_capability.value(), SpeedCapability::Two);
+}
+
 }  // namespace
 }  // namespace quietcool
