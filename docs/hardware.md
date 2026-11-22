@@ -19,6 +19,10 @@ sync `2D D4`, variable length) via ESPHome's `sx126x` component, and it compiles
 It is **not yet verified on hardware** — confirm these on first bring-up (all
 flagged inline in the YAML as `PIN CONFIDENCE`):
 
+To run that bring-up and report results, follow
+[v3-bringup.md](v3-bringup.md) with the flashable
+[`quietcool-cpp-lora-v3-bringup.yaml`](../quietcool-cpp-lora-v3-bringup.yaml).
+
 | Item | Assumption | Confidence |
 | --- | --- | --- |
 | Radio pins (CS 8, BUSY 13, DIO1 14, RST 12, SPI 9/10/11) | ESPHome catalog + community | High |
