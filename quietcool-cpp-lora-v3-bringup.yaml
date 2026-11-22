@@ -44,6 +44,19 @@ esphome:
   name: ${device_name}
   friendly_name: ${device_friendly_name}
   min_version: 2026.7.0
+  # Vext must be on BEFORE the I2C bus sets up and scans. i2c runs at
+  # setup_priority::BUS (1000) but the vext_power gpio switch only at
+  # HARDWARE (800), so without this the scan always ran against an
+  # unpowered OLED ("SCL is held low", "Found no devices"). Priority 1100
+  # runs first; the vext_power switch below then keeps the pin low.
+  on_boot:
+    - priority: 1100
+      then:
+        - lambda: |-
+            gpio_reset_pin(GPIO_NUM_36);
+            gpio_set_direction(GPIO_NUM_36, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_36, 0);  // Vext is active-low
+            delay(50);  // let the OLED rail settle
 
 esp32:
   board: heltec_wifi_lora_32_V3
