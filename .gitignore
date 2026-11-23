@@ -20,3 +20,6 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# V3 bring-up evidence (docs/v3-bringup.md); attach to the issue, do not commit
+bringup-logs/
