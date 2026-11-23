@@ -57,6 +57,17 @@ esphome:
             gpio_set_direction(GPIO_NUM_36, GPIO_MODE_OUTPUT);
             gpio_set_level(GPIO_NUM_36, 0);  // Vext is active-low
             delay(50);  // let the OLED rail settle
+            // After a cold power-on the SSD1306 sits in reset (RST = GPIO21)
+            // until the ssd1306 component pulses it at its own, later setup,
+            // so the BUS-priority I2C scan got no ACK at 0x3C ("Found no
+            // devices") even though the display then worked. Pulse RST here
+            // and leave it high so the controller answers the scan.
+            gpio_reset_pin(GPIO_NUM_21);
+            gpio_set_direction(GPIO_NUM_21, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_21, 0);
+            delay(10);
+            gpio_set_level(GPIO_NUM_21, 1);
+            delay(10);  // SSD1306 needs ~3 us after RST; 10 ms is generous
 
 esp32:
   board: heltec_wifi_lora_32_V3
